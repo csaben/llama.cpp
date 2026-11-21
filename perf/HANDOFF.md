@@ -15,14 +15,22 @@ Raw outputs go to `perf/p5/`. Reference checkout (MIT): `git clone https://githu
 - Model facts: n_head 24, n_head_kv 8 (G = 3), head dim 128, n_rel 16, extent 1024, SWA window 1024; full-attention
   layers are visited 8 times per token; SWA cache is separate (hybrid iSWA memory), KV rotation is off for this arch.
 
+- **Tensor-core scan landed** (commit "inkling_attn: tensor-core (mma.sync) scan...", tag `p5-mma-attn-d32k-164tok`).
+  `IK_ATTN_MMA=0` turns it off; `IK_ATTN_MMA_SPLITS` (10) / `IK_ATTN_MMA_SPW` (1) / `IK_ATTN_MMA_MIN` (1) tune it.
+  2-bit model, Q8_0 KV, depth 0 / 1024 / 4096 / 16384 / 32768: 209.56 / 199.88 / 192.47 / 179.74 / 164.01 tok/s
+  (before: 209.47 / 191.8 / 168.69 / 148.92 / 131.17). Sweep: splits 5/20/40 and spw 2/4 are all worse than 10/1.
+  Kernel uses 181 registers => 1 block per SM, so 80 blocks is one wave.
+  Checks: `test-backend-ops -o INKLING_ATTN` 16/16; decode PPL (2x1024, -ub 1) 4.2036 vs 4.2080 with the scan off;
+  827-token mixed-prefill probe identical to scan-off and to the unfused reference; greedy gen2 identical, gen1/gen3
+  diverge at near-ties (top-2 margins 0.068 and 0.040, `perf/margin_probe.py`).
+  16K->32K now costs 0.53 ms for 285 MB = 535 GB/s (was 313).
+
 ### In flight
-- Workstream 1: tensor-core (mma.sync m16n8k16) scan inside `inkling_attn2_kernel` reading the existing Q8_0 cache
-  (int8 -> FP16 exact in registers, per-block scales applied in FP32 on the K side and folded into P on the V side,
-  Q and P passed as two FP16 limbs so the result equals FP32 math up to summation order). No cache-format change, so
-  no prefill/decode basis risk. Target: ~700+ GB/s on the scan => ~170 tok/s at 32K, ~183 at 16K.
+- Scan tuning: issue the next step's loads before computing the current one (registers are free up to 255), fewer
+  redundant scale-word loads. Then opt-in lower-bit KV.
 
 ### Next
-1. Finish + test (`build/bin/test-backend-ops -o INKLING_ATTN -b CUDA0` with `CUDA_VISIBLE_DEVICES=1`), tune splits.
-2. Opt-in lower-bit KV (Q4_0 / FP8) with its own PPL rows.
-3. Workstream 2 (grouped-expert DSpark verify), workstream 3 (prefill).
-4. Final tables in RESULTS.md, `bash perf/live/restore-live.sh`.
+1. Opt-in lower-bit KV (Q4_0 / FP8) with its own PPL rows.
+2. Workstream 2 (grouped-expert DSpark verify), workstream 3 (prefill).
+3. Final tables in RESULTS.md (decode d0/4K/16K/32K, prefill 512/4096/16384, served short + long, PPL, spec), then
+   `bash perf/live/restore-live.sh`.

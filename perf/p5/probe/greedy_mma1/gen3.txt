@@ -1,0 +1,13 @@
+Explain step by step how TCP slow start and congestion avoidance work.
+
+TCP slow start and congestion avoidance are two mechanisms used by TCP to manage the flow of data and prevent network congestion. Here's a step-by-step explanation of how they work:
+
+1. Slow Start:
+- When a TCP connection is established, the sender starts with a small amount of data in flight, known as the initial congestion window (cwnd).
+- The sender sends a small number of packets, and as each packet is acknowledged, the cwnd is increased exponentially.
+- This allows the sender to gradually increase the amount of data in flight, avoiding overwhelming the network with a large burst of data.
+
+2. Congestion Avoidance:
+- As the sender increases the cwnd, it enters the congestion avoidance phase.
+- In this phase, the sender increases the cwnd linearly, rather than exponentially, to avoid congestion.
+- The sender monitors the network's response to the data
