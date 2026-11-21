@@ -13,6 +13,47 @@
 #include "inkling-common.cuh"
 #include "vecdotq.cuh"
 
+// Each output row belongs to one of the three input groups. The exclusive
+// attention consumer reads only that column of the ordinary matmul result.
+static __global__ void ik_segmented_iq4(const block_iq4_nl * weights, const block_q8_1 * x, float * out,
+        int rows, int q_rows, int k_rows) {
+    constexpr int blocks = 2304 / QK4_NL;
+    constexpr int lanes = QI4_NL / VDR_IQ4_NL_Q8_1_MMVQ;
+    const int row = blockIdx.x*blockDim.y + threadIdx.y;
+    if (row >= rows) {
+        return;
+    }
+    const int col = row < q_rows ? 0 : row < q_rows + k_rows ? 1 : 2;
+    // One warp computes a row. Keep the four partial sums of Ampere's ordinary
+    // three-column MMVQ in registers so the final additions follow the same order.
+    constexpr int stride = WARP_SIZE/lanes;
+    float partial[4] = {};
+#pragma unroll
+    for (int base = 0; base < blocks; base += 4*stride) {
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            const int k = base + w*stride + threadIdx.x/lanes;
+            if (k < blocks) {
+                partial[w] += vec_dot_iq4_nl_q8_1(weights, x + col*blocks + k, row*blocks + k,
+                        (threadIdx.x % lanes)*VDR_IQ4_NL_Q8_1_MMVQ);
+            }
+        }
+    }
+    const float sum = warp_reduce_sum(((partial[0] + partial[1]) + partial[2]) + partial[3]);
+    if (threadIdx.x == (row % 2)) {
+        out[col*rows + row] = sum;
+    }
+}
+
+void ggml_cuda_inkling_segmented_iq4(ggml_backend_cuda_context & ctx, ggml_tensor * projection, const ggml_tensor * attn) {
+    const int rows = projection->ne[0];
+    const int q_rows = ggml_get_op_params_i32(attn, 0) *
+            (2*ggml_get_op_params_i32(attn, 2) + ggml_get_op_params_i32(attn, 3) + 1);
+    ik_segmented_iq4<<<(rows + 3)/4, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
+            (const block_iq4_nl *) projection->src[0]->data, (const block_q8_1 *) projection->src[1]->data,
+            (float *) projection->data, rows, q_rows, (rows - q_rows)/2);
+}
+
 #define IK_FMV_BLOCK      128
 #define IK_FMV_WARPS      (IK_FMV_BLOCK/WARP_SIZE)
 #ifndef IK_FMV_MIN_BLOCKS

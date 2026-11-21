@@ -5143,11 +5143,12 @@ struct test_inkling_attn : public test_case {
     const bool    with_pos;
     const ggml_type type_kv;
     const ggml_type out_type;
+    const bool project_iq4;
 
     static constexpr int64_t hd = 128, n_rel = 16, n_conv = 4, n_cells = 3, write_cell = 1;
 
     std::string vars() override {
-        return VARS_TO_STR9(n_head, n_head_kv, n_kv, n_extent, has_taps, three_cols, with_pos, type_kv, out_type);
+        return VARS_TO_STR9(n_head, n_head_kv, n_kv, n_extent, has_taps, three_cols, with_pos, type_kv, out_type) + (project_iq4 ? ",project_iq4=1" : "");
     }
 
     double max_nmse_err() override {
@@ -5155,9 +5156,9 @@ struct test_inkling_attn : public test_case {
     }
 
     test_inkling_attn(int64_t n_head = 6, int64_t n_head_kv = 2, int64_t n_kv = 64, int64_t n_extent = 1024, bool has_taps = false,
-            bool three_cols = false, bool with_pos = false, ggml_type type_kv = GGML_TYPE_F16, ggml_type out_type = GGML_TYPE_F32)
+            bool three_cols = false, bool with_pos = false, ggml_type type_kv = GGML_TYPE_F16, ggml_type out_type = GGML_TYPE_F32, bool project_iq4 = false)
         : n_head(n_head), n_head_kv(n_head_kv), n_kv(n_kv), n_extent(n_extent), has_taps(has_taps), three_cols(three_cols),
-          with_pos(with_pos), type_kv(type_kv), out_type(out_type) {}
+          with_pos(with_pos), type_kv(type_kv), out_type(out_type), project_iq4(project_iq4) {}
 
     int64_t kv_idx_val = 0;
 
@@ -5206,7 +5207,17 @@ struct test_inkling_attn : public test_case {
         const int64_t n_chan  = 2*n_kv_ch + 300; // the state also holds other channels
         const int64_t kv_size = n_kv + 7;
 
-        ggml_tensor * proj = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_proj, three_cols ? 3 : 1);
+        ggml_tensor * proj;
+        if (project_iq4) {
+            GGML_ASSERT(three_cols);
+            ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2304, 3);
+            ggml_tensor * norm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2304);
+            ggml_tensor * xq = ggml_res_mix_norm(ctx, nullptr, &x, 1, 1e-6f, 1.0f, norm, 1e-6f, GGML_TYPE_Q8_1);
+            ggml_tensor * weights = ggml_new_tensor_2d(ctx, GGML_TYPE_IQ4_NL, 2304, n_proj);
+            proj = ggml_mul_mat(ctx, weights, xq);
+        } else {
+            proj = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_proj, three_cols ? 3 : 1);
+        }
         ggml_set_name(proj, "proj");
         ggml_tensor * consts = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hd*n_head + n_rel*n_head + 2*n_conv*n_kv_ch + n_rel*n_extent);
         ggml_set_name(consts, "consts");
@@ -12753,6 +12764,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_inkling_moe(type, 1056, 96, 5, 3, true));
     }
     for (ggml_type type_kv : {GGML_TYPE_F16, GGML_TYPE_Q8_0}) {
+        test_cases.emplace_back(new test_inkling_attn(3, 1, 64, 128, true, true, true, type_kv, GGML_TYPE_F32, true));
         test_cases.emplace_back(new test_inkling_attn(6, 2, 64, 1024, false, false, false, type_kv, GGML_TYPE_F32));
         test_cases.emplace_back(new test_inkling_attn(6, 2, 64, 1024, true, true, true, type_kv, GGML_TYPE_F32));
         test_cases.emplace_back(new test_inkling_attn(24, 8, 256, 1024, false, false, false, type_kv, GGML_TYPE_Q8_1));
