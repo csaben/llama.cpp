@@ -5133,6 +5133,7 @@ struct test_shortconv_res : public test_case {
 
 // GGML_OP_INKLING_ATTN
 struct test_inkling_attn : public test_case {
+    std::string op_desc(ggml_tensor *) override { return "INKLING_ATTN"; }
     const int64_t n_head;
     const int64_t n_head_kv;
     const int64_t n_kv;
@@ -5481,6 +5482,7 @@ struct test_inkling_proj : public test_case {
 
 // GGML_OP_INKLING_ROUTER
 struct test_inkling_router : public test_case {
+    std::string op_desc(ggml_tensor *) override { return "INKLING_ROUTER"; }
     const int64_t n_embd;
     const int n_states; // 0: no mix (norm of one state)
     const int n_expert;
@@ -5498,11 +5500,10 @@ struct test_inkling_router : public test_case {
         : n_embd(n_embd), n_states(n_states), n_expert(n_expert), n_used(n_used), with_bias(with_bias), with_conv(with_conv) {}
 
     void initialize_tensors(ggml_context * ctx) override {
-        std::random_device rd;
-        std::default_random_engine rng(rd());
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
             if (std::string(t->name) == "rs_ids") {
-                int32_t v = rng() % n_cells;
+                // Cover both in-place decode and a copy to another cell.
+                int32_t v = n_states == 5 ? (write_cell + 1) % n_cells : write_cell;
                 ggml_backend_tensor_set(t, &v, 0, sizeof(v));
             } else {
                 init_tensor_uniform(t);
@@ -12756,6 +12757,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_inkling_attn(6, 2, 64, 1024, true, true, true, type_kv, GGML_TYPE_F32));
         test_cases.emplace_back(new test_inkling_attn(24, 8, 256, 1024, false, false, false, type_kv, GGML_TYPE_Q8_1));
         test_cases.emplace_back(new test_inkling_attn(24, 8, 300, 1024, true, true, true, type_kv, GGML_TYPE_Q8_1));
+        test_cases.emplace_back(new test_inkling_attn(24, 8, 768, 1024, true, true, true, type_kv, GGML_TYPE_Q8_1));
         test_cases.emplace_back(new test_inkling_attn(6, 2, 3072, 1024, false, true, false, type_kv, GGML_TYPE_F32));
         test_cases.emplace_back(new test_inkling_attn(6, 3, 100, 128, false, false, true, type_kv, GGML_TYPE_F32));
     }

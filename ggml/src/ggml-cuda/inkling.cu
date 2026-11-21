@@ -2408,9 +2408,12 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     a.dst        = dst->data;
     a.n_kv       = k_cache->ne[2];
 
-    // the cells split over blocks: about 64 cells per block, at most 64 splits
+    // At medium context on GA10x, fewer partial results outweigh the extra Q8 cells per block.
     static const bool v1 = getenv("IK_ATTN_V1") && atoi(getenv("IK_ATTN_V1")) != 0;
-    static const int cells_per_split = getenv("IK_ATTN_CELLS_PER_SPLIT") ? atoi(getenv("IK_ATTN_CELLS_PER_SPLIT")) : (v1 ? 32 : 64);
+    static const int split_override = getenv("IK_ATTN_CELLS_PER_SPLIT") ? atoi(getenv("IK_ATTN_CELLS_PER_SPLIT")) : 0;
+    const bool medium_q8 = ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X &&
+            k_cache->type == GGML_TYPE_Q8_0 && a.n_kv > 512 && a.n_kv <= 2304;
+    const int cells_per_split = split_override > 0 ? split_override : v1 ? 32 : medium_q8 ? 128 : 64;
     static const int dbg_skip        = getenv("IK_ATTN_SKIP") ? atoi(getenv("IK_ATTN_SKIP")) : 0;
     a.dbg_skip     = dbg_skip;
     static long long * dbg_times = [] () -> long long * {
@@ -3128,7 +3131,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
     }
     if constexpr (has_conv) {
         // the attention-output convolution + residual: the last state (block b writes the channels of the Q8_1 blocks
-        // (k/8) % gridDim.x == b and their new recurrent state); 4 channels per float4 slot: 4 wo values, 4*NC taps,
+        // (k/8) % gridDim.x == b); 4 channels per float4 slot: 4 wo values, 4*NC taps,
         // 4*(NC-1) past values (all 16-byte aligned: chan_offset % 4 == 0)
         const float scale = args.cv_scale;
         const int   cell  = args.cv_rs_ids[0];
@@ -3144,26 +3147,21 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             const float4 res = args.cv_residual ? ((const float4 *) args.cv_residual)[k] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             const float4 * cw4   = (const float4 *) (args.conv_w + (int64_t) 4*k*NC);                                             // 4 float4: taps of channels 4k..4k+3
             const float4 * past4 = (const float4 *) (args.cv_state + (int64_t) cell*args.cv_state_s1 + ((int64_t) args.cv_chan_offset + 4*k)*(NC - 1)); // 3 float4: 12 past values
-            float4       * st4   = (float4 *) (args.cv_state + (int64_t) args.cv_write_cell*args.cv_state_s1 + ((int64_t) args.cv_chan_offset + 4*k)*(NC - 1));
             const float4 w0 = cw4[0], w1 = cw4[1], w2 = cw4[2], w3 = cw4[3];
             const float4 p0 = past4[0], p1 = past4[1], p2 = past4[2];
             // channel c: past (p[3c], p[3c+1], p[3c+2]), current wo[c]; taps w[c]
             const float pa[12] = { p0.x, p0.y, p0.z, p0.w, p1.x, p1.y, p1.z, p1.w, p2.x, p2.y, p2.z, p2.w };
             const float ww[16] = { w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w, w2.x, w2.y, w2.z, w2.w, w3.x, w3.y, w3.z, w3.w };
             const float wo4[4] = { wo.x, wo.y, wo.z, wo.w }, res4[4] = { res.x, res.y, res.z, res.w };
-            float cur4[4], ns[12];
+            float cur4[4];
 #pragma unroll
             for (int c = 0; c < 4; ++c) {
                 const float out = pa[3*c]*ww[4*c] + pa[3*c + 1]*ww[4*c + 1] + pa[3*c + 2]*ww[4*c + 2] + wo4[c]*ww[4*c + 3];
                 cur4[c] = res4[c] + (wo4[c] + out)*scale;
-                ns[3*c] = pa[3*c + 1]; ns[3*c + 1] = pa[3*c + 2]; ns[3*c + 2] = wo4[c];
             }
             x[NS - 1][j] = make_float4(cur4[0], cur4[1], cur4[2], cur4[3]);
             if ((k/8) % gridDim.x == blockIdx.x) {
                 ((float4 *) args.attn_out)[k] = x[NS - 1][j];
-                st4[0] = make_float4(ns[0], ns[1], ns[2], ns[3]);
-                st4[1] = make_float4(ns[4], ns[5], ns[6], ns[7]);
-                st4[2] = make_float4(ns[8], ns[9], ns[10], ns[11]);
             }
         }
     }
@@ -3321,6 +3319,19 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         return;
     }
     if (args.dbg_times && tid == 0) { args.dbg_times[5] = clock64(); }
+
+    if constexpr (has_conv) {
+        // All blocks read every channel. Only the last arrival may rotate the
+        // history, since the sequence can read and write the same state cell.
+        const float * src = args.cv_state + (int64_t) args.cv_rs_ids[0]*args.cv_state_s1;
+        float * dst = args.cv_state + (int64_t) args.cv_write_cell*args.cv_state_s1;
+        for (int c = tid; c < n_embd; c += IK_R2_BLOCK) {
+            const int off = (args.cv_chan_offset + c)*(NC - 1);
+            dst[off]     = src[off + 1];
+            dst[off + 1] = src[off + 2];
+            dst[off + 2] = args.wo_out[c];
+        }
+    }
 
     // ===== the selection by the last block: the rank of every expert (ties: the smaller id first) =====
     const int n_expert = args.n_expert;

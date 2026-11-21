@@ -2,6 +2,11 @@
 #include "../llama-memory-hybrid-iswa.h"
 #include <cstring>
 
+static bool inkling_enabled(const char * key) {
+    const char * value = getenv(key);
+    return !value || atoi(value) != 0;
+}
+
 void llama_model_inkling2::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
     ml.get_key(LLM_KV_ATTENTION_QK_CLIP,           hparams.f_qk_clip);
@@ -108,6 +113,11 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
         return (env == nullptr || atoi(env) != 0) && !ml->no_alloc;
     }();
     const bool fuse_attn = fuse_weights;
+    // The fused decoder stores KV in model coordinates. Batched prefill must
+    // use those coordinates too, including when the cache is quantized.
+    if (fuse_attn && inkling_enabled("LLAMA_INKLING_FUSED") && inkling_enabled("LLAMA_INKLING_ATTN_OP")) {
+        attn_rot = false;
+    }
     fused_attn.assign(n_layer_phys(), {});
     attn_inp_norm_qkv.assign(n_layer_phys(), nullptr);
     attn_consts.assign(n_layer_phys(), nullptr); // filled by load_arch_tensors_post (not run by a memory-fit pass)
@@ -478,10 +488,7 @@ std::unique_ptr<llm_graph_context> llama_model_inkling2::build_arch_graph(const 
 }
 
 void llama_model_inkling2::graph::init_fused() {
-    static const bool enabled = [] {
-        const char * env = getenv("LLAMA_INKLING_FUSED");
-        return env == nullptr || atoi(env) != 0;
-    }();
+    static const bool enabled = inkling_enabled("LLAMA_INKLING_FUSED");
     // the fused ops bypass the LoRA hooks of the controller projections
     fused = enabled && (loras == nullptr || loras->empty());
     moe_sum_mul_mat = fused;
@@ -492,10 +499,7 @@ void llama_model_inkling2::graph::init_fused() {
     }();
     q8_act = fused && q8_enabled;
 
-    static const bool attn_op_enabled = [] {
-        const char * env = getenv("LLAMA_INKLING_ATTN_OP");
-        return env == nullptr || atoi(env) != 0;
-    }();
+    static const bool attn_op_enabled = inkling_enabled("LLAMA_INKLING_ATTN_OP");
     attn_op = fused && attn_op_enabled;
 
     // 0: build_moe_ffn; 3 (default): merged gate|up matmul + SITU, down matmul, fused sum + conv + residual;
@@ -969,7 +973,11 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                 ggml_tensor * rel_pos = is_swa ? inp->self_rel_pos_swa : inp->self_rel_pos;
                 const bool kv_ok = k->type == v->type && (k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_Q8_0) && v->nb[1] < v->nb[2] &&
                     k->ne[3] == 1 && rel_pos->ne[0] == k->ne[2] && mask_raw->ne[0] == k->ne[2];
-                if (kv_ok) {
+                // An explicitly rotated cache must go through build_attn_masked,
+                // which applies the matching transforms to queries and values.
+                const bool rotated = is_swa ? (attn->self_k_rot_swa[il] || attn->self_v_rot_swa[il])
+                                            : (attn->self_k_rot[il] || attn->self_v_rot[il]);
+                if (kv_ok && !rotated) {
                     const auto & hp = hparams;
                     cur = ggml_inkling_attn(ctx0, proj, consts, state, rs_ids, k, v, kv_idxs, rel_pos, mask_raw, is_swa ? nullptr : inp_pos,
                             n_head, n_head_kv, n_embd_head, hp.n_relative, hp.n_shortconv_l_cache, !is_swa, recr->mctx->get_head(),
