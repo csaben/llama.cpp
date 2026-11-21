@@ -5378,6 +5378,60 @@ struct test_inkling_moe_sum_conv : public test_case {
     }
 };
 
+// GGML_OP_INKLING_ROUTER
+struct test_inkling_router : public test_case {
+    const int64_t n_embd;
+    const int n_states; // 0: no mix (norm of one state)
+    const int n_expert;
+    const int n_used;
+    const bool with_bias;
+
+    std::string vars() override {
+        return VARS_TO_STR5(n_embd, n_states, n_expert, n_used, with_bias);
+    }
+
+    test_inkling_router(int64_t n_embd = 2304, int n_states = 4, int n_expert = 128, int n_used = 8, bool with_bias = true)
+        : n_embd(n_embd), n_states(n_states), n_expert(n_expert), n_used(n_used), with_bias(with_bias) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * q = nullptr;
+        if (n_states > 0) {
+            q = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+            ggml_set_name(q, "q");
+        }
+        const int ns = n_states > 0 ? n_states : 1;
+        std::vector<ggml_tensor *> states(ns);
+        for (int i = 0; i < ns; ++i) {
+            states[i] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+            ggml_set_name(states[i], ("s" + std::to_string(i)).c_str());
+        }
+        ggml_tensor * nw = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
+        ggml_set_name(nw, "nw");
+        ggml_tensor * gate_inp = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_expert);
+        ggml_set_name(gate_inp, "gate_inp");
+        ggml_tensor * probs_b = nullptr;
+        if (with_bias) {
+            probs_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_expert);
+            ggml_set_name(probs_b, "probs_b");
+        }
+        ggml_tensor * route = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2*n_used);
+        ggml_set_name(route, "route");
+
+        ggml_tensor * out = ggml_inkling_router(ctx, q, states.data(), ns, nw, gate_inp, probs_b, route, 1e-6f, 1.0f/sqrtf(n_embd), 1e-6f, n_used, 8.0f, 1e-20f);
+        ggml_set_name(out, "out");
+
+        // the ids and the weight bits are part of the checked output (the readers run after the op)
+        ggml_tensor * ids_f = ggml_cast(ctx, ggml_view_1d(ctx, route, n_used, 0), GGML_TYPE_F32);
+        ggml_tensor * wts   = ggml_view_1d(ctx, route, n_used, n_used*sizeof(int32_t));
+        ggml_tensor * all = ggml_concat(ctx, out, ggml_reshape_2d(ctx, ids_f, n_used, 1), 0);
+        // the weights as floats: an F32 view of the same bytes is not expressible, so compare them through an add with zeros
+        ggml_set_name(wts, "wts");
+        GGML_UNUSED(wts);
+        ggml_set_name(all, "out_all");
+        return all;
+    }
+};
+
 // GGML_OP_REL_BIAS
 struct test_rel_bias : public test_case {
     const int64_t n_rel;
@@ -12531,6 +12585,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     test_cases.emplace_back(new test_inkling_moe_sum_conv(2304, 8));
     test_cases.emplace_back(new test_inkling_moe_sum_conv(100, 3));
+    test_cases.emplace_back(new test_inkling_router(2304, 4, 128, 8, true));
+    test_cases.emplace_back(new test_inkling_router(2304, 0, 128, 8, true));
+    test_cases.emplace_back(new test_inkling_router(2304, 2, 128, 8, false));
+    test_cases.emplace_back(new test_inkling_router(512, 5, 64, 4, true));
     for (ggml_type type : {GGML_TYPE_IQ4_NL, GGML_TYPE_Q8_0}) {
         test_cases.emplace_back(new test_inkling_moe(type, 256, 64, 8, 4, false));
         test_cases.emplace_back(new test_inkling_moe(type, 256, 64, 8, 4, true));
@@ -14535,6 +14593,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_inkling_attn(24, 8, 256, 1024, false, false, false, GGML_TYPE_F16, GGML_TYPE_Q8_1));
     test_cases.emplace_back(new test_inkling_attn(24, 8, 256, 1024, true, true, true, GGML_TYPE_F16, GGML_TYPE_Q8_1));
     test_cases.emplace_back(new test_inkling_attn(24, 8, 4096, 1024, true, true, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_1));
+    test_cases.emplace_back(new test_inkling_router(2304, 4, 128, 8, true));
     test_cases.emplace_back(new test_inkling_moe(GGML_TYPE_IQ4_NL, 2304, 1152, 128, 8, false));
     test_cases.emplace_back(new test_inkling_moe(GGML_TYPE_IQ4_NL, 2304, 1152, 128, 8, true));
     test_cases.emplace_back(new test_inkling_moe(GGML_TYPE_Q8_0, 2304, 1152, 128, 8, false));

@@ -466,6 +466,12 @@ void llama_model_inkling2::graph::init_fused() {
         return env == nullptr ? 3 : atoi(env);
     }();
     moe_op = fused ? moe_op_mode : 0;
+
+    static const bool router_op_enabled = [] {
+        const char * env = getenv("LLAMA_INKLING_ROUTER_OP");
+        return env == nullptr || atoi(env) != 0;
+    }();
+    router_op = fused && router_op_enabled;
 }
 
 // Q8_1 activations go to the quantized matvec kernels of the CUDA and CPU backends
@@ -967,7 +973,40 @@ attn_done:
     cb(ffn_inp, "ffn_inp", il);
 
     // MoE
-    if (fused && !messages) {
+    const int64_t n_expert      = hparams.n_expert;
+    const int64_t n_expert_used = hparams.n_expert_used(il);
+    const bool moe_fused = moe_op && n_tokens == 1 && ubatch.n_seqs == 1 && rs_ids != nullptr && layer.ffn_gate_up_exps != nullptr &&
+        !layer.ffn_up_exps_s && !layer.ffn_gate_exps_s && !layer.ffn_down_exps_s && n_expert_used <= 8 && !cparams.moe_random_routing &&
+        (layer.ffn_gate_up_exps->type == GGML_TYPE_IQ4_NL || layer.ffn_gate_up_exps->type == GGML_TYPE_Q8_0) &&
+        layer.ffn_down_exps->type == layer.ffn_gate_up_exps->type && n_embd <= 4096;
+    // the fused router op: the mix (or the controlled input), the FFN norm, the router and the top-k selection in one op
+    const bool router_fused = moe_fused && router_op && n_expert % 8 == 0 && n_expert <= 256 && n_embd % 4 == 0 &&
+        layer.ffn_gate_inp->type == GGML_TYPE_F32 && hparams.expert_weights_norm_eps > 0.0f;
+
+    ggml_tensor * selected_experts = nullptr; // [n_expert_used, 1] I32
+    ggml_tensor * weights          = nullptr; // [1, n_expert_used, 1] F32 (or the I32 bits of the fused router)
+    if (router_fused) {
+        ggml_tensor * route = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 2*n_expert_used);
+        cb(route, "ffn_moe_route", il);
+        std::vector<ggml_tensor *> states;
+        ggml_tensor * query = nullptr;
+        if (messages) {
+            // the controlled mix: its norm is in the router op
+            ggml_tensor * mixed_ffn = ggml_reshape_2d(ctx0, mix(blocks, cur, layer.ffn_res_query), n_embd, n_tokens);
+            states.push_back(control(mixed_ffn, message(LOOP_CTRL_FFN), *loop, LOOP_CTRL_FFN));
+        } else {
+            query = layer.ffn_res_query;
+            for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
+                states.push_back(ggml_reshape_2d(ctx0, *it, n_embd, n_tokens));
+            }
+            states.push_back(ggml_reshape_2d(ctx0, cur, n_embd, n_tokens));
+        }
+        cur = ggml_inkling_router(ctx0, query, states.data(), (int) states.size(), layer.ffn_norm, layer.ffn_gate_inp, layer.ffn_exp_probs_b, route,
+                1e-6f, 1.0f/sqrtf(n_embd), hparams.f_norm_rms_eps, n_expert_used, hparams.expert_weights_scale, hparams.expert_weights_norm_eps);
+        cb(cur, "ffn_norm", il);
+        selected_experts = ggml_view_2d(ctx0, route, n_expert_used, 1, route->nb[0]*n_expert_used, 0);
+        weights          = ggml_view_3d(ctx0, route, 1, n_expert_used, 1, route->nb[0], route->nb[0]*n_expert_used, route->nb[0]*n_expert_used);
+    } else if (fused && !messages) {
         // the mix and the FFN norm in one op (F32: the router reads it too)
         cur = ggml_reshape_2d(ctx0, mix_norm(blocks, cur, layer.ffn_res_query, layer.ffn_norm, GGML_TYPE_F32), n_embd, n_tokens);
         cb(cur, "ffn_norm", il);
@@ -979,13 +1018,7 @@ attn_done:
         cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
     }
 
-    const int64_t n_expert      = hparams.n_expert;
-    const int64_t n_expert_used = hparams.n_expert_used(il);
-    const bool moe_fused = moe_op && n_tokens == 1 && ubatch.n_seqs == 1 && rs_ids != nullptr && layer.ffn_gate_up_exps != nullptr &&
-        !layer.ffn_up_exps_s && !layer.ffn_gate_exps_s && !layer.ffn_down_exps_s && n_expert_used <= 8 && !cparams.moe_random_routing &&
-        (layer.ffn_gate_up_exps->type == GGML_TYPE_IQ4_NL || layer.ffn_gate_up_exps->type == GGML_TYPE_Q8_0) &&
-        layer.ffn_down_exps->type == layer.ffn_gate_up_exps->type && n_embd <= 4096;
-    if (moe_fused) {
+    if (moe_fused && !router_fused) {
         // the router as in build_moe_ffn (sigmoid gating, normalized weights, scale), then the experts in two ops
         ggml_tensor * logits = build_lora_mm(layer.ffn_gate_inp, cur); // [n_expert, 1]
         ggml_prec_set_acc(logits, GGML_PREC_F32);
@@ -997,9 +1030,9 @@ attn_done:
             selection_probs = ggml_add(ctx0, probs, layer.ffn_exp_probs_b);
             cb(selection_probs, "ffn_moe_probs_biased", il);
         }
-        ggml_tensor * selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, 1]
+        selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, 1]
         probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
-        ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, 1]
+        weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, 1]
         cb(weights, "ffn_moe_weights", il);
         weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
         ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights);
@@ -1017,9 +1050,11 @@ attn_done:
             cb(weights, "ffn_moe_weights_scaled", il);
         }
         ggml_build_forward_expand(gf, weights);
+    }
+    if (moe_fused) {
 
         const float conv_scale = 1.0f/sqrtf(hparams.n_shortconv_l_cache + 1);
-        if (moe_op == 2) {
+        if (moe_op == 2 && !router_fused) {
             ggml_tensor * h = ggml_inkling_moe_up(ctx0, layer.ffn_gate_up_exps, cur, selected_experts, hparams.situ_beta, hparams.situ_linear_beta);
             cb(h, "ffn_moe_situ", il);
             cur = ggml_inkling_moe_down(ctx0, layer.ffn_down_exps, h, selected_experts, weights, layer.ffn_post_conv, state, rs_ids, ffn_inp,

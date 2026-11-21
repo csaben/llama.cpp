@@ -3158,6 +3158,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_INKLING_MOE_SUM_CONV:
             ggml_cuda_op_inkling_moe_sum_conv(ctx, dst);
             break;
+        case GGML_OP_INKLING_ROUTER:
+            ggml_cuda_op_inkling_router(ctx, dst);
+            break;
         case GGML_OP_SSM_SCAN:
             ggml_cuda_op_ssm_scan(ctx, dst);
             break;
@@ -6827,6 +6830,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return op->src[0]->type == GGML_TYPE_IQ4_NL || op->src[0]->type == GGML_TYPE_Q8_0;
         case GGML_OP_INKLING_MOE_SUM_CONV:
             return true;
+        case GGML_OP_INKLING_ROUTER:
+            {
+                const int n_states = ggml_get_op_params_i32(op, 6);
+                const ggml_tensor * gate_inp = op->src[2 + n_states];
+                return op->ne[0] % 4 == 0 && op->ne[0] <= 4096 && gate_inp->ne[1] % 8 == 0 && gate_inp->ne[1] <= 256;
+            }
         case GGML_OP_REL_BIAS:
             return op->src[0]->ne[0] <= 16;
         case GGML_OP_CONT:

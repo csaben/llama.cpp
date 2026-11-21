@@ -2582,7 +2582,9 @@ struct llama_model_inkling2 : public llama_model_base {
         // the single-token attention block as one op (LLAMA_INKLING_ATTN_OP=0 disables)
         bool attn_op = false;
         // the single-token MoE as two ops (LLAMA_INKLING_MOE_OP=0 disables)
-        bool moe_op = false;
+        int moe_op = 0;
+        // the FFN input mix + norm + router + top-k as one op (LLAMA_INKLING_ROUTER_OP=0 disables)
+        bool router_op = false;
 
         // the mixed output of query j: [n_embd, n_tokens]
         ggml_tensor * mixed_view(ggml_tensor * mixed, int j);
