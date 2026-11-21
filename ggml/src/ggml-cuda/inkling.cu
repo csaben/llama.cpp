@@ -2123,7 +2123,10 @@ struct ik_router_args {
     int n_embd, n_expert, n_used;
     float eps, scale, norm_eps, w_scale, w_eps;
     int dbg_skip; // timing experiments (IK_ROUTER_SKIP): 1 no arrival/selection, 2 no router rows, 4 no mix
+    long long * dbg_times; // timing experiments (IK_ROUTER_TIMING): clock64 at the phase boundaries of block 0
 };
+
+#define IK_RDBG_T(k) do { if (args.dbg_times && tid == 0 && blockIdx.x == 0) { args.dbg_times[k] = clock64(); } } while (0)
 
 template <int W> // warps (experts) per block
 static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(const ik_router_args args) {
@@ -2144,6 +2147,7 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
 
     const int e = blockIdx.x*W + warp;
     constexpr int NV = IK_ROUTER_MAX_EMBD/4/WARP_SIZE; // float4 per lane of the router row
+    IK_RDBG_T(0);
 
     if (args.dbg_skip & 4) {
         if (tid < WARP_SIZE) { s_rms[0] = 1.0f; s_p[0] = 1.0f; }
@@ -2218,6 +2222,7 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
         s_p[0]   = 1.0f;
     }
     __syncthreads();
+    IK_RDBG_T(1); // pass 1 reduced
 
     // --- pass 2: the mixed input, its RMS norm (the operation order of the rms_norm + mul kernel) into shared memory
     float4 y[KV];
@@ -2262,6 +2267,7 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
     __syncthreads();
     }
 
+    IK_RDBG_T(2); // the input is in shared memory
     if (args.dbg_skip & 2) {
         return;
     }
@@ -2288,6 +2294,7 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
             args.logits[e] = dot;
         }
     }
+    IK_RDBG_T(3); // logits computed
     if (args.dbg_skip & 1) {
         return;
     }
@@ -2298,10 +2305,12 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
         s_last = old == (int) gridDim.x - 1;
     }
     __syncthreads();
+    IK_RDBG_T(4); // arrival counted
     if (!s_last) {
         return;
     }
     __threadfence();
+    if (args.dbg_times && tid == 0) { args.dbg_times[5] = clock64(); } // the last block starts selecting (its own clock)
 
     // --- the selection, by the first warp of the last block: sigmoid, bias, n_used rounds of argmax (ties: the smaller id)
     if (warp == 0) {
@@ -2370,6 +2379,7 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
             *args.counter = 0;
         }
     }
+    if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); } // selection done (last block's clock)
 }
 
 void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -2411,6 +2421,22 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     a.counter = ik_counters(ctx, 8, 1);
     static const int dbg_skip = getenv("IK_ROUTER_SKIP") ? atoi(getenv("IK_ROUTER_SKIP")) : 0;
     a.dbg_skip = dbg_skip;
+    static long long * dbg_times = [] () -> long long * {
+        if (!getenv("IK_ROUTER_TIMING")) {
+            return nullptr;
+        }
+        long long * t = nullptr;
+        CUDA_CHECK(cudaMallocManaged(&t, 16*sizeof(long long)));
+        memset(t, 0, 16*sizeof(long long));
+        static long long * t_static = t;
+        atexit([] {
+            cudaDeviceSynchronize();
+            fprintf(stderr, "inkling_router phases of block 0 (cycles from T0): pass1 reduced %lld, input ready %lld, logits %lld, arrival %lld; last block: selection %lld cycles\n",
+                t_static[1]-t_static[0], t_static[2]-t_static[0], t_static[3]-t_static[0], t_static[4]-t_static[0], t_static[6]-t_static[5]);
+        });
+        return t;
+    }();
+    a.dbg_times = dbg_times;
 
     static const int W = getenv("IK_ROUTER_WARPS") ? atoi(getenv("IK_ROUTER_WARPS")) : 8;
     switch (W) {
