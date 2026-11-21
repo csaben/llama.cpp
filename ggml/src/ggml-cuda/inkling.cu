@@ -2087,6 +2087,7 @@ struct ik_router_args {
     int         * counter;
     int n_embd, n_expert, n_used;
     float eps, scale, norm_eps, w_scale, w_eps;
+    int dbg_skip; // timing experiments (IK_ROUTER_SKIP): 1 no arrival/selection, 2 no router rows, 4 no mix
 };
 
 static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(const ik_router_args args) {
@@ -2104,19 +2105,17 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
     const int n_embd4  = n_embd/4;
     const int n_states = args.n_states;
 
-    // the router row of this warp's expert: issued first, consumed after the input is ready
     const int e = blockIdx.x*IK_ROUTER_WARPS + warp;
-    constexpr int NV = IK_ROUTER_MAX_EMBD/4/WARP_SIZE; // float4 per lane
-    float4 wrow[NV];
-    {
-        const float4 * w4 = (const float4 *) (args.gate_inp + (int64_t) e*n_embd);
-#pragma unroll
-        for (int i = 0; i < NV; ++i) {
-            const int k = lane + i*WARP_SIZE;
-            wrow[i] = k < n_embd4 ? w4[k] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-        }
-    }
+    constexpr int NV = IK_ROUTER_MAX_EMBD/4/WARP_SIZE; // float4 per lane of the router row
 
+    if (args.dbg_skip & 4) {
+        if (tid < WARP_SIZE) { s_rms[0] = 1.0f; s_p[0] = 1.0f; }
+        __syncthreads();
+        for (int k = tid; k < n_embd4; k += IK_ROUTER_BLOCK) {
+            ((float4 *) s_x)[k] = ((const float4 *) args.st.p[0])[k];
+        }
+        __syncthreads();
+    } else {
     // --- the mix, pass 1: the sums of squares and the query dots of every state (the states are re-read in pass 2,
     //     from L2, instead of being kept in registers: that keeps the router row loads above in flight)
     constexpr int KV = (IK_ROUTER_MAX_EMBD/4 + IK_ROUTER_BLOCK - 1)/IK_ROUTER_BLOCK; // float4 per thread
@@ -2219,9 +2218,20 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
         }
     }
     __syncthreads();
+    }
 
-    // --- the logit of this warp's expert
+    if (args.dbg_skip & 2) {
+        return;
+    }
+    // --- the logit of this warp's expert: the row loads in flight together, then the dot with the shared input
     {
+        const float4 * w4 = (const float4 *) (args.gate_inp + (int64_t) e*n_embd);
+        float4 wrow[NV];
+#pragma unroll
+        for (int i = 0; i < NV; ++i) {
+            const int k = lane + i*WARP_SIZE;
+            wrow[i] = k < n_embd4 ? w4[k] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
         float dot = 0.0f;
 #pragma unroll
         for (int i = 0; i < NV; ++i) {
@@ -2235,6 +2245,9 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
         if (lane == 0) {
             args.logits[e] = dot;
         }
+    }
+    if (args.dbg_skip & 1) {
+        return;
     }
     __threadfence();
     __syncthreads();
@@ -2353,6 +2366,8 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     ggml_cuda_pool_alloc<float> logits(ctx.pool(), a.n_expert);
     a.logits  = logits.get();
     a.counter = ik_counters(ctx, 8, 1);
+    static const int dbg_skip = getenv("IK_ROUTER_SKIP") ? atoi(getenv("IK_ROUTER_SKIP")) : 0;
+    a.dbg_skip = dbg_skip;
 
     inkling_router_kernel<<<a.n_expert/IK_ROUTER_WARPS, IK_ROUTER_BLOCK, 0, ctx.stream()>>>(a);
 }

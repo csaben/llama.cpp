@@ -111,4 +111,16 @@ then tune the matvecs (bytes in flight, tail), then quality-gated byte reduction
 | step | commit | tg128 tok/s | PPL | notes |
 |---|---|---|---|---|
 | p2-2: GGML_OP_INKLING_ATTN: the single-token attention block (K/V conv + per-head norm/clip + cache store + Q/R clips + relative bias + attention with the zero sink + sigmoid gate, Q8_1 output) in one kernel (8 kv-head x 8 cell-split blocks, last block combines); MoE: merged gate\|up matvec + SITU, down matvec, fused weighted sum + FFN conv + residual (INKLING_MOE_SUM_CONV); SITU added to the fused mmvq GLU; custom MoE matvec kernels (INKLING_MOE_UP/DOWN) kept opt-in (LLAMA_INKLING_MOE_OP=2, slower than mmvq) | see tag checkpoint-134tok | 134.1 | 2.9421 (decode-path 4.0482, unfused 4.0660) | 801 launches/token; attention kernel 13 us (replaced ~24 us of 11 kernels); greedy gen1 614/614 and gen2 903/903 identical to step 8, gen3 70. test-backend-ops: INKLING_ATTN 4/4 (+8 via CONCAT), INKLING_MOE_* 4/4 (+6), MUL_MAT 2696/2696, MUL_MAT_ID 1081/1081 |
+| p2-3: GGML_OP_INKLING_ROUTER: FFN mix + norm + router logits + sigmoid/top-k/weight normalization in one launch (16 blocks, last block selects); attention kernel loop: relative bias folded into the dot partial sums, transposed 4-head butterfly reduction, per-step softmax update | 3f99170+ | 137.7 | decode-path 4.0674 (unfused 4.0660) | 750 launches/token; greedy gen1 412, gen2 863, gen3 70 (routing near-ties move with the summation order) |
 | p2-1: res_mix_norm (mix + rms norm in one op, F32 or Q8_1 output), loop_ctrl_apply with Q8_1 output, Q8_1 activations accepted as mmvq src1 (CUDA; CPU repacks to Q8_0); attention/FFN input norms fused into the mix; one projection matmul over the three attention inputs (ncols=3, weights read once) | 04c3ea5 | 128.9 | 2.9400 (decode-path 4.0595, unfused 4.0660) | 1493 launches/token; greedy gen1 412 (same), gen2 724, gen3 70 chars common with step 8 (near-tie flips). test-backend-ops RES_MIX 54/54, LOOP_CTRL_APPLY 15/15, MUL_MAT 2696/2696, MUL_MAT_ID 1081/1081 |
+
+## Batched (speculative verify) steps: why DSpark cannot reach 200 tok/s here
+llama-bench pp2 = 184 tok/s (10.8 ms per 2-token step), pp4 = 61-68 tok/s (~60 ms per 4-token step, Nov 21 build).
+The MoE experts are routed per token, so a verify step of n tokens reads up to n x 1847 MB of expert weights (random
+8-of-128 routing: ~3.6x for n = 4) while only the dense 1781 MB + head 492 MB are shared. Bytes per step at the bandwidth
+floor: n=1 4.12 GB, n=2 5.97 GB, n=4 9.66 GB. With a per-token draft acceptance p, the expected accepted tokens per step
+are 1 + p + p^2 + ..., so n=2 beats plain decode only for p > 0.45 (7% gain at p = 0.55) and n=4 needs p > 0.68; the
+measured acceptance (phase 1) is 45-57% on chat prompts. The batched mul_mat_vec_q_moe kernel also runs at ~650 GB/s
+effective (148 us for 4 tokens of gate_up) and the fused decode ops fall back to the unfused graph for n_tokens > 1.
+Conclusion: speculative decoding is at best a few percent for this architecture on one GPU; the single-token path is
+where the time is.
