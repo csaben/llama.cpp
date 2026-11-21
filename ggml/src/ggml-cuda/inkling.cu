@@ -697,24 +697,26 @@ void ggml_cuda_op_rel_bias(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// loop_ctrl_down: d[k, t] = sum_i w[i, k]*rmsnorm(a)[i, t] + w[n + i, k]*rmsnorm(b)[i, t], one block per (k, t)
+// loop_ctrl_down: d[k, t, b] = sum_i w[i, k, b]*rmsnorm(a)[i, t, b] + w[n + i, k, b]*rmsnorm(msg)[i, t, b], one block per (k, t, b)
 
 template <int block_size>
 static __global__ void loop_ctrl_down_f32(const float * __restrict__ w, const float * __restrict__ a, const float * __restrict__ b,
-        float * __restrict__ dst, const int n, const int rank, const int64_t a_nb1, const int64_t b_nb1, const float eps) {
+        float * __restrict__ dst, const int n, const int rank, const int64_t a_nb1, const int64_t a_nb2, const int64_t b_nb1, const int64_t b_nb2,
+        const float eps) {
     constexpr int n_warps = block_size/WARP_SIZE;
 
-    const int k = blockIdx.x;
-    const int t = blockIdx.y;
+    const int k  = blockIdx.x;
+    const int t  = blockIdx.y;
+    const int ib = blockIdx.z;
 
     const int lane = threadIdx.x % WARP_SIZE;
     const int wid  = threadIdx.x / WARP_SIZE;
 
     __shared__ float red[n_warps][4];
 
-    const float * av = (const float *) ((const char *) a + t*a_nb1);
-    const float * bv = (const float *) ((const char *) b + t*b_nb1);
-    const float * wk = w + (int64_t) k*2*n;
+    const float * av = (const float *) ((const char *) a + t*a_nb1 + ib*a_nb2);
+    const float * bv = (const float *) ((const char *) b + t*b_nb1 + ib*b_nb2);
+    const float * wk = w + ((int64_t) ib*rank + k)*2*n;
 
     // the sums of squares and the raw dot products in one pass: w^T rmsnorm(a) = rsqrt(mean(a^2) + eps) * w^T a
     float sa = 0.0f, sb = 0.0f, da = 0.0f, db = 0.0f;
@@ -749,7 +751,7 @@ static __global__ void loop_ctrl_down_f32(const float * __restrict__ w, const fl
         }
         const float ra = rsqrtf(sa/n + eps);
         const float rb = rsqrtf(sb/n + eps);
-        dst[(int64_t) t*rank + k] = da*ra + db*rb;
+        dst[((int64_t) ib*gridDim.y + t)*rank + k] = da*ra + db*rb;
     }
 }
 
@@ -764,10 +766,11 @@ void ggml_cuda_op_loop_ctrl_down(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int n     = a->ne[0];
     const int n_tok = a->ne[1];
     const int rank  = w->ne[1];
+    const int B     = w->ne[2];
 
-    const dim3 grid(rank, n_tok, 1);
+    const dim3 grid(rank, n_tok, B);
     loop_ctrl_down_f32<256><<<grid, 256, 0, ctx.stream()>>>((const float *) w->data, (const float *) a->data, (const float *) b->data,
-            (float *) dst->data, n, rank, a->nb[1], b->nb[1], eps);
+            (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -775,18 +778,23 @@ void ggml_cuda_op_loop_ctrl_down(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
 static __global__ void loop_ctrl_apply_f32(const float * __restrict__ cur, const float * __restrict__ msg, const float * __restrict__ d,
         const float * __restrict__ wg, const float * __restrict__ wf, float * __restrict__ dst,
-        const int n, const int n_tok, const int rank, const int64_t cur_nb1, const int64_t msg_nb1) {
+        const int n, const int n_tok, const int rank, const int64_t cur_nb1, const int64_t cur_nb2, const int64_t msg_nb1, const int64_t msg_nb2) {
     const int64_t gw   = (int64_t) blockIdx.x*(blockDim.x/WARP_SIZE) + threadIdx.x/WARP_SIZE;
     const int     lane = threadIdx.x % WARP_SIZE;
-    if (gw >= (int64_t) n*n_tok) {
+    const int64_t n_out = (int64_t) n*n_tok;
+    if (gw >= n_out*gridDim.y) {
         return;
     }
-    const int t = gw / n;
-    const int i = gw - (int64_t) t*n;
+    const int ib = blockIdx.y;
+    const int t  = gw / n;
+    const int i  = gw - (int64_t) t*n;
+    if (t >= n_tok) {
+        return;
+    }
 
-    const float * dv = d + (int64_t) t*rank;
-    const float * g  = wg + (int64_t) i*rank;
-    const float * f  = wf + (int64_t) i*rank;
+    const float * dv = d + ((int64_t) ib*n_tok + t)*rank;
+    const float * g  = wg + ((int64_t) ib*n + i)*rank;
+    const float * f  = wf + ((int64_t) ib*n + i)*rank;
 
     float sg = 0.0f, sf = 0.0f;
     for (int k = lane; k < rank; k += WARP_SIZE) {
@@ -800,19 +808,22 @@ static __global__ void loop_ctrl_apply_f32(const float * __restrict__ cur, const
     if (lane == 0) {
         const float gain   = tanhf(sg);
         const float forget = tanhf(sf);
-        const float c = *(const float *) ((const char *) cur + t*cur_nb1 + i*sizeof(float));
-        const float m = *(const float *) ((const char *) msg + t*msg_nb1 + i*sizeof(float));
-        dst[(int64_t) t*n + i] = (c - forget*c) + gain*m;
+        const float c = *(const float *) ((const char *) cur + t*cur_nb1 + ib*cur_nb2 + i*sizeof(float));
+        const float m = *(const float *) ((const char *) msg + t*msg_nb1 + ib*msg_nb2 + i*sizeof(float));
+        dst[((int64_t) ib*n_tok + t)*n + i] = (c - forget*c) + gain*m;
     }
 }
 
 // with the norm: a second launch RMS-normalizes the rows in place and scales them by the norm weight
 template <int block_size>
-static __global__ void rms_norm_mul_inplace_f32(float * __restrict__ y, const float * __restrict__ nw, const int n, const float eps) {
-    const int t = blockIdx.x;
+static __global__ void rms_norm_mul_inplace_f32(float * __restrict__ y, const float * __restrict__ nw, const int n, const int n_tok,
+        const int64_t nw_nb1, const float eps) {
+    const int t  = blockIdx.x;
+    const int ib = blockIdx.y;
     __shared__ float red[block_size/WARP_SIZE];
 
-    float * yt = y + (int64_t) t*n;
+    float       * yt  = y + ((int64_t) ib*n_tok + t)*n;
+    const float * nwb = (const float *) ((const char *) nw + ib*nw_nb1);
     float ss = 0.0f;
     for (int i = threadIdx.x; i < n; i += block_size) {
         ss += yt[i]*yt[i];
@@ -820,7 +831,7 @@ static __global__ void rms_norm_mul_inplace_f32(float * __restrict__ y, const fl
     ss = ik_block_sum<block_size>(ss, red);
     const float scale = rsqrtf(ss/n + eps);
     for (int i = threadIdx.x; i < n; i += block_size) {
-        yt[i] = yt[i]*scale*nw[i];
+        yt[i] = yt[i]*scale*nwb[i];
     }
 }
 
@@ -830,24 +841,27 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
     const ggml_tensor * d   = dst->src[2];
     const ggml_tensor * wg  = dst->src[3];
     const ggml_tensor * wf  = dst->src[4];
-
     const ggml_tensor * nw  = dst->src[5];
 
     const int n     = cur->ne[0];
     const int n_tok = cur->ne[1];
     const int rank  = d->ne[0];
+    const int B     = msg->ne[2];
 
     const int block_size = 256;
     const int64_t nblocks = ((int64_t) n*n_tok*WARP_SIZE + block_size - 1)/block_size;
+    const dim3 grid(nblocks, B, 1);
 
-    loop_ctrl_apply_f32<<<nblocks, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
+    loop_ctrl_apply_f32<<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
             (const float *) d->data, (const float *) wg->data, (const float *) wf->data, (float *) dst->data,
-            n, n_tok, rank, cur->nb[1], msg->nb[1]);
+            n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2]);
 
     if (nw) {
         float eps;
         memcpy(&eps, (const float *) dst->op_params + 0, sizeof(float));
-        rms_norm_mul_inplace_f32<1024><<<n_tok, 1024, 0, ctx.stream()>>>((float *) dst->data, (const float *) nw->data, n, eps);
+        const dim3 grid_norm(n_tok, B, 1);
+        rms_norm_mul_inplace_f32<1024><<<grid_norm, 1024, 0, ctx.stream()>>>((float *) dst->data, (const float *) nw->data, n, n_tok,
+                ggml_nrows(nw) == 1 ? 0 : nw->nb[1], eps);
     }
 }
 

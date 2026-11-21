@@ -54,10 +54,53 @@ void llama_model_inkling2_loop::load_arch_tensors(llama_model_loader & ml) {
         auto & l = loop_layers[il - core_start];
         // the q, k, v and ffn message queries
         l.msg_query = create_tensor(tn(LLM_TENSOR_LOOP_MSG_QUERY, "weight", il), {n_embd, LOOP_CTRL_COUNT}, 0);
+
+        // the q, k and v controllers are stacked into batched tensors after loading (one op for the three), when F32
+        bool stack = fuse_weights;
+        for (int c = LOOP_CTRL_Q; stack && c <= LOOP_CTRL_V; ++c) {
+            for (const llm_tensor * group : { down, gain, forget }) {
+                const ggml_tensor * meta = ml.get_tensor_meta(tn(group[c], "weight", il).str().c_str());
+                stack = stack && meta != nullptr && meta->type == GGML_TYPE_F32;
+            }
+        }
+        const int skip = stack ? TENSOR_SKIP | TENSOR_SKIP_QUIET : 0;
+
         for (int c = 0; c < LOOP_CTRL_COUNT; ++c) {
-            l.ctrl_down[c]   = create_tensor(tn(down[c],   "weight", il), {2*n_embd, rank}, 0);
-            l.ctrl_gain[c]   = create_tensor(tn(gain[c],   "weight", il), {rank, n_embd}, 0);
-            l.ctrl_forget[c] = create_tensor(tn(forget[c], "weight", il), {rank, n_embd}, 0);
+            const int flags = c <= LOOP_CTRL_V ? skip : 0;
+            l.ctrl_down[c]   = create_tensor(tn(down[c],   "weight", il), {2*n_embd, rank}, flags);
+            l.ctrl_gain[c]   = create_tensor(tn(gain[c],   "weight", il), {rank, n_embd}, flags);
+            l.ctrl_forget[c] = create_tensor(tn(forget[c], "weight", il), {rank, n_embd}, flags);
+        }
+
+        if (stack) {
+            ggml_context * ctx = fused_context();
+            l.ctrl_down_qkv   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 2*n_embd, rank, 3);
+            l.ctrl_gain_qkv   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n_embd, 3);
+            l.ctrl_forget_qkv = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n_embd, 3);
+            ggml_format_name(l.ctrl_down_qkv,   "blk.%u.loop_qkv_ctrl_down.weight",   il);
+            ggml_format_name(l.ctrl_gain_qkv,   "blk.%u.loop_qkv_ctrl_gain.weight",   il);
+            ggml_format_name(l.ctrl_forget_qkv, "blk.%u.loop_qkv_ctrl_forget.weight", il);
+
+            const struct { ggml_tensor * t; const llm_tensor * group; ggml_tensor ** orig; } stacks[3] = {
+                { l.ctrl_down_qkv,   down,   l.ctrl_down   },
+                { l.ctrl_gain_qkv,   gain,   l.ctrl_gain   },
+                { l.ctrl_forget_qkv, forget, l.ctrl_forget },
+            };
+            for (const auto & st : stacks) {
+                fused_tensor f;
+                f.t   = st.t;
+                f.ref = layers[il].wo;
+                const size_t slab = st.t->nb[2];
+                for (int c = LOOP_CTRL_Q; c <= LOOP_CTRL_V; ++c) {
+                    const std::string name = tn(st.group[c], "weight", il).str();
+                    f.pieces.emplace_back(name, c*slab);
+                    // the single controller tensor becomes a view of its slab
+                    st.orig[c] = ggml_view_2d(ctx, st.t, st.t->ne[0], st.t->ne[1], st.t->nb[1], c*slab);
+                    ggml_set_name(st.orig[c], name.c_str());
+                    tensors_by_name.emplace_back(name, st.orig[c]);
+                }
+                fused_pending.push_back(std::move(f));
+            }
         }
     }
 
@@ -65,6 +108,11 @@ void llama_model_inkling2_loop::load_arch_tensors(llama_model_loader & ml) {
     for (int il = n_phys; il < (int) hparams.n_layer(); ++il) {
         layers[il] = layers[layer_phys(il)];
     }
+}
+
+void llama_model_inkling2_loop::load_arch_tensors_post(llama_model_loader & ml) {
+    llama_model_inkling2::load_arch_tensors_post(ml);
+    load_fused(ml); // the controller stacks registered in load_arch_tensors (if not yet loaded)
 }
 
 std::unique_ptr<llm_graph_context> llama_model_inkling2_loop::build_arch_graph(const llm_graph_params & params) const {

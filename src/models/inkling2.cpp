@@ -102,11 +102,13 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
 
     // the attention input projections are concatenated into one matrix per layer after loading (see load_arch_tensors_post),
     // when they share the type; LLAMA_INKLING_FUSED_QKV=0 disables, a memory-fit pass loads them as they are
-    const bool fuse_attn = [&] {
+    fuse_weights = [&] {
         const char * env = getenv("LLAMA_INKLING_FUSED_QKV");
         return (env == nullptr || atoi(env) != 0) && !ml->no_alloc;
     }();
+    const bool fuse_attn = fuse_weights;
     fused_attn.assign(n_layer_phys(), {});
+    attn_inp_norm_qkv.assign(n_layer_phys(), nullptr);
 
     for (int i = 0; i < n_layer_phys(); ++i) {
         auto & layer = layers[i];
@@ -201,60 +203,40 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
     }
 }
 
-// concatenate the attention input projections of each layer into one matrix, loaded straight from the file,
-// and point the layer's tensors at the row groups of that matrix
-void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
-    const int64_t n_embd = hparams.n_embd;
-
-    int n_fused = 0;
-    for (const auto & fa : fused_attn) {
-        n_fused += fa.pieces.empty() ? 0 : 1;
+ggml_context * llama_model_inkling2::fused_context() {
+    if (!fused_ctx) {
+        ggml_init_params params = {
+            /*.mem_size   =*/ ggml_tensor_overhead()*(64*n_layer_phys() + 64),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        fused_ctx.reset(ggml_init(params));
+        if (!fused_ctx) {
+            throw std::runtime_error("inkling2: failed to create the context of the fused weights");
+        }
     }
-    if (n_fused == 0) {
+    return fused_ctx.get();
+}
+
+// allocate the assembled tensors next to the layer weights and read their pieces from the file
+void llama_model_inkling2::load_fused(llama_model_loader & ml) {
+    if (fused_pending.empty()) {
         return;
     }
 
-    // one context for the fused matrices and the views of their pieces
-    ggml_init_params params = {
-        /*.mem_size   =*/ ggml_tensor_overhead()*n_fused*16,
-        /*.mem_buffer =*/ NULL,
-        /*.no_alloc   =*/ true,
-    };
-    fused_ctx.reset(ggml_init(params));
-    if (!fused_ctx) {
-        throw std::runtime_error("inkling2: failed to create the context of the fused attention projections");
-    }
-
-    // the fused matrices go with the layer's other weights, one buffer per buffer type
     std::map<ggml_backend_buffer_type_t, std::vector<ggml_tensor *>> by_buft;
-
-    for (int i = 0; i < n_layer_phys(); ++i) {
-        auto & fa = fused_attn[i];
-        if (fa.pieces.empty()) {
-            continue;
-        }
-        const ggml_tensor * wo = layers[i].wo;
-        GGML_ASSERT(wo != nullptr && wo->buffer != nullptr);
-        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(wo->buffer);
+    for (const auto & f : fused_pending) {
+        GGML_ASSERT(f.ref != nullptr && f.ref->buffer != nullptr);
+        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(f.ref->buffer);
         if (ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft)) {
             if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
                 buft = ggml_backend_dev_buffer_type(dev);
             }
         }
-
-        const ggml_type type = ml.get_tensor_meta(fa.pieces[0].first.c_str())->type;
-        int64_t n_rows = 0;
-        for (const auto & piece : fa.pieces) {
-            n_rows += piece.second;
-        }
-
-        fa.w = ggml_new_tensor_2d(fused_ctx.get(), type, n_embd, n_rows);
-        ggml_format_name(fa.w, "blk.%d.attn_fused.weight", i);
-        by_buft[buft].push_back(fa.w);
+        by_buft[buft].push_back(f.t);
     }
 
     for (auto & [buft, tensors] : by_buft) {
-        // allocate the matrices of this buffer type together
         ggml_init_params params_buf = {
             /*.mem_size   =*/ ggml_tensor_overhead()*tensors.size(),
             /*.mem_buffer =*/ NULL,
@@ -269,7 +251,7 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         }
         ggml_backend_buffer_ptr buf { ggml_backend_alloc_ctx_tensors_from_buft(ctx_buf.get(), buft) };
         if (!buf) {
-            throw std::runtime_error(format("inkling2: unable to allocate the %s buffer of the fused attention projections", ggml_backend_buft_name(buft)));
+            throw std::runtime_error(format("inkling2: unable to allocate the %s buffer of the fused weights", ggml_backend_buft_name(buft)));
         }
         ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
         for (size_t j = 0; j < tensors.size(); ++j) {
@@ -279,39 +261,78 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         fused_bufs.emplace_back(std::move(buf));
     }
 
-    // load the pieces
     std::vector<uint8_t> staging;
+    for (const auto & f : fused_pending) {
+        for (const auto & [name, offs] : f.pieces) {
+            const llama_model_loader::llama_tensor_weight & w = ml.require_weight(name.c_str());
+            const size_t nbytes = ggml_nbytes(w.tensor);
+            GGML_ASSERT(w.tensor->type == f.t->type && offs + nbytes <= ggml_nbytes(f.t));
+
+            // read from the file: the loader unmaps the regions of the skipped tensors
+            staging.resize(nbytes);
+            const auto & file = ml.files.at(w.idx);
+            file->seek(w.offs, SEEK_SET);
+            file->read_raw(staging.data(), nbytes);
+            ggml_backend_tensor_set(f.t, staging.data(), offs, nbytes);
+        }
+    }
+
+    LLAMA_LOG_INFO("%s: assembled %zu fused weight tensors\n", __func__, fused_pending.size());
+    fused_pending.clear();
+}
+
+// concatenate the attention input projections of each layer into one matrix, loaded straight from the file,
+// and point the layer's tensors at the row groups of that matrix
+void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
+    const int64_t n_embd = hparams.n_embd;
+
+    // the fused projection matrices
     for (int i = 0; i < n_layer_phys(); ++i) {
         auto & fa = fused_attn[i];
         if (fa.pieces.empty()) {
             continue;
         }
+        const ggml_type type = ml.get_tensor_meta(fa.pieces[0].first.c_str())->type;
+        int64_t n_rows = 0;
+        for (const auto & piece : fa.pieces) {
+            n_rows += piece.second;
+        }
+        fa.w = ggml_new_tensor_2d(fused_context(), type, n_embd, n_rows);
+        ggml_format_name(fa.w, "blk.%d.attn_fused.weight", i);
+
+        fused_tensor f;
+        f.t   = fa.w;
+        f.ref = layers[i].wo;
+        const size_t row_size = ggml_row_size(type, n_embd);
+        int64_t row = 0;
+        for (const auto & [name, n_piece] : fa.pieces) {
+            f.pieces.emplace_back(name, row*row_size);
+            row += n_piece;
+        }
+        fused_pending.push_back(std::move(f));
+    }
+
+    load_fused(ml);
+
+    // the layer tensors of the pieces become views of the fused matrices
+    int n_fused = 0;
+    for (int i = 0; i < n_layer_phys(); ++i) {
+        auto & fa = fused_attn[i];
+        if (fa.pieces.empty()) {
+            continue;
+        }
+        n_fused++;
         auto & layer = layers[i];
 
         const size_t row_size = ggml_row_size(fa.w->type, n_embd);
 
         int64_t row = 0;
         for (const auto & [name, n_piece] : fa.pieces) {
-            const llama_model_loader::llama_tensor_weight & w = ml.require_weight(name.c_str());
-            GGML_ASSERT(w.tensor->type == fa.w->type && w.tensor->ne[0] == n_embd && w.tensor->ne[1] == n_piece);
-
-            // read from the file: the loader unmaps the regions of the skipped tensors
-            const size_t nbytes = ggml_nbytes(w.tensor);
-            staging.resize(nbytes);
-            const auto & file = ml.files.at(w.idx);
-            file->seek(w.offs, SEEK_SET);
-            file->read_raw(staging.data(), nbytes);
-            ggml_backend_tensor_set(fa.w, staging.data(), row*row_size, nbytes);
-
-            // the layer tensor of this piece becomes a view of the fused matrix
-            ggml_tensor * view = ggml_view_2d(fused_ctx.get(), fa.w, n_embd, n_piece, row_size, row*row_size);
+            ggml_tensor * view = ggml_view_2d(fused_context(), fa.w, n_embd, n_piece, row_size, row*row_size);
             ggml_set_name(view, name.c_str());
             tensors_by_name.emplace_back(name, view);
 
-            const int64_t n_head    = hparams.n_head(i);
-            const int64_t n_head_kv = hparams.n_head_kv(i);
-            const int64_t n_embd_head = hparams.n_embd_head_k(i);
-            if (n_piece == n_embd_head*n_head && name == tn(LLM_TENSOR_ATTN_Q, "weight", i).str()) {
+            if (name == tn(LLM_TENSOR_ATTN_Q, "weight", i).str()) {
                 layer.wq = view;
             } else if (name == tn(LLM_TENSOR_ATTN_REL, "weight", i).str()) {
                 layer.attn_rel = view;
@@ -340,19 +361,34 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
             } else {
                 GGML_ABORT("inkling2: unexpected fused piece %s", name.c_str());
             }
-            GGML_UNUSED(n_head_kv);
 
             row += n_piece;
         }
         GGML_ASSERT(row == fa.w->ne[1] && fa.n_q + fa.n_k + fa.n_v == row);
 
-        fa.q = ggml_view_2d(fused_ctx.get(), fa.w, n_embd, fa.n_q, row_size, 0);
-        fa.k = ggml_view_2d(fused_ctx.get(), fa.w, n_embd, fa.n_k, row_size, fa.n_q*row_size);
-        fa.v = ggml_view_2d(fused_ctx.get(), fa.w, n_embd, fa.n_v, row_size, (fa.n_q + fa.n_k)*row_size);
+        fa.q = ggml_view_2d(fused_context(), fa.w, n_embd, fa.n_q, row_size, 0);
+        fa.k = ggml_view_2d(fused_context(), fa.w, n_embd, fa.n_k, row_size, fa.n_q*row_size);
+        fa.v = ggml_view_2d(fused_context(), fa.w, n_embd, fa.n_v, row_size, (fa.n_q + fa.n_k)*row_size);
         ggml_format_name(fa.q, "blk.%d.attn_fused_q.weight", i);
         ggml_format_name(fa.k, "blk.%d.attn_fused_k.weight", i);
         ggml_format_name(fa.v, "blk.%d.attn_fused_v.weight", i);
+
+        // the q, k, v input norms of a full-attention layer, stacked for the batched controllers
+        if (!hparams.is_swa(i) && layer.attn_q_inp_norm && layer.attn_k_inp_norm && layer.attn_v_inp_norm) {
+            ggml_tensor * stacked = ggml_new_tensor_2d(fused_context(), GGML_TYPE_F32, n_embd, 3);
+            ggml_format_name(stacked, "blk.%d.attn_inp_norm_qkv.weight", i);
+            fused_tensor f;
+            f.t   = stacked;
+            f.ref = layers[i].wo;
+            f.pieces.emplace_back(tn(LLM_TENSOR_ATTN_Q_INP_NORM, "weight", i).str(), 0*n_embd*sizeof(float));
+            f.pieces.emplace_back(tn(LLM_TENSOR_ATTN_K_INP_NORM, "weight", i).str(), 1*n_embd*sizeof(float));
+            f.pieces.emplace_back(tn(LLM_TENSOR_ATTN_V_INP_NORM, "weight", i).str(), 2*n_embd*sizeof(float));
+            fused_pending.push_back(std::move(f));
+            attn_inp_norm_qkv[i] = stacked;
+        }
     }
+
+    load_fused(ml);
 
     // the cache slots past the physical layers share the weights
     for (int il = n_layer_phys(); il < (int) hparams.n_layer(); ++il) {
@@ -593,21 +629,47 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
 
     // attention inputs: SWA layers mix one, full-attention layers one each for Q, K and V
     ggml_tensor * inputs[3] = {cur, cur, cur};
+    ggml_tensor * mixed = nullptr;
     if (layer.attn_res_query) {
-        ggml_tensor * mixed = mix(blocks, cur, layer.attn_res_query);
+        mixed = mix(blocks, cur, layer.attn_res_query);
         for (int j = 0; j < 3; ++j) {
             inputs[j] = mixed_view(mixed, is_swa ? 0 : j);
         }
     }
 
-    if (messages) {
+    bool inputs_normed = false;
+    if (messages && fused && loop->ctrl_down_qkv) {
+        // the q, k and v controllers in one batched op each, the input norm fused into the second
+        ggml_tensor * msgs3 = ggml_view_3d(ctx0, messages, n_embd, n_tokens, 3, messages->nb[1], messages->nb[2], 0);
+        ggml_tensor * cur3  = inputs[0];
+        ggml_tensor * norm3 = layer.attn_norm;
+        if (!is_swa) {
+            // the Q, K and V inputs are the three mixes: [n_embd, n_tokens, 3]
+            GGML_ASSERT(mixed != nullptr && mixed->ne[2] == 3);
+            cur3  = mixed;
+            norm3 = static_cast<const llama_model_inkling2 &>(model).attn_inp_norm_qkv[ip];
+        }
+        if (norm3 != nullptr) {
+            ggml_tensor * d    = ggml_loop_ctrl_down(ctx0, loop->ctrl_down_qkv, cur3, msgs3, 1e-6f);
+            ggml_tensor * out3 = ggml_loop_ctrl_apply(ctx0, cur3, msgs3, d, loop->ctrl_gain_qkv, loop->ctrl_forget_qkv, norm3, hparams.f_norm_rms_eps);
+            cb(out3, "attn_ctrl", il);
+            for (int j = 0; j < 3; ++j) {
+                inputs[j] = ggml_view_2d(ctx0, out3, n_embd, n_tokens, out3->nb[1], j*out3->nb[2]);
+            }
+            inputs_normed = true;
+        }
+    }
+
+    if (messages && !inputs_normed) {
         // the messages make the Q, K and V inputs of a SWA layer differ
         for (int j = 0; j < 3; ++j) {
             inputs[j] = control(inputs[j], message(LOOP_CTRL_Q + j), *loop, LOOP_CTRL_Q + j);
         }
     }
 
-    if (is_swa && messages) {
+    if (inputs_normed) {
+        // normalized by the controllers
+    } else if (is_swa && messages) {
         for (int j = 0; j < 3; ++j) {
             inputs[j] = build_norm(inputs[j], layer.attn_norm, nullptr, LLM_NORM_RMS, il);
         }

@@ -12902,32 +12902,35 @@ void ggml_compute_forward_loop_ctrl_down(const ggml_compute_params * params, ggm
     const int64_t n     = a->ne[0];
     const int64_t n_tok = a->ne[1];
     const int64_t rank  = w->ne[1];
+    const int64_t B     = w->ne[2];
 
     const int ith = params->ith;
     const int nth = params->nth;
 
-    for (int64_t t = 0; t < n_tok; ++t) {
-        const float * av = (const float *) ((const char *) a->data + t*a->nb[1]);
-        const float * bv = (const float *) ((const char *) b->data + t*b->nb[1]);
+    for (int64_t ib = 0; ib < B; ++ib) {
+        for (int64_t t = 0; t < n_tok; ++t) {
+            const float * av = (const float *) ((const char *) a->data + t*a->nb[1] + (a->ne[2] == 1 ? 0 : ib)*a->nb[2]);
+            const float * bv = (const float *) ((const char *) b->data + t*b->nb[1] + ib*b->nb[2]);
 
-        ggml_float sa = 0.0, sb = 0.0;
-        for (int64_t i = 0; i < n; ++i) {
-            sa += (ggml_float) (av[i]*av[i]);
-            sb += (ggml_float) (bv[i]*bv[i]);
-        }
-        const float ra = 1.0f/sqrtf((float) (sa/n) + eps);
-        const float rb = 1.0f/sqrtf((float) (sb/n) + eps);
+            ggml_float sa = 0.0, sb = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                sa += (ggml_float) (av[i]*av[i]);
+                sb += (ggml_float) (bv[i]*bv[i]);
+            }
+            const float ra = 1.0f/sqrtf((float) (sa/n) + eps);
+            const float rb = 1.0f/sqrtf((float) (sb/n) + eps);
 
-        for (int64_t k = ith; k < rank; k += nth) {
-            const float * wk = (const float *) ((const char *) w->data + k*w->nb[1]);
-            float sum = 0.0f;
-            for (int64_t i = 0; i < n; ++i) {
-                sum += wk[i]*(av[i]*ra);
+            for (int64_t k = ith; k < rank; k += nth) {
+                const float * wk = (const float *) ((const char *) w->data + k*w->nb[1] + ib*w->nb[2]);
+                float sum = 0.0f;
+                for (int64_t i = 0; i < n; ++i) {
+                    sum += wk[i]*(av[i]*ra);
+                }
+                for (int64_t i = 0; i < n; ++i) {
+                    sum += wk[n + i]*(bv[i]*rb);
+                }
+                ((float *) ((char *) dst->data + t*dst->nb[1] + ib*dst->nb[2]))[k] = sum;
             }
-            for (int64_t i = 0; i < n; ++i) {
-                sum += wk[n + i]*(bv[i]*rb);
-            }
-            ((float *) ((char *) dst->data + t*dst->nb[1]))[k] = sum;
         }
     }
 }
@@ -12948,22 +12951,31 @@ void ggml_compute_forward_loop_ctrl_apply(const ggml_compute_params * params, gg
     const int64_t n     = cur->ne[0];
     const int64_t n_tok = cur->ne[1];
     const int64_t rank  = d->ne[0];
+    const int64_t B     = msg->ne[2];
 
     const int ith = params->ith;
     const int nth = params->nth;
 
-    // with the norm a token is one unit of work (the rows are reduced), else the elements are split
-    if (norm) {
-        for (int64_t t = ith; t < n_tok; t += nth) {
-            const float * dv = (const float *) ((const char *) d->data + t*d->nb[1]);
-            const float * cv = (const float *) ((const char *) cur->data + t*cur->nb[1]);
-            const float * mv = (const float *) ((const char *) msg->data + t*msg->nb[1]);
-            float       * y  = (float *) ((char *) dst->data + t*dst->nb[1]);
+    // with the norm a (token, batch) is one unit of work (the rows are reduced), else the elements are split
+    for (int64_t ib = 0; ib < B; ++ib) {
+        for (int64_t t = 0; t < n_tok; ++t) {
+            if (norm && (ib*n_tok + t) % nth != ith) {
+                continue;
+            }
+            const float * dv = (const float *) ((const char *) d->data + t*d->nb[1] + ib*d->nb[2]);
+            const float * cv = (const float *) ((const char *) cur->data + t*cur->nb[1] + (cur->ne[2] == 1 ? 0 : ib)*cur->nb[2]);
+            const float * mv = (const float *) ((const char *) msg->data + t*msg->nb[1] + ib*msg->nb[2]);
+            float       * y  = (float *) ((char *) dst->data + t*dst->nb[1] + ib*dst->nb[2]);
+            const char  * wgb = (const char *) wg->data + ib*wg->nb[2];
+            const char  * wfb = (const char *) wf->data + ib*wf->nb[2];
+
+            const int64_t i0 = norm ? 0 : ith;
+            const int64_t is = norm ? 1 : nth;
 
             ggml_float ss = 0.0;
-            for (int64_t i = 0; i < n; ++i) {
-                const float * g = (const float *) ((const char *) wg->data + i*wg->nb[1]);
-                const float * f = (const float *) ((const char *) wf->data + i*wf->nb[1]);
+            for (int64_t i = i0; i < n; i += is) {
+                const float * g = (const float *) (wgb + i*wg->nb[1]);
+                const float * f = (const float *) (wfb + i*wf->nb[1]);
                 float sg = 0.0f, sf = 0.0f;
                 for (int64_t k = 0; k < rank; ++k) {
                     sg += g[k]*dv[k];
@@ -12974,32 +12986,13 @@ void ggml_compute_forward_loop_ctrl_apply(const ggml_compute_params * params, gg
                 y[i] = (cv[i] - forget*cv[i]) + gain*mv[i];
                 ss += (ggml_float) (y[i]*y[i]);
             }
-            const float scale = 1.0f/sqrtf((float) (ss/n) + eps);
-            const float * nw = (const float *) norm->data;
-            for (int64_t i = 0; i < n; ++i) {
-                y[i] = y[i]*scale*nw[i];
+            if (norm) {
+                const float scale = 1.0f/sqrtf((float) (ss/n) + eps);
+                const float * nw = (const float *) ((const char *) norm->data + (ggml_nrows(norm) == 1 ? 0 : ib)*norm->nb[1]);
+                for (int64_t i = 0; i < n; ++i) {
+                    y[i] = y[i]*scale*nw[i];
+                }
             }
-        }
-        return;
-    }
-
-    for (int64_t t = 0; t < n_tok; ++t) {
-        const float * dv = (const float *) ((const char *) d->data + t*d->nb[1]);
-        const float * cv = (const float *) ((const char *) cur->data + t*cur->nb[1]);
-        const float * mv = (const float *) ((const char *) msg->data + t*msg->nb[1]);
-        float       * y  = (float *) ((char *) dst->data + t*dst->nb[1]);
-
-        for (int64_t i = ith; i < n; i += nth) {
-            const float * g = (const float *) ((const char *) wg->data + i*wg->nb[1]);
-            const float * f = (const float *) ((const char *) wf->data + i*wf->nb[1]);
-            float sg = 0.0f, sf = 0.0f;
-            for (int64_t k = 0; k < rank; ++k) {
-                sg += g[k]*dv[k];
-                sf += f[k]*dv[k];
-            }
-            const float gain   = tanhf(sg);
-            const float forget = tanhf(sf);
-            y[i] = (cv[i] - forget*cv[i]) + gain*mv[i];
         }
     }
 }

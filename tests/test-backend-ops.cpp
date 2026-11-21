@@ -5117,19 +5117,21 @@ struct test_loop_ctrl_down : public test_case {
     const int64_t n;
     const int64_t rank;
     const int64_t n_tok;
+    const int64_t B;
+    const bool    a_shared; // a [n, n_tok] for all batches
 
     std::string vars() override {
-        return VARS_TO_STR3(n, rank, n_tok);
+        return VARS_TO_STR5(n, rank, n_tok, B, a_shared);
     }
 
-    test_loop_ctrl_down(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1) : n(n), rank(rank), n_tok(n_tok) {}
+    test_loop_ctrl_down(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, int64_t B = 1, bool a_shared = false) : n(n), rank(rank), n_tok(n_tok), B(B), a_shared(a_shared) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2*n, rank);
+        ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 2*n, rank, B);
         ggml_set_name(w, "w");
-        ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n, n_tok);
+        ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, n_tok, a_shared ? 1 : B);
         ggml_set_name(a, "a");
-        ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n, n_tok);
+        ggml_tensor * b = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, n_tok, B);
         ggml_set_name(b, "b");
 
         ggml_tensor * out = ggml_loop_ctrl_down(ctx, w, a, b, 1e-6f);
@@ -5145,27 +5147,31 @@ struct test_loop_ctrl_apply : public test_case {
     const int64_t rank;
     const int64_t n_tok;
     const bool    with_norm;
+    const int64_t B;
+    const bool    cur_shared;
+    const bool    norm_per_batch;
 
     std::string vars() override {
-        return VARS_TO_STR4(n, rank, n_tok, with_norm);
+        return VARS_TO_STR7(n, rank, n_tok, with_norm, B, cur_shared, norm_per_batch);
     }
 
-    test_loop_ctrl_apply(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, bool with_norm = false) : n(n), rank(rank), n_tok(n_tok), with_norm(with_norm) {}
+    test_loop_ctrl_apply(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, bool with_norm = false, int64_t B = 1, bool cur_shared = false, bool norm_per_batch = false)
+        : n(n), rank(rank), n_tok(n_tok), with_norm(with_norm), B(B), cur_shared(cur_shared), norm_per_batch(norm_per_batch) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * cur = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n, n_tok);
+        ggml_tensor * cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, n_tok, cur_shared ? 1 : B);
         ggml_set_name(cur, "cur");
-        ggml_tensor * msg = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n, n_tok);
+        ggml_tensor * msg = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, n_tok, B);
         ggml_set_name(msg, "msg");
-        ggml_tensor * d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rank, n_tok);
+        ggml_tensor * d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n_tok, B);
         ggml_set_name(d, "d");
-        ggml_tensor * wg = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rank, n);
+        ggml_tensor * wg = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n, B);
         ggml_set_name(wg, "wg");
-        ggml_tensor * wf = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rank, n);
+        ggml_tensor * wf = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n, B);
         ggml_set_name(wf, "wf");
         ggml_tensor * nw = nullptr;
         if (with_norm) {
-            nw = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
+            nw = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n, norm_per_batch ? B : 1);
             ggml_set_name(nw, "nw");
         }
 
@@ -12187,10 +12193,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1));
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 5));
     test_cases.emplace_back(new test_loop_ctrl_down(100, 7, 3));
+    test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1, 3, true));
+    test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 4, 3, false));
+    test_cases.emplace_back(new test_loop_ctrl_down(100, 7, 3, 2, true));
     for (bool with_norm : {false, true}) {
         test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, with_norm));
         test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 5, with_norm));
         test_cases.emplace_back(new test_loop_ctrl_apply(100, 7, 3, with_norm));
+        test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, with_norm, 3, true, false));
+        test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 4, with_norm, 3, false, true));
+        test_cases.emplace_back(new test_loop_ctrl_apply(100, 7, 3, with_norm, 2, true, true));
     }
     test_cases.emplace_back(new test_moe_sum(2304, 8, 1));
     test_cases.emplace_back(new test_moe_sum(2304, 8, 7));
@@ -14128,6 +14140,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1));
     test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1));
     test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, true));
+    test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1, 3, true));
+    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, true, 3, true, false));
     test_cases.emplace_back(new test_shortconv_res(4, 2304, 1, 1, 0, true, 1));
     test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, 8, false, 1));
     test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, 0, false, 1, 1));

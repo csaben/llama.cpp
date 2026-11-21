@@ -2505,6 +2505,10 @@ struct llama_model_inkling2 : public llama_model_base {
         ggml_tensor * ctrl_down[LOOP_CTRL_COUNT]   = {};
         ggml_tensor * ctrl_gain[LOOP_CTRL_COUNT]   = {};
         ggml_tensor * ctrl_forget[LOOP_CTRL_COUNT] = {};
+        // the q, k and v controllers stacked along the third dimension (one batched op for the three), when fused
+        ggml_tensor * ctrl_down_qkv   = nullptr;
+        ggml_tensor * ctrl_gain_qkv   = nullptr;
+        ggml_tensor * ctrl_forget_qkv = nullptr;
     };
 
     // the attention input projections of a physical layer concatenated along their rows into one quantized matrix:
@@ -2522,8 +2526,23 @@ struct llama_model_inkling2 : public llama_model_base {
         std::vector<std::pair<std::string, int64_t>> pieces;
     };
     std::vector<attn_fused> fused_attn; // indexed by physical layer; w == nullptr: not fused
+    // the q, k, v input norms of a full-attention layer stacked as [n_embd, 3] (nullptr for SWA layers)
+    std::vector<ggml_tensor *> attn_inp_norm_qkv;
+
+    // tensors assembled from several file tensors after loading: each piece is a file tensor copied to a byte offset
+    struct fused_tensor {
+        ggml_tensor * t   = nullptr;
+        ggml_tensor * ref = nullptr; // a loaded tensor of the same layer, for the buffer type
+        std::vector<std::pair<std::string, size_t>> pieces;
+    };
+    std::vector<fused_tensor> fused_pending;
     std::vector<ggml_backend_buffer_ptr> fused_bufs;
     ggml_context_ptr fused_ctx;
+    bool fuse_weights = false; // decided in load_arch_tensors
+
+    ggml_context * fused_context();
+    // the loader skips the pieces (TENSOR_SKIP), load_fused reads them from the file into the assembled tensors
+    void load_fused(llama_model_loader & ml);
     void load_arch_tensors_post(llama_model_loader & ml) override;
 
     struct graph : public llm_graph_context {
@@ -2602,6 +2621,7 @@ struct llama_model_inkling2_loop : public llama_model_inkling2 {
         graph(const llm_graph_params & params);
     };
 
+    void load_arch_tensors_post(llama_model_loader & ml) override;
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };
 

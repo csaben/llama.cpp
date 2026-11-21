@@ -2396,6 +2396,7 @@ extern "C" {
             enum   ggml_type      type);
 
     // d = w^T * concat(rms_norm(a, eps), rms_norm(b, eps)):  w [2*n, rank], a, b [n, n_tokens] -> [rank, n_tokens]
+    // batched: w [2*n, rank, B], a [n, n_tokens, 1 or B], b [n, n_tokens, B] -> [rank, n_tokens, B]
     GGML_API struct ggml_tensor * ggml_loop_ctrl_down(
             struct ggml_context * ctx,
             struct ggml_tensor  * w,
@@ -2405,6 +2406,7 @@ extern "C" {
 
     // out = cur - tanh(w_forget^T d)*cur + tanh(w_gain^T d)*msg:  w_* [rank, n], d [rank, n_tokens], cur, msg [n, n_tokens]
     // with norm_w [n], the result is RMS-normalized (eps) and multiplied by norm_w
+    // batched: w_* [rank, n, B], d [rank, n_tokens, B], cur [n, n_tokens, 1 or B], msg [n, n_tokens, B], norm_w [n, 1 or B] -> [n, n_tokens, B]
     GGML_API struct ggml_tensor * ggml_loop_ctrl_apply(
             struct ggml_context * ctx,
             struct ggml_tensor  * cur,

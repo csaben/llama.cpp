@@ -5859,13 +5859,16 @@ struct ggml_tensor * ggml_loop_ctrl_down(
         struct ggml_tensor  * b,
         float                 eps) {
     GGML_ASSERT(w->type == GGML_TYPE_F32 && a->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F32);
-    GGML_ASSERT(ggml_is_matrix(w) && ggml_is_contiguous(w));
-    GGML_ASSERT(ggml_is_matrix(a) && ggml_is_matrix(b));
+    GGML_ASSERT(ggml_is_contiguous(w) && w->ne[3] == 1);
+    GGML_ASSERT(a->ne[3] == 1 && b->ne[3] == 1);
     GGML_ASSERT(a->nb[0] == sizeof(float) && b->nb[0] == sizeof(float));
-    GGML_ASSERT(ggml_are_same_shape(a, b));
+    GGML_ASSERT(a->ne[0] == b->ne[0] && a->ne[1] == b->ne[1]);
     GGML_ASSERT(w->ne[0] == 2*a->ne[0]);
 
-    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, w->ne[1], a->ne[1]);
+    const int64_t B = w->ne[2];
+    GGML_ASSERT(b->ne[2] == B && (a->ne[2] == 1 || a->ne[2] == B));
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, w->ne[1], a->ne[1], B);
 
     ggml_set_op_params_f32(result, 0, eps);
 
@@ -5890,18 +5893,22 @@ struct ggml_tensor * ggml_loop_ctrl_apply(
         float                 eps) {
     GGML_ASSERT(cur->type == GGML_TYPE_F32 && msg->type == GGML_TYPE_F32 && d->type == GGML_TYPE_F32);
     GGML_ASSERT(w_gain->type == GGML_TYPE_F32 && w_forget->type == GGML_TYPE_F32);
-    GGML_ASSERT(ggml_is_matrix(cur) && ggml_is_matrix(msg) && ggml_is_matrix(d));
-    GGML_ASSERT(ggml_are_same_shape(cur, msg));
+    GGML_ASSERT(cur->ne[3] == 1 && msg->ne[3] == 1 && d->ne[3] == 1);
+    GGML_ASSERT(cur->ne[0] == msg->ne[0] && cur->ne[1] == msg->ne[1]);
     GGML_ASSERT(cur->nb[0] == sizeof(float) && msg->nb[0] == sizeof(float));
     GGML_ASSERT(ggml_is_contiguous(d) && ggml_is_contiguous(w_gain) && ggml_is_contiguous(w_forget));
     GGML_ASSERT(ggml_are_same_shape(w_gain, w_forget));
     GGML_ASSERT(w_gain->ne[0] == d->ne[0] && w_gain->ne[1] == cur->ne[0] && d->ne[1] == cur->ne[1]);
 
+    const int64_t B = msg->ne[2];
+    GGML_ASSERT(w_gain->ne[2] == B && d->ne[2] == B && (cur->ne[2] == 1 || cur->ne[2] == B));
+
     if (norm_w) {
-        GGML_ASSERT(norm_w->type == GGML_TYPE_F32 && ggml_is_contiguous(norm_w) && ggml_nelements(norm_w) == cur->ne[0]);
+        GGML_ASSERT(norm_w->type == GGML_TYPE_F32 && ggml_is_contiguous(norm_w));
+        GGML_ASSERT(norm_w->ne[0] == cur->ne[0] && (ggml_nrows(norm_w) == 1 || ggml_nrows(norm_w) == B));
     }
 
-    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cur->ne[0], cur->ne[1]);
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, cur->ne[0], cur->ne[1], B);
 
     ggml_set_op_params_f32(result, 0, eps);
 
