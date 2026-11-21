@@ -1,0 +1,22 @@
+Explain step by step how TCP slow start and congestion avoidance work.
+
+sobes.tech AI
+
+Answer from AI
+
+Slow Start:
+
+  • When establishing a connection, the sender has an initial small value of the congestion window (cwnd).
+  • Each received ACK increases cwnd exponentially until reaching the threshold (ssthresh).
+  • This allows quickly filling the bandwidth without overloading the network.
+
+Congestion Avoidance:
+
+  • When cwnd exceeds ssthresh, increase occurs more linearly (by one MSS per RTT).
+  • This helps avoid sharp drops in throughput and prevent packet loss.
+
+When detecting packet loss (e.g., retransmission or timeout), TCP decreases cwnd and ssthresh, shifting to slow start or a more conservative mode.
+
+Example: initially cwnd is small, grows exponentially, then slows down by one packet per RTT until loss occurs, after which cwnd is reset to half or an initial value.
+
+This mechanism ensures efficient

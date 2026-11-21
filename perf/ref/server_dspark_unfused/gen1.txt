@@ -1,0 +1,16 @@
+Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests. Keywords: duration, parse, time, duration, ISO-8601, seconds, pytest. Modify, Not: Format durations, or add new components beyond years, months, weeks, days, hours, minutes, seconds.
+
+Challenge: Your Python function will take a duration, e.g., 'P3DT2H30M', and convert it into seconds, yielding e.g. 11850.
+
+This challenge was originally inspired by Neal Agarwal's 2020 pycon challenge, which can be found at: greatchallenge.forman.ai/challenges/ParseDuration
+
+Implement `parse_duration` (reference) in `parse_duration.py`, and keep the tests in `parse_duration_tests.py`.
+
+Test Cases
+
+```
+from hypothesis import given, strategies as st
+from parse_duration import parse_duration
+
+def test_simple_days():
+    """Test simple

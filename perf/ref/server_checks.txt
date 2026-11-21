@@ -1,0 +1,34 @@
+=== plain
+gen1: 200 tok at 105.9 tok/s
+gen2: 200 tok at 105.9 tok/s
+gen3: 200 tok at 105.9 tok/s
+  T=0.0  700 tok  gen  115.9 tok/s  prompt  472.7
+  T=0.0  700 tok  gen  115.7 tok/s  prompt  331.6
+  T=0.0  700 tok  gen  115.6 tok/s  prompt  337.1
+  T=0.7  700 tok  gen  115.4 tok/s  prompt  488.5
+  T=0.7  700 tok  gen  115.3 tok/s  prompt  334.0
+  T=0.7  700 tok  gen  115.5 tok/s  prompt  338.4
+  mean gen @T=0.0: 115.7 tok/s
+  mean gen @T=0.7: 115.4 tok/s
+=== dspark
+gen1: 200 tok at 61.4 tok/s draft 75/367
+gen2: 200 tok at 59.2 tok/s draft 69/385
+gen3: 200 tok at 50.0 tok/s draft 44/460
+  T=0.0  700 tok  gen  108.3 tok/s  prompt  448.7 draft 441/770
+  T=0.0  700 tok  gen   82.7 tok/s  prompt  308.4 draft 359/1018
+  T=0.0  700 tok  gen   97.6 tok/s  prompt  307.3 draft 415/848
+  T=0.7  700 tok  gen  111.4 tok/s  prompt  460.1 draft 451/740
+  T=0.7  700 tok  gen   74.0 tok/s  prompt  314.8 draft 320/1135
+  T=0.7  700 tok  gen   84.2 tok/s  prompt  316.5 draft 367/995
+  mean gen @T=0.0: 96.2 tok/s
+  mean gen @T=0.7: 89.9 tok/s
+=== dspark unfused (reference for the rollback-slot path)
+gen1: 200 tok at 46.7 tok/s draft 86/333
+gen2: 200 tok at 41.3 tok/s draft 69/387
+gen3: 200 tok at 48.3 tok/s draft 89/328
+gen1 plain vs server_dspark: common prefix 100 of 615 700 
+gen1 plain vs server_dspark_unfused: common prefix 98 of 615 821 
+gen2 plain vs server_dspark: common prefix 72 of 906 857 
+gen2 plain vs server_dspark_unfused: common prefix 76 of 906 971 
+gen3 plain vs server_dspark: common prefix 72 of 923 935 
+gen3 plain vs server_dspark_unfused: common prefix 72 of 923 845 

@@ -1,0 +1,37 @@
+=== dspark n_max=2
+  T=0.7  700 tok  gen   78.3 tok/s  prompt  308.4 draft 295/806
+  T=0.7  700 tok  gen   93.6 tok/s  prompt  317.2 draft 361/673
+  mean gen @T=0.0: 96.6 tok/s
+  mean gen @T=0.7: 89.5 tok/s
+=== dspark n_max=1
+  T=0.7  700 tok  gen   81.0 tok/s  prompt  312.0 draft 255/443
+  T=0.7  700 tok  gen   84.3 tok/s  prompt  320.7 draft 272/426
+  mean gen @T=0.0: 87.0 tok/s
+  mean gen @T=0.7: 84.6 tok/s
+=== profile
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |  16.41 GiB |    26.07 B | CUDA       |  99 |   1 |            tg64 |        117.07 ± 0.00 |
+tokens 65: GPU kernel time/token 8.11 ms, launches/token 1614
+  4.762 ms/tok   249.0/tok   19.13 us avg  mul_mat_vec_q
+  0.448 ms/tok   120.0/tok    3.73 us avg  res_mix_f32_vec4
+  0.332 ms/tok   249.0/tok    1.33 us avg  quantize_q8_1
+  0.250 ms/tok    96.0/tok    2.60 us avg  l2_clip_f32
+  0.239 ms/tok    48.0/tok    4.97 us avg  loop_ctrl_down_f32
+  0.229 ms/tok    48.0/tok    4.77 us avg  flash_attn_ext_vec
+  0.222 ms/tok    48.0/tok    4.62 us avg  loop_ctrl_apply_f32
+  0.197 ms/tok    82.0/tok    2.41 us avg  rms_norm_f32
+  0.197 ms/tok    48.0/tok    4.10 us avg  rel_bias_kernel
+  0.179 ms/tok    96.0/tok    1.86 us avg  shortconv_res_post_f32
+  0.178 ms/tok    96.0/tok    1.86 us avg  shortconv_res_f32
+  0.170 ms/tok    48.0/tok    3.54 us avg  topk_moe_cuda
+  0.159 ms/tok    48.0/tok    3.31 us avg  mul_mat_vec_f
+  0.142 ms/tok    96.0/tok    1.48 us avg  situ_kernel
+  0.130 ms/tok    96.0/tok    1.36 us avg  k_set_rows
+  0.084 ms/tok    48.0/tok    1.74 us avg  moe_sum_f32
+  0.079 ms/tok    48.0/tok    1.64 us avg  flash_attn_combine_results
+  0.075 ms/tok    24.0/tok    3.12 us avg  rms_norm_mul_inplace_f32
+  0.023 ms/tok    16.0/tok    1.43 us avg  k_bin_bcast
+  0.003 ms/tok     3.0/tok    1.15 us avg  scale_f32
+  0.003 ms/tok     2.5/tok    1.23 us avg  fill_kernel
+  0.002 ms/tok     1.0/tok    2.34 us avg  softcap_f32
+  0.002 ms/tok     1.0/tok    1.66 us avg  k_get_rows_float
+  0.001 ms/tok     1.0/tok    1.23 us avg  cpy_scalar_contiguous

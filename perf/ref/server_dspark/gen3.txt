@@ -1,0 +1,9 @@
+Explain step by step how TCP slow start and congestion avoidance work.
+
+Put simply, it’s all about (read it as “how cold is AWS on this thread” etc):
+
+1) Initial congestion avoidance - is in place so that increasing traffic over the course of an encounter doesn’t kill stuff in some weird mess, right from the get go. Typically there is a lowish constant window of acknowledges that gets progressed by increasing one throughput on a known successful frame or frame for each known transmission. Instead of the framing dependant TCP or similar, you can use random numbers for the frame pointers.
+
+2) Congestion avoidance which is the one that doubles up an ack ratio (slow start) from 2 to 4ish etc and only then passes up to a utilization which can indicate the heat is getting high (say incoming or outflow data volume etc)
+
+And it’s easy enough to understand, just keep it as your main data point. Now here are the actual code snippet

@@ -1,0 +1,21 @@
+Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests.
+
+Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests.
+
+| improve this question | | | | |
+  • What is ISO-8601? - Russell Borogove
+    – sāk
+    Feb 9, 2011 at 1:53
+  • 3
+    I've edited it. Please check if my interpretation is correct. - Russell Borogove
+    – sāk
+    Feb 9, 2011 at 2:08
+  • This is a requirements task. Require clamping to int.
+    – Martineau
+    Dec 21, 2020 at 14:28
+
+5 Answers
+
+EDIT: Google has completely killed off the link to that Wikipedia page. See the latest results in the link below or Wikipedia's history.
+
+EDIT 11/25/2012:

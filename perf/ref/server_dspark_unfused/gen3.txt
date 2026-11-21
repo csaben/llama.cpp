@@ -1,0 +1,27 @@
+Explain step by step how TCP slow start and congestion avoidance work.
+
+Lets look at what TCP slow start and congestion avoidance actually do step by step. It is simpler than the terms make it sound.
+
+The goal
+
+TCP wants to keep the network fast but not overloaded.
+
+  • If it sends too much too fast, packets are dropped.
+
+  • If it stays too slow, the link is not used well.
+
+So it adjusts its send rate based on how the network is behaving.
+
+Two tools used
+
+  • cwnd: congestion window, how many segments TCP may send before waiting for ack.
+
+  • ssthresh: slow start threshold, the cwnd level where TCP stops exponential growth and switches to linear growth.
+
+Step 1: Start with slow start
+
+At the beginning (or after a loss), TCP sets cwnd to a small value (often 1 segment or a few segments).
+
+Then it does this:
+
+  • for each ack received

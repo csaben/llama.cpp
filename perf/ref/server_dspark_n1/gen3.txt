@@ -1,0 +1,6 @@
+Explain step by step how TCP slow start and congestion avoidance work. eval- Why limit sending to cwnd too? #55-56 #58-59 #62-64 Lecture 15 Early TCP Design: Sliding Window and Congestion Avoidance #5-7 2 and calculate the cwnd trajectory when there is no packet loss and RTT is 100 msec. #54-55, Networking Stack Supplemental Sliding Window #27 11/20/2015 - 11/23/2015 7/16/2026-10/24/2026
+
+Simulation Configuration:
+- RTT = 14.2857 msec (150pkt / 10.7 Gbps)
+- Initial cwnd at t=0 -> 10 pkt = 20 Mbps "1 Gbps / 50 Gbps (min-max) bandwidth link"
+- Max cwnd for the Simulation = 150 pkts = 1500 Mbps = "10Gbps / 50Gbps (

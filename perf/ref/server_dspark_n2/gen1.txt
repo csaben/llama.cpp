@@ -1,0 +1,10 @@
+Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests.
+
+Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests.
+
+ISO-8601 durations look something like `P1Y2M3DT4H5M6S` — but for a coding exercise you usually want just the days/hours/minutes/seconds part. The clean way is to split the string at `T`, strip the `P`, and walk the regex matches, converting each unit to seconds and summing. A negative or malformed input should raise a `ValueError` rather than silently return `0`.
+
+What the function should do
+
+  • Accept strings like `PT4H5M`, `P3D`, `P7DT2H`, `PT1H30M15S`, and `P0S`.
+  • Ignore the `Y` and `M` year/month components (
