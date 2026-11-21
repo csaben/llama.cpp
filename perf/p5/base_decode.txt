@@ -1,0 +1,10 @@
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        209.47 ± 0.30 |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |   tg128 @ d4096 |        168.69 ± 4.41 |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        148.92 ± 3.74 |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d32768 |        131.17 ± 3.21 |
+
+build: ffbd3af (101)
