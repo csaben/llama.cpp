@@ -3,7 +3,7 @@
 Run Inkling 2 Mini at about 200 tok/s on one RTX 3090. One command, with no CUDA toolkit and no build:
 
 ```bash
-uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090#subdirectory=tools/inkling-3090" inkling-3090
+uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090-v1#subdirectory=tools/inkling-3090" inkling-3090
 ```
 
 The first run downloads the following once and caches it under `~/.cache/inkling-3090` and the Hugging Face cache:

@@ -1,6 +1,6 @@
 """inkling-3090: one command to run Inkling 2 Mini fast on an RTX 3090.
 
-    uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090#subdirectory=tools/inkling-3090" inkling-3090
+    uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090-v1#subdirectory=tools/inkling-3090" inkling-3090
 
 Downloads (once, cached under ~/.cache/inkling-3090):
   - a prebuilt llama-server from the csaben/llama.cpp `inkling-3090` fork (Linux x86-64, CUDA 12.8, sm_86),
@@ -23,7 +23,7 @@ from pathlib import Path
 
 RELEASE_TAG = "inkling-3090-v1"
 ASSET = "llama-server-inkling-linux-x64-cuda12.8-sm86.tar.gz"
-ASSET_SHA256 = "@ASSET_SHA256@"
+ASSET_SHA256 = "92344638f9702913033e4f71fc07f47a958b27fdf755b12c742c067404401238"
 ASSET_URL = f"https://github.com/csaben/llama.cpp/releases/download/{RELEASE_TAG}/{ASSET}"
 
 MODELS = {
@@ -73,8 +73,12 @@ def fetch_server() -> Path:
         return server
     dest.mkdir(parents=True, exist_ok=True)
     tgz = dest / ASSET
-    say(f"downloading {ASSET_URL}")
-    urllib.request.urlretrieve(ASSET_URL, tgz)
+    src = os.environ.get("INKLING3090_ASSET", ASSET_URL)  # a local tarball path or URL, for testing
+    say(f"downloading {src}")
+    if os.path.exists(src):
+        shutil.copy(src, tgz)
+    else:
+        urllib.request.urlretrieve(src, tgz)
     digest = hashlib.sha256(tgz.read_bytes()).hexdigest()
     if not ASSET_SHA256.startswith("@") and digest != ASSET_SHA256:
         tgz.unlink()
