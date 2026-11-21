@@ -4549,9 +4549,11 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     ggml_tensor * node = cgraph->nodes[i];
 
     static const bool segmented_iq4 = ggml_cuda_env_flag("IK_SEGMENTED_IQ4");
-    if (segmented_iq4 && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X &&
+    static const bool segmented_q6 = ggml_cuda_env_flag("IK_SEGMENTED_Q6");
+    if ((segmented_iq4 || segmented_q6) && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X &&
             cuda_ctx->stream_context().concurrent_events.empty() && node->op == GGML_OP_MUL_MAT &&
-            node->src[0]->type == GGML_TYPE_IQ4_NL && node->src[1]->type == GGML_TYPE_Q8_1 &&
+            ((segmented_iq4 && node->src[0]->type == GGML_TYPE_IQ4_NL) ||
+             (segmented_q6 && node->src[0]->type == GGML_TYPE_Q6_K)) && node->src[1]->type == GGML_TYPE_Q8_1 &&
             node->src[0]->buffer && ggml_backend_buffer_get_type(node->src[0]->buffer) == ggml_backend_cuda_buffer_type(cuda_ctx->device) &&
             ggml_is_matrix(node) && node->ne[1] == 3 && node->src[0]->ne[0] == 2304 &&
             ggml_is_contiguous(node->src[0]) && ggml_is_contiguous(node->src[1]) && ggml_is_contiguous(node) &&
@@ -4562,7 +4564,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         }
         if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_INKLING_ATTN &&
                 (cgraph->nodes[j]->flags & GGML_TENSOR_FLAG_COMPUTE) && cgraph->nodes[j]->src[0] == node) {
-            ggml_cuda_inkling_segmented_iq4(*cuda_ctx, node, cgraph->nodes[j]);
+            ggml_cuda_inkling_segmented_projection(*cuda_ctx, node, cgraph->nodes[j]);
             ggml_cuda_op_inkling_attn(*cuda_ctx, cgraph->nodes[j]);
             return j - i;
         }

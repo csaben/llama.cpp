@@ -15,4 +15,4 @@ void ggml_cuda_op_inkling_moe_down(ggml_backend_cuda_context & ctx, ggml_tensor 
 void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_inkling_proj(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
-void ggml_cuda_inkling_segmented_iq4(ggml_backend_cuda_context & ctx, ggml_tensor * projection, const ggml_tensor * attn);
+void ggml_cuda_inkling_segmented_projection(ggml_backend_cuda_context & ctx, ggml_tensor * projection, const ggml_tensor * attn);
