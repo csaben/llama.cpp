@@ -389,6 +389,36 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         }
     }
 
+    // the constants of the fused decode attention op
+    attn_consts.assign(n_layer_phys(), nullptr);
+    if (fuse_weights) {
+        for (int i = 0; i < n_layer_phys(); ++i) {
+            const auto & layer = layers[i];
+            const ggml_tensor * pieces[5] = { layer.attn_q_clip, layer.attn_rel_clip, layer.attn_k_conv, layer.attn_v_conv, layer.attn_rel_bias };
+            bool ok = fused_attn[i].w != nullptr;
+            size_t n = 0;
+            for (const ggml_tensor * t : pieces) {
+                ok = ok && t != nullptr && t->type == GGML_TYPE_F32;
+                n += t ? ggml_nelements(t) : 0;
+            }
+            if (!ok) {
+                continue;
+            }
+            ggml_tensor * consts = ggml_new_tensor_1d(fused_context(), GGML_TYPE_F32, n);
+            ggml_format_name(consts, "blk.%d.attn_consts.weight", i);
+            fused_tensor f;
+            f.t   = consts;
+            f.ref = layer.wo;
+            size_t offs = 0;
+            for (const ggml_tensor * t : pieces) {
+                f.pieces.emplace_back(ggml_get_name(t), offs);
+                offs += ggml_nbytes(t);
+            }
+            fused_pending.push_back(std::move(f));
+            attn_consts[i] = consts;
+        }
+    }
+
     load_fused(ml);
 
     // the cache slots past the physical layers share the weights
@@ -422,6 +452,20 @@ void llama_model_inkling2::graph::init_fused() {
         return env == nullptr || atoi(env) != 0;
     }();
     q8_act = fused && q8_enabled;
+
+    static const bool attn_op_enabled = [] {
+        const char * env = getenv("LLAMA_INKLING_ATTN_OP");
+        return env == nullptr || atoi(env) != 0;
+    }();
+    attn_op = fused && attn_op_enabled;
+
+    // 0: build_moe_ffn; 3 (default): merged gate|up matmul + SITU, down matmul, fused sum + conv + residual;
+    // 1: gate/up as two fusable matmuls (same speed); 2: the custom MoE kernels (slower, kept for tuning)
+    static const int moe_op_mode = [] {
+        const char * env = getenv("LLAMA_INKLING_MOE_OP");
+        return env == nullptr ? 3 : atoi(env);
+    }();
+    moe_op = fused ? moe_op_mode : 0;
 }
 
 // Q8_1 activations go to the quantized matvec kernels of the CUDA and CPU backends
@@ -623,7 +667,7 @@ ggml_tensor * llama_model_inkling2::graph::build_inputs() {
     attn = inp->get_attn();
     recr = inp->get_recr();
 
-    ggml_tensor * inp_pos = build_inp_pos();
+    inp_pos     = build_inp_pos();
     inp_out_ids = build_inp_out_ids();
 
     // log-scaled positions: 1 + alpha*log(max(1, (pos + 1)/floor)), multiplies q and r of the full-attention layers
@@ -767,14 +811,17 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
             ggml_tensor * out_q = nullptr;
             ggml_tensor * out_k = nullptr;
             ggml_tensor * out_v = nullptr;
+            ggml_tensor * proj  = nullptr; // the whole projection output, [n_rows, 1 or 3 columns]
             if (inputs[0] == inputs[1] && inputs[0] == inputs[2]) {
                 out_q = ggml_mul_mat(ctx0, fa.w, inputs[0]);
                 out_k = ggml_view_2d(ctx0, out_q, fa.n_k, n_tokens, out_q->nb[1], fa.n_q*sizeof(float));
                 out_v = ggml_view_2d(ctx0, out_q, fa.n_v, n_tokens, out_q->nb[1], (fa.n_q + fa.n_k)*sizeof(float));
+                proj  = out_q;
             } else if (inputs3 != nullptr && n_tokens <= 4) {
                 // few tokens: one matmul over the three inputs reads the weights once; the groups take their own columns
                 ggml_tensor * x3  = ggml_reshape_2d(ctx0, inputs3, n_embd, 3*n_tokens);
                 ggml_tensor * out = ggml_mul_mat(ctx0, fa.w, x3); // [n_q + n_k + n_v, 3*n_tokens]
+                proj  = out;
                 out_q = ggml_view_2d(ctx0, out, fa.n_q, n_tokens, out->nb[1], 0);
                 out_k = ggml_view_2d(ctx0, out, fa.n_k, n_tokens, out->nb[1], 1*n_tokens*out->nb[1] + fa.n_q*sizeof(float));
                 out_v = ggml_view_2d(ctx0, out, fa.n_v, n_tokens, out->nb[1], 2*n_tokens*out->nb[1] + (fa.n_q + fa.n_k)*sizeof(float));
@@ -784,6 +831,36 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                 out_v = ggml_mul_mat(ctx0, fa.v, inputs[2]);
             }
             cb(out_q, "attn_proj", il);
+
+            // single-token decode: the whole attention block (K/V convolutions and stores, clips, bias, attention, gate) in one op
+            ggml_tensor * consts = static_cast<const llama_model_inkling2 &>(model).attn_consts[ip];
+            ggml_tensor * mask_raw = is_swa ? attn->self_attn_mask_swa.raw : attn->self_attn_mask.raw;
+            if (attn_op && proj != nullptr && consts != nullptr && rs_ids != nullptr && n_tokens == 1 && ubatch.n_seqs == 1 &&
+                    mask_raw->ne[3] == 1 && mask_raw->ne[2] == 1 && n_embd_head == 128 && cparams.flash_attn) {
+                const auto * mctx_cur = is_swa ? attn->mctx->get_swa() : attn->mctx->get_base();
+                ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+                ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+                ggml_tensor * kv_idxs = is_swa ? attn->get_k_idxs_swa() : attn->get_k_idxs();
+                ggml_tensor * rel_pos = is_swa ? inp->self_rel_pos_swa : inp->self_rel_pos;
+                const bool kv_ok = k->type == v->type && (k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_Q8_0) && v->nb[1] < v->nb[2] &&
+                    k->ne[3] == 1 && rel_pos->ne[0] == k->ne[2] && mask_raw->ne[0] == k->ne[2];
+                if (kv_ok) {
+                    const auto & hp = hparams;
+                    cur = ggml_inkling_attn(ctx0, proj, consts, state, rs_ids, k, v, kv_idxs, rel_pos, mask_raw, is_swa ? nullptr : inp_pos,
+                            n_head, n_head_kv, n_embd_head, hp.n_relative, hp.n_shortconv_l_cache, !is_swa, recr->mctx->get_head(),
+                            hp.f_qk_clip, hp.f_relative_clip, hp.f_norm_rms_eps, hp.f_log_scale_alpha, (float) hp.n_log_scale_floor,
+                            1.0f/sqrtf(n_embd_head), a_type);
+                    cb(cur, "attn_gated", il);
+                    // the V cell indices are set with the K ones: keep their input allocated
+                    ggml_build_forward_expand(gf, is_swa ? attn->get_v_idxs_swa() : attn->get_v_idxs());
+
+                    const int ip_block = ip % hparams.attn_res_block_size;
+                    ggml_tensor * residual = ip_block == 0 ? nullptr : inpSA;
+                    cur = convolve(build_lora_mm(layer.wo, cur), layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa, residual);
+                    cb(cur, "attn_out", il);
+                    goto attn_done;
+                }
+            }
 
             Qcur = ggml_view_3d(ctx0, out_q, n_embd_head, n_head, n_tokens, n_embd_head*sizeof(float), out_q->nb[1], 0);
             Rcur = ggml_view_3d(ctx0, out_q, hparams.n_relative, n_head, n_tokens, hparams.n_relative*sizeof(float), out_q->nb[1], fa.off_rel*sizeof(float));
@@ -880,6 +957,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
         cur = convolve(build_lora_mm(layer.wo, cur), layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa, residual);
         cb(cur, "attn_out", il);
     }
+attn_done:
 
     if (ip % hparams.attn_res_block_size == 0) {
         blocks.push_back(inpSA);
@@ -901,26 +979,103 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
         cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
     }
 
-    cur = build_moe_ffn(cur,
-            layer.ffn_gate_inp,
-            nullptr,
-            nullptr,
-            layer.ffn_down_exps,
-            layer.ffn_exp_probs_b,
-            hparams.n_expert,
-            hparams.n_expert_used(il),
-            LLM_FFN_SITU, true,
-            hparams.expert_weights_scale,
-            LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID,
-            il,
-            nullptr,
-            layer.ffn_gate_up_exps,
-            layer.ffn_up_exps_s,
-            layer.ffn_gate_exps_s,
-            layer.ffn_down_exps_s);
+    const int64_t n_expert      = hparams.n_expert;
+    const int64_t n_expert_used = hparams.n_expert_used(il);
+    const bool moe_fused = moe_op && n_tokens == 1 && ubatch.n_seqs == 1 && rs_ids != nullptr && layer.ffn_gate_up_exps != nullptr &&
+        !layer.ffn_up_exps_s && !layer.ffn_gate_exps_s && !layer.ffn_down_exps_s && n_expert_used <= 8 && !cparams.moe_random_routing &&
+        (layer.ffn_gate_up_exps->type == GGML_TYPE_IQ4_NL || layer.ffn_gate_up_exps->type == GGML_TYPE_Q8_0) &&
+        layer.ffn_down_exps->type == layer.ffn_gate_up_exps->type && n_embd <= 4096;
+    if (moe_fused) {
+        // the router as in build_moe_ffn (sigmoid gating, normalized weights, scale), then the experts in two ops
+        ggml_tensor * logits = build_lora_mm(layer.ffn_gate_inp, cur); // [n_expert, 1]
+        ggml_prec_set_acc(logits, GGML_PREC_F32);
+        cb(logits, "ffn_moe_logits", il);
+        ggml_tensor * probs = ggml_sigmoid(ctx0, logits);
+        cb(probs, "ffn_moe_probs", il);
+        ggml_tensor * selection_probs = probs;
+        if (layer.ffn_exp_probs_b != nullptr) {
+            selection_probs = ggml_add(ctx0, probs, layer.ffn_exp_probs_b);
+            cb(selection_probs, "ffn_moe_probs_biased", il);
+        }
+        ggml_tensor * selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, 1]
+        probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
+        ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, 1]
+        cb(weights, "ffn_moe_weights", il);
+        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+        ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights);
+        cb(weights_sum, "ffn_moe_weights_sum", il);
+        if (hparams.expert_weights_norm_eps > 0.0f) {
+            weights_sum = ggml_scale_bias(ctx0, weights_sum, 1.0f, hparams.expert_weights_norm_eps);
+        } else {
+            weights_sum = ggml_clamp(ctx0, weights_sum, 6.103515625e-5, INFINITY);
+        }
+        weights = ggml_div(ctx0, weights, weights_sum);
+        cb(weights, "ffn_moe_weights_norm", il);
+        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+        if (hparams.expert_weights_scale != 0.0f && hparams.expert_weights_scale != 1.0f) {
+            weights = ggml_scale(ctx0, weights, hparams.expert_weights_scale);
+            cb(weights, "ffn_moe_weights_scaled", il);
+        }
+        ggml_build_forward_expand(gf, weights);
 
-    cur = convolve(cur, layer.ffn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa + n_embd, ffn_inp);
-    cb(cur, "l_out", il);
+        const float conv_scale = 1.0f/sqrtf(hparams.n_shortconv_l_cache + 1);
+        if (moe_op == 2) {
+            ggml_tensor * h = ggml_inkling_moe_up(ctx0, layer.ffn_gate_up_exps, cur, selected_experts, hparams.situ_beta, hparams.situ_linear_beta);
+            cb(h, "ffn_moe_situ", il);
+            cur = ggml_inkling_moe_down(ctx0, layer.ffn_down_exps, h, selected_experts, weights, layer.ffn_post_conv, state, rs_ids, ffn_inp,
+                    recr->mctx->get_head(), 2*n_embd_k_gqa + n_embd, conv_scale);
+        } else {
+            ggml_tensor * gu   = layer.ffn_gate_up_exps;
+            const int64_t n_ff = gu->ne[1]/2;
+            ggml_tensor * x3   = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
+            ggml_tensor * h    = nullptr;
+            if (moe_op == 3) {
+                // the merged gate|up matmul, then the activation on its two halves
+                ggml_tensor * gate_up = ggml_mul_mat_id(ctx0, gu, x3, selected_experts); // [2*n_ff, n_expert_used, 1]
+                ggml_tensor * gate = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
+                ggml_tensor * up   = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], n_ff*gate_up->nb[0]);
+                h = ggml_situ_split(ctx0, gate, up, hparams.situ_beta, hparams.situ_linear_beta);
+            } else {
+                // the gate and up halves of the merged matrix as two matmuls with the activation: one fused matvec launch (CUDA)
+                ggml_tensor * gate_w = ggml_view_3d(ctx0, gu, n_embd, n_ff, n_expert, gu->nb[1], gu->nb[2], 0);
+                ggml_tensor * up_w   = ggml_view_3d(ctx0, gu, n_embd, n_ff, n_expert, gu->nb[1], gu->nb[2], n_ff*gu->nb[1]);
+                // the views and the reshape enter the graph first, so the two matmuls and the GLU are consecutive nodes (CUDA fuses them)
+                ggml_build_forward_expand(gf, gate_w);
+                ggml_build_forward_expand(gf, up_w);
+                ggml_build_forward_expand(gf, x3);
+                ggml_tensor * gate = ggml_mul_mat_id(ctx0, gate_w, x3, selected_experts); // [n_ff, n_expert_used, 1]
+                ggml_tensor * up   = ggml_mul_mat_id(ctx0, up_w,   x3, selected_experts);
+                h = ggml_situ_split(ctx0, gate, up, hparams.situ_beta, hparams.situ_linear_beta);
+            }
+            cb(h, "ffn_moe_situ", il);
+            ggml_tensor * d = ggml_mul_mat_id(ctx0, layer.ffn_down_exps, h, selected_experts); // [n_embd, n_expert_used, 1]
+            cb(d, "ffn_moe_down", il);
+            cur = ggml_inkling_moe_sum_conv(ctx0, d, weights, layer.ffn_post_conv, state, rs_ids, ffn_inp,
+                    recr->mctx->get_head(), 2*n_embd_k_gqa + n_embd, conv_scale);
+        }
+        cb(cur, "l_out", il);
+    } else {
+        cur = build_moe_ffn(cur,
+                layer.ffn_gate_inp,
+                nullptr,
+                nullptr,
+                layer.ffn_down_exps,
+                layer.ffn_exp_probs_b,
+                hparams.n_expert,
+                hparams.n_expert_used(il),
+                LLM_FFN_SITU, true,
+                hparams.expert_weights_scale,
+                LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID,
+                il,
+                nullptr,
+                layer.ffn_gate_up_exps,
+                layer.ffn_up_exps_s,
+                layer.ffn_gate_exps_s,
+                layer.ffn_down_exps_s);
+
+        cur = convolve(cur, layer.ffn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa + n_embd, ffn_inp);
+        cb(cur, "l_out", il);
+    }
 
     return cur;
 }

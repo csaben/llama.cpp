@@ -1,4 +1,5 @@
 #include "inkling.cuh"
+#include "vecdotq.cuh"
 
 #include <cmath>
 
@@ -1092,13 +1093,29 @@ void ggml_cuda_op_moe_sum(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// persistent, zero-initialized arrival counters for the last-block-combines patterns: the kernels reset the counters they
+// use, so no memset node is needed per launch. Allocated once per context (allowed under relaxed stream capture).
+
+#define IK_N_COUNTERS 1024
+
+static int * ik_counters(ggml_backend_cuda_context & ctx, const int offset, const int n) {
+    GGML_ASSERT(offset + n <= IK_N_COUNTERS);
+    if (ctx.ik_counters == nullptr) {
+        ggml_cuda_set_device(ctx.device);
+        CUDA_CHECK(cudaMalloc(&ctx.ik_counters, IK_N_COUNTERS*sizeof(int)));
+        CUDA_CHECK(cudaMemset(ctx.ik_counters, 0, IK_N_COUNTERS*sizeof(int)));
+    }
+    return ctx.ik_counters + offset;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // inkling_attn: the single-token attention block, one block of 256 threads per (kv head, kv split): the K/V convolutions,
 // normalizations and cache stores, the Q/R clips, the relative bias table of the head group, the attention with a zero
 // sink logit over the cells of the split, the combination of the splits (last block) and the sigmoid gate
 
 #define IK_ATTN_HD         128
 #define IK_ATTN_GQA_MAX    4
-#define IK_ATTN_MAX_EXTENT 1024
+#define IK_ATTN_MAX_EXTENT 1024 // == 4*IK_ATTN_BLOCK (one table step)
 #define IK_ATTN_BLOCK      256
 #define IK_ATTN_WARPS      (IK_ATTN_BLOCK/WARP_SIZE)
 
@@ -1120,7 +1137,11 @@ struct ik_attn_args {
     int64_t c_relclip, c_kconv, c_vconv, c_table;
     float * part;  // [n_head_kv, n_split, gqa, HD + 2]: the partial sums, max and denominator of each split
     int   * counters;
+    int     dbg_skip; // timing experiments only (IK_ATTN_SKIP): 1 bias table, 2 attention loop, 4 Q/R phase
+    long long * dbg_times; // timing experiments only (IK_ATTN_TIMING): clock64 at the phase boundaries of block (0, 0) / the last block
 };
+
+#define IK_DBG_T(k) do { if (args.dbg_times && tid == 0 && blockIdx.x == 0 && blockIdx.y == 0) { args.dbg_times[k] = clock64(); } } while (0)
 
 template <typename cache_t>
 static __device__ __forceinline__ void ik_attn_load4(const char * __restrict__ row, const int lane, float * v) {
@@ -1174,65 +1195,152 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
     }
 
     const float * pr0 = args.proj; // column 0: Q, R, sink, gate
+    constexpr int G = IK_ATTN_GQA_MAX;
+    IK_DBG_T(0);
+    constexpr int U = 8; // cells per warp step
 
-    // --- the K (threads 0..127) and V (threads 128..255) channels of kv head g: convolution, state, post-normalization
+    // ===== round 1 of loads: everything that depends on no other load =====
+    // the K (threads 0..127) / V (threads 128..255) channel of this thread
+    const int     which  = tid/HD;
+    const int     ci     = tid % HD;
+    const int64_t ch     = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
+    const int     n_conv = args.n_conv;
+    float cur_in, w_c[8], taps[8];
     {
-        const int     which = tid/HD;
-        const int     i     = tid % HD;
-        const int64_t ch    = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + i; // state channel
-        const int64_t off   = which ? args.off_v : args.off_k;
-        const int64_t offt  = which ? args.off_vtaps : args.off_ktaps;
-        const int     col   = args.proj_ncols == 3 ? (which ? 2 : 1) : 0;
-        const float * pr    = args.proj + col*args.proj_s1;
-        const float * w     = args.consts + (which ? args.c_vconv : args.c_kconv) + ch*args.n_conv;
-        const int     n_conv = args.n_conv;
-        const float   scale  = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
+        const int64_t off  = which ? args.off_v : args.off_k;
+        const int64_t offt = which ? args.off_vtaps : args.off_ktaps;
+        const int     col  = args.proj_ncols == 3 ? (which ? 2 : 1) : 0;
+        const float * pr   = args.proj + col*args.proj_s1;
+        const float * w    = args.consts + (which ? args.c_vconv : args.c_kconv) + ((int64_t) g*HD + ci)*n_conv;
+        cur_in = pr[off + (int64_t) g*HD + ci];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            w_c[j]  = j < n_conv ? w[j] : 0.0f;
+            taps[j] = args.has_taps && j < n_conv ? pr[offt + (int64_t) g*n_conv + j] : 0.0f;
+        }
+    }
+    // Q, its clip scale and the gate (threads 0..127), R and its clip scale (warp 4), the sinks
+    float qv[G], gate_v[G], rv[G], sink_v[G];
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
+        qv[hh] = gate_v[hh] = rv[hh] = sink_v[hh] = 0.0f;
+        if (hh < gqa) {
+            const int h = g*gqa + hh;
+            if (tid < HD) {
+                qv[hh]     = pr0[(int64_t) h*HD + tid]*args.consts[(int64_t) h*HD + tid];
+                gate_v[hh] = pr0[args.off_gate + (int64_t) h*HD + tid];
+            } else if (warp == 4 && lane < args.n_rel) {
+                rv[hh] = pr0[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane];
+            }
+            if (warp == 4) {
+                sink_v[hh] = pr0[args.off_sink + h];
+            }
+        }
+    }
+    // the bias table rows of the 4 distances of this thread (n_extent <= 4*IK_ATTN_BLOCK)
+    float tb[4][16];
+    {
+        const float * table = args.consts + args.c_table;
+        const bool vec = args.n_rel == 16 && ((uintptr_t) table) % 16 == 0;
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            const int d = min(tid + k*IK_ATTN_BLOCK, args.n_extent - 1);
+            if (vec) {
+                const float4 * t4 = (const float4 *) (table + (int64_t) d*16);
+                const float4 t0 = t4[0], t1 = t4[1], t2 = t4[2], t3 = t4[3];
+                tb[k][0] = t0.x; tb[k][1] = t0.y; tb[k][2]  = t0.z; tb[k][3]  = t0.w; tb[k][4]  = t1.x; tb[k][5]  = t1.y; tb[k][6]  = t1.z; tb[k][7]  = t1.w;
+                tb[k][8] = t2.x; tb[k][9] = t2.y; tb[k][10] = t2.z; tb[k][11] = t2.w; tb[k][12] = t3.x; tb[k][13] = t3.y; tb[k][14] = t3.z; tb[k][15] = t3.w;
+            } else {
+#pragma unroll
+                for (int j = 0; j < 16; ++j) {
+                    tb[k][j] = j < args.n_rel ? table[(int64_t) d*args.n_rel + j] : 0.0f;
+                }
+            }
+        }
+    }
+    // the cells of this warp: [w0, w1), the first tile's mask and distance per lane
+    const int kv0 = split*args.kv_per_split;
+    const int kv1 = min(args.n_kv, kv0 + args.kv_per_split);
+    const int per_warp = (kv1 - kv0 + IK_ATTN_WARPS - 1)/IK_ATTN_WARPS;
+    const int w0 = kv0 + warp*per_warp;
+    const int w1 = min(kv1, w0 + per_warp);
+    auto load_tile = [&](const int tile, float & mv_l, int & d_l) {
+        const int kvl = min(tile + lane, args.n_kv - 1);
+        mv_l = tile + lane < w1 ? (args.mask_f16 ? __half2float(((const half *) args.mask)[kvl]) : ((const float *) args.mask)[kvl]) : -INFINITY;
+        d_l  = args.rel_pos[kvl];
+    };
+    auto load_rows = [&](const int tile, const int u0, float (*kvals)[4], float (*vvals)[4]) {
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            const int kv = min(tile + u0 + u, args.n_kv - 1);
+            ik_attn_load4<cache_t>(args.k_cache + (int64_t) kv*args.kc_nb2 + g*args.kc_nb1, lane, kvals[u]);
+            ik_attn_load4<cache_t>(args.v_cache + (int64_t) kv*args.vc_nb2 + g*args.vc_nb1, lane, vvals[u]);
+        }
+    };
+    float mv_l0 = -INFINITY;
+    int   d_l0  = 0;
+    float kv0_k[U][4], kv0_v[U][4];
+    const bool has_cells = w0 < w1;
+    if (has_cells) {
+        load_tile(w0, mv_l0, d_l0);
+    }
 
-        float x[8];
+    // ===== round 2: the past inputs (after read_cell) and the K/V rows of the first step =====
+    float x[8];
+    {
         const float * past = args.state + (int64_t) read_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
-            if (j < n_conv - 1) {
-                x[j] = past[j];
-            } else if (j == n_conv - 1) {
-                x[j] = pr[off + (int64_t) g*HD + i];
-            } else {
-                x[j] = 0.0f;
-            }
+            x[j] = j < n_conv - 1 ? past[j] : (j == n_conv - 1 ? cur_in : 0.0f);
         }
+    }
+    if (has_cells) {
+        load_rows(w0, 0, kv0_k, kv0_v);
+    }
+
+    // ===== the K/V convolution, state, post-normalization, cache store =====
+    float x_new[7];
+    {
+        IK_DBG_T(1); // the loads are issued (not yet consumed)
+        const float scale = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
         float out = 0.0f;
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
             if (j < n_conv) {
-                out += x[j]*w[j];
+                out += x[j]*w_c[j];
             }
         }
         if (args.has_taps) {
 #pragma unroll
             for (int lag = 0; lag < 8; ++lag) {
                 if (lag < n_conv) {
-                    out += x[n_conv - 1 - lag]*pr[offt + (int64_t) g*n_conv + lag];
+                    out += x[n_conv - 1 - lag]*taps[lag];
                 }
             }
         }
         float y = (x[n_conv - 1] + out)*scale;
-
-        if (split == 0) {
-            float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
-            for (int j = 0; j < 7; ++j) {
-                if (j < n_conv - 1) {
-                    st[j] = x[j + 1];
-                }
-            }
+        for (int j = 0; j < 7; ++j) {
+            x_new[j] = j < n_conv - 1 ? x[j + 1] : 0.0f;
         }
 
-        // the sums of squares of the K half (warps 0-3) and the V half (warps 4-7)
+        // the sums of squares of the K half (warps 0-3) and the V half (warps 4-7), and of Q and R
         float ss = warp_reduce_sum(y*y);
+        __shared__ float s_ssq[G][IK_ATTN_WARPS];
         if (lane == 0) {
             s_red[warp] = ss;
         }
+#pragma unroll
+        for (int hh = 0; hh < G; ++hh) {
+            if (hh < gqa) {
+                const float v = warp_reduce_sum(tid < HD ? qv[hh]*qv[hh] : rv[hh]*rv[hh]);
+                if (lane == 0) {
+                    s_ssq[hh][warp] = v;
+                }
+            }
+        }
         __syncthreads();
+        IK_DBG_T(2); // conv + Q/R reductions done
         ss = s_red[4*which + 0] + s_red[4*which + 1] + s_red[4*which + 2] + s_red[4*which + 3];
         float factor;
         if (which == 0) {
@@ -1247,13 +1355,12 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
         char * row = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
         float yq;
         if constexpr (std::is_same<cache_t, half>::value) {
-            const half h = __float2half(y);
+            const half hv = __float2half(y);
             if (split == 0) {
-                ((half *) row)[i] = h;
+                ((half *) row)[ci] = hv;
             }
-            yq = __half2float(h);
+            yq = __half2float(hv);
         } else {
-            // the 32 channels of the warp form one block
             const float amax = warp_reduce_max(fabsf(y));
             const float d    = amax/127.0f;
             const float id   = d != 0.0f ? 1.0f/d : 0.0f;
@@ -1268,63 +1375,58 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             }
             yq = __half2float(dh)*q;
         }
-        (which ? s_v : s_k)[i] = yq;
-    }
-    __syncthreads();
+        (which ? s_v : s_k)[ci] = yq;
 
-    // --- the clipped Q and R of the heads of the group, the sinks
-    for (int hh = 0; hh < gqa; ++hh) {
-        const int h = g*gqa + hh;
-        float qv = 0.0f, rv = 0.0f, ss = 0.0f;
-        if (tid < HD) {
-            qv = pr0[(int64_t) h*HD + tid]*args.consts[(int64_t) h*HD + tid];
-            ss = qv*qv;
-        } else if (warp == 4 && lane < args.n_rel) {
-            rv = pr0[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane];
-            ss = rv*rv;
-        }
-        ss = warp_reduce_sum(ss);
-        if (lane == 0) {
-            s_red[warp] = ss;
-        }
-        __syncthreads();
-        if (tid < HD) {
-            const float ssq    = s_red[0] + s_red[1] + s_red[2] + s_red[3];
-            const float norm   = sqrtf(ssq)*1.0f + args.clip_eps;
-            const float factor = fminf(fmaxf(args.qk_clip/norm, 0.0f), 1.0f);
-            s_q[hh][tid] = qv*factor*tau;
-        } else if (warp == 4) {
-            const float norm   = sqrtf(s_red[4])*1.0f + args.clip_eps;
-            const float factor = fminf(fmaxf(args.rel_clip/norm, 0.0f), 1.0f);
-            if (lane < 32) {
-                s_r[hh][lane] = lane < args.n_rel ? rv*factor*tau : 0.0f;
-            }
-            if (lane == 0) {
-                s_sink[hh] = pr0[args.off_sink + h];
-            }
-        }
-        __syncthreads();
-    }
-
-    // --- the relative bias of every distance, per head
-    for (int idx = tid; idx < gqa*args.n_extent; idx += IK_ATTN_BLOCK) {
-        const int hh = idx/args.n_extent;
-        const int d  = idx - hh*args.n_extent;
-        const float * tb = args.consts + args.c_table + (int64_t) d*args.n_rel;
-        float b = 0.0f;
-        for (int j = 0; j < args.n_rel; ++j) {
-            b += tb[j]*s_r[hh][j];
-        }
-        s_tbl[hh*args.n_extent + d] = b;
-    }
-    __syncthreads();
-
-    // --- the attention over the cells of the split: warp w takes the cells w, w + 8, ...; a lane holds 4 dims
-    float qreg[IK_ATTN_GQA_MAX][4];
-    float acc[IK_ATTN_GQA_MAX][4];
-    float m[IK_ATTN_GQA_MAX], l[IK_ATTN_GQA_MAX];
+        // the clipped Q and R, the sinks
 #pragma unroll
-    for (int hh = 0; hh < IK_ATTN_GQA_MAX; ++hh) {
+        for (int hh = 0; hh < G; ++hh) {
+            if (hh < gqa) {
+                if (tid < HD) {
+                    const float ssq  = s_ssq[hh][0] + s_ssq[hh][1] + s_ssq[hh][2] + s_ssq[hh][3];
+                    const float norm = sqrtf(ssq)*1.0f + args.clip_eps;
+                    const float f    = fminf(fmaxf(args.qk_clip/norm, 0.0f), 1.0f);
+                    s_q[hh][tid] = qv[hh]*f*tau;
+                } else if (warp == 4) {
+                    const float norm = sqrtf(s_ssq[hh][4])*1.0f + args.clip_eps;
+                    const float f    = fminf(fmaxf(args.rel_clip/norm, 0.0f), 1.0f);
+                    s_r[hh][lane] = lane < args.n_rel ? rv[hh]*f*tau : 0.0f;
+                    if (lane == 0) {
+                        s_sink[hh] = sink_v[hh];
+                    }
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    // ===== the relative bias of every distance for the heads of the group =====
+    IK_DBG_T(3);
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const int d = tid + k*IK_ATTN_BLOCK;
+        if (d < args.n_extent) {
+#pragma unroll
+            for (int hh = 0; hh < G; ++hh) {
+                if (hh < gqa) {
+                    float bsum = 0.0f;
+#pragma unroll
+                    for (int j = 0; j < 16; ++j) {
+                        if (j < args.n_rel) {
+                            bsum += tb[k][j]*s_r[hh][j];
+                        }
+                    }
+                    s_tbl[hh*args.n_extent + d] = bsum;
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    // ===== the attention over the cells of this warp (online softmax per head, a lane holds 4 dims) =====
+    IK_DBG_T(4);
+    float qreg[G][4], acc[G][4], m[G], l[G];
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
         m[hh] = -INFINITY;
         l[hh] = 0.0f;
 #pragma unroll
@@ -1334,48 +1436,75 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
         }
     }
 
-    const int kv0 = split*args.kv_per_split;
-    const int kv1 = min(args.n_kv, kv0 + args.kv_per_split);
-    for (int kv = kv0 + warp; kv < kv1; kv += IK_ATTN_WARPS) {
-        const float mv = args.mask_f16 ? __half2float(((const half *) args.mask)[kv]) : ((const float *) args.mask)[kv];
-        if (mv == -INFINITY) {
-            continue;
-        }
-        float kvals[4], vvals[4];
-        if (kv == kv_idx) {
+    auto process_step = [&](const int tile, const int u0, const int n_tile, const float mv_l, const int d_l, float (*kvals)[4], float (*vvals)[4]) {
+        float mv[U];
+        int   d[U];
 #pragma unroll
-            for (int e = 0; e < 4; ++e) {
-                kvals[e] = s_k[4*lane + e];
-                vvals[e] = s_v[4*lane + e];
-            }
-        } else {
-            ik_attn_load4<cache_t>(args.k_cache + kv*args.kc_nb2 + g*args.kc_nb1, lane, kvals);
-            ik_attn_load4<cache_t>(args.v_cache + kv*args.vc_nb2 + g*args.vc_nb1, lane, vvals);
-        }
-        const int d = args.rel_pos[kv];
-#pragma unroll
-        for (int hh = 0; hh < IK_ATTN_GQA_MAX; ++hh) {
-            if (hh < gqa) {
-                float dot = qreg[hh][0]*kvals[0] + qreg[hh][1]*kvals[1] + qreg[hh][2]*kvals[2] + qreg[hh][3]*kvals[3];
-                dot = warp_reduce_sum(dot);
-                const float bias = d >= 0 && d < args.n_extent ? s_tbl[hh*args.n_extent + d] : 0.0f;
-                const float s    = args.kq_scale*dot + bias - s_sink[hh] + mv;
-                const float m_new = fmaxf(m[hh], s);
-                const float corr  = expf(m[hh] - m_new);
-                const float pk    = expf(s - m_new);
-                l[hh] = l[hh]*corr + pk;
+        for (int u = 0; u < U; ++u) {
+            const int kv = tile + u0 + u;
+            mv[u] = u0 + u < n_tile ? __shfl_sync(0xffffffff, mv_l, u0 + u) : -INFINITY;
+            d[u]  = __shfl_sync(0xffffffff, d_l, min(u0 + u, WARP_SIZE - 1));
+            if (kv == kv_idx) {
 #pragma unroll
                 for (int e = 0; e < 4; ++e) {
-                    acc[hh][e] = acc[hh][e]*corr + pk*vvals[e];
+                    kvals[u][e] = s_k[4*lane + e];
+                    vvals[u][e] = s_v[4*lane + e];
                 }
-                m[hh] = m_new;
             }
+        }
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            if (mv[u] == -INFINITY) {
+                continue;
+            }
+#pragma unroll
+            for (int hh = 0; hh < G; ++hh) {
+                if (hh < gqa) {
+                    float dot = qreg[hh][0]*kvals[u][0] + qreg[hh][1]*kvals[u][1] + qreg[hh][2]*kvals[u][2] + qreg[hh][3]*kvals[u][3];
+                    dot = warp_reduce_sum(dot);
+                    const float bias  = d[u] >= 0 && d[u] < args.n_extent ? s_tbl[hh*args.n_extent + d[u]] : 0.0f;
+                    const float sc    = args.kq_scale*dot + bias - s_sink[hh] + mv[u];
+                    const float m_new = fmaxf(m[hh], sc);
+                    const float corr  = expf(m[hh] - m_new);
+                    const float pk    = expf(sc - m_new);
+                    l[hh] = l[hh]*corr + pk;
+#pragma unroll
+                    for (int e = 0; e < 4; ++e) {
+                        acc[hh][e] = acc[hh][e]*corr + pk*vvals[u][e];
+                    }
+                    m[hh] = m_new;
+                }
+            }
+        }
+    };
+
+    if (has_cells && !(args.dbg_skip & 2)) {
+        // the first step with the preloaded rows, then the rest
+        float mv_l = mv_l0;
+        int   d_l  = d_l0;
+        int   n_tile = min(WARP_SIZE, w1 - w0);
+        process_step(w0, 0, n_tile, mv_l, d_l, kv0_k, kv0_v);
+        for (int tile = w0, u0 = U; tile < w1; ) {
+            if (u0 >= n_tile) {
+                tile += WARP_SIZE;
+                u0 = 0;
+                if (tile >= w1) {
+                    break;
+                }
+                load_tile(tile, mv_l, d_l);
+                n_tile = min(WARP_SIZE, w1 - tile);
+            }
+            float kvals[U][4], vvals[U][4];
+            load_rows(tile, u0, kvals, vvals);
+            process_step(tile, u0, n_tile, mv_l, d_l, kvals, vvals);
+            u0 += U;
         }
     }
 
-    // --- combine the warps
+    // ===== combine the warps =====
+    IK_DBG_T(5);
 #pragma unroll
-    for (int hh = 0; hh < IK_ATTN_GQA_MAX; ++hh) {
+    for (int hh = 0; hh < G; ++hh) {
         if (hh < gqa) {
             if (lane == 0) {
                 s_m[hh][warp] = m[hh];
@@ -1390,23 +1519,21 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
     __syncthreads();
 
     // threads 0..127: dim i of every head; M, L of the split (M = -inf: no cell)
-    float M[IK_ATTN_GQA_MAX], L[IK_ATTN_GQA_MAX], A[IK_ATTN_GQA_MAX];
-    if (tid < HD) {
+    float M[G], L[G], A[G];
 #pragma unroll
-        for (int hh = 0; hh < IK_ATTN_GQA_MAX; ++hh) {
-            M[hh] = -INFINITY; L[hh] = 0.0f; A[hh] = 0.0f;
-            if (hh < gqa) {
+    for (int hh = 0; hh < G; ++hh) {
+        M[hh] = -INFINITY; L[hh] = 0.0f; A[hh] = 0.0f;
+        if (hh < gqa && tid < HD) {
 #pragma unroll
-                for (int w = 0; w < IK_ATTN_WARPS; ++w) {
-                    M[hh] = fmaxf(M[hh], s_m[hh][w]);
-                }
+            for (int w = 0; w < IK_ATTN_WARPS; ++w) {
+                M[hh] = fmaxf(M[hh], s_m[hh][w]);
+            }
 #pragma unroll
-                for (int w = 0; w < IK_ATTN_WARPS; ++w) {
-                    if (s_m[hh][w] != -INFINITY) {
-                        const float c = expf(s_m[hh][w] - M[hh]);
-                        L[hh] += s_l[hh][w]*c;
-                        A[hh] += s_acc[hh][w][tid]*c;
-                    }
+            for (int w = 0; w < IK_ATTN_WARPS; ++w) {
+                if (s_m[hh][w] != -INFINITY) {
+                    const float c = expf(s_m[hh][w] - M[hh]);
+                    L[hh] += s_l[hh][w]*c;
+                    A[hh] += s_acc[hh][w][tid]*c;
                 }
             }
         }
@@ -1416,7 +1543,7 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
         // publish the partial result, the last block to arrive combines
         if (tid < HD) {
 #pragma unroll
-            for (int hh = 0; hh < IK_ATTN_GQA_MAX; ++hh) {
+            for (int hh = 0; hh < G; ++hh) {
                 if (hh < gqa) {
                     float * part = args.part + (((int64_t) g*args.n_split + split)*gqa + hh)*(HD + 2);
                     part[tid] = A[hh];
@@ -1434,27 +1561,47 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             s_last = old == args.n_split - 1;
         }
         __syncthreads();
+        IK_DBG_T(6);
         if (!s_last) {
             return;
         }
         __threadfence();
+        if (args.dbg_times && tid == 0 && blockIdx.x == 0) { args.dbg_times[7] = clock64(); } // the last block of head 0 starts merging
         if (tid < HD) {
 #pragma unroll
-            for (int hh = 0; hh < IK_ATTN_GQA_MAX; ++hh) {
+            for (int hh = 0; hh < G; ++hh) {
                 if (hh < gqa) {
-                    float Mt = -INFINITY;
-                    for (int sp = 0; sp < args.n_split; ++sp) {
-                        const float * part = args.part + (((int64_t) g*args.n_split + sp)*gqa + hh)*(HD + 2);
-                        Mt = fmaxf(Mt, part[HD]);
-                    }
-                    float Lt = 0.0f, At = 0.0f;
-                    for (int sp = 0; sp < args.n_split; ++sp) {
-                        const float * part = args.part + (((int64_t) g*args.n_split + sp)*gqa + hh)*(HD + 2);
-                        const float ms = part[HD];
-                        if (ms != -INFINITY) {
-                            const float c = expf(ms - Mt);
-                            Lt += part[HD + 1]*c;
-                            At += part[tid]*c;
+                    const float * part0 = args.part + ((int64_t) g*args.n_split*gqa + hh)*(HD + 2);
+                    const int64_t ps = (int64_t) gqa*(HD + 2); // stride between splits
+                    // chunks of 8 splits: one round of loads each, merged online
+                    float Mt = -INFINITY, Lt = 0.0f, At = 0.0f;
+                    for (int sp0 = 0; sp0 < args.n_split; sp0 += 8) {
+                        float ms[8], ls[8], as[8];
+#pragma unroll
+                        for (int k = 0; k < 8; ++k) {
+                            const int sp = min(sp0 + k, args.n_split - 1);
+                            ms[k] = sp0 + k < args.n_split ? part0[sp*ps + HD] : -INFINITY;
+                            ls[k] = part0[sp*ps + HD + 1];
+                            as[k] = part0[sp*ps + tid];
+                        }
+                        float Mc = Mt;
+#pragma unroll
+                        for (int k = 0; k < 8; ++k) {
+                            Mc = fmaxf(Mc, ms[k]);
+                        }
+                        if (Mc != -INFINITY) {
+                            const float c0 = Mt != -INFINITY ? expf(Mt - Mc) : 0.0f;
+                            Lt *= c0;
+                            At *= c0;
+#pragma unroll
+                            for (int k = 0; k < 8; ++k) {
+                                if (ms[k] != -INFINITY) {
+                                    const float c = expf(ms[k] - Mc);
+                                    Lt += ls[k]*c;
+                                    At += as[k]*c;
+                                }
+                            }
+                            Mt = Mc;
                         }
                     }
                     M[hh] = Mt; L[hh] = Lt; A[hh] = At;
@@ -1464,19 +1611,30 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
         if (tid == 0) {
             args.counters[g] = 0;
         }
+        if (args.dbg_times && tid == 0 && blockIdx.x == 0) { args.dbg_times[8] = clock64(); } // merged
     }
 
-    // --- the zero sink logit, the normalization and the sigmoid gate; threads 0..127 (warps 0-3) write the heads
+    // ===== the new recurrent state of the K and V channels (every block has read the old state by now) =====
+    {
+        float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*(n_conv - 1);
+#pragma unroll
+        for (int j = 0; j < 7; ++j) {
+            if (j < n_conv - 1) {
+                st[j] = x_new[j];
+            }
+        }
+    }
+
+    // ===== the zero sink logit, the normalization and the sigmoid gate; threads 0..127 (warps 0-3) write the heads =====
     if (tid < HD) {
 #pragma unroll
-        for (int hh = 0; hh < IK_ATTN_GQA_MAX; ++hh) {
+        for (int hh = 0; hh < G; ++hh) {
             if (hh < gqa) {
                 const int   h     = g*gqa + hh;
                 const float m_new = fmaxf(M[hh], 0.0f);
                 const float corr  = expf(M[hh] - m_new);
                 const float Lf    = L[hh]*corr + expf(0.0f - m_new);
-                const float gate  = pr0[args.off_gate + (int64_t) h*HD + tid];
-                const float o     = A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate)));
+                const float o     = A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate_v[hh])));
                 if constexpr (q8_out) {
                     ik_warp_store_q8_1(o, (block_q8_1 *) args.dst + ((int64_t) h*HD)/QK8_1 + warp, lane, true);
                 } else {
@@ -1485,6 +1643,7 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             }
         }
     }
+    if (args.dbg_times && tid == 0 && blockIdx.x == 0) { args.dbg_times[9] = clock64(); } // the end of the writing block of head 0
 }
 
 void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -1516,7 +1675,7 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     a.clip_eps   = ggml_get_op_params_f32(dst, 13);
 
     GGML_ASSERT(hd == IK_ATTN_HD && a.n_head % a.n_head_kv == 0 && a.n_head/a.n_head_kv <= IK_ATTN_GQA_MAX);
-    GGML_ASSERT(a.n_rel <= 32 && a.n_conv <= 8);
+    GGML_ASSERT(a.n_rel <= 16 && a.n_conv <= 8);
 
     const int64_t n_kv_ch = (int64_t) hd*a.n_head_kv;
     const int64_t n_taps  = a.has_taps ? (int64_t) a.n_conv*a.n_head_kv : 0;
@@ -1547,22 +1706,38 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     a.dst        = dst->data;
     a.n_kv       = k_cache->ne[2];
 
-    // the cells split over blocks: about 256 cells per block, at most 16 splits
-    a.n_split      = a.n_kv <= 256 ? 1 : std::min(16, (a.n_kv + 255)/256);
+    // the cells split over blocks: about 64 cells per block, at most 64 splits
+    static const int cells_per_split = getenv("IK_ATTN_CELLS_PER_SPLIT") ? atoi(getenv("IK_ATTN_CELLS_PER_SPLIT")) : 64;
+    static const int dbg_skip        = getenv("IK_ATTN_SKIP") ? atoi(getenv("IK_ATTN_SKIP")) : 0;
+    a.dbg_skip     = dbg_skip;
+    static long long * dbg_times = [] () -> long long * {
+        if (!getenv("IK_ATTN_TIMING")) {
+            return nullptr;
+        }
+        long long * t = nullptr;
+        CUDA_CHECK(cudaMallocManaged(&t, 16*sizeof(long long)));
+        memset(t, 0, 16*sizeof(long long));
+        static long long * t_static = t;
+        atexit([] {
+            cudaDeviceSynchronize();
+            fprintf(stderr, "inkling_attn phases (cycles from T0): loads issued %lld, conv+QR reduced %lld, QR done %lld, table done %lld, loop done %lld, warps combined %lld, merge start %lld, merge done %lld, end %lld\n",
+                t_static[1]-t_static[0], t_static[2]-t_static[0], t_static[3]-t_static[0], t_static[4]-t_static[0], t_static[5]-t_static[0], t_static[6]-t_static[0], t_static[7]-t_static[0], t_static[8]-t_static[0], t_static[9]-t_static[0]);
+        });
+        return t;
+    }();
+    a.dbg_times    = dbg_times;
+    a.n_split      = a.n_kv <= cells_per_split ? 1 : std::min(64, (a.n_kv + cells_per_split - 1)/cells_per_split);
     a.kv_per_split = (a.n_kv + a.n_split - 1)/a.n_split;
 
     cudaStream_t stream = ctx.stream();
     const int gqa = a.n_head/a.n_head_kv;
 
     ggml_cuda_pool_alloc<float> part(ctx.pool());
-    ggml_cuda_pool_alloc<int>   counters(ctx.pool());
     a.part = nullptr; a.counters = nullptr;
     if (a.n_split > 1) {
         part.alloc((size_t) a.n_head_kv*a.n_split*gqa*(IK_ATTN_HD + 2));
-        counters.alloc(a.n_head_kv);
         a.part     = part.get();
-        a.counters = counters.get();
-        CUDA_CHECK(cudaMemsetAsync(a.counters, 0, a.n_head_kv*sizeof(int), stream));
+        a.counters = ik_counters(ctx, 0, a.n_head_kv); // self-resetting arrival counters
     }
 
     const bool q8 = dst->type == GGML_TYPE_Q8_1;
@@ -1583,4 +1758,310 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             inkling_attn_kernel<block_q8_0, false><<<grid, IK_ATTN_BLOCK, 0, stream>>>(a);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// inkling_moe_up / inkling_moe_down: the expert matvecs of one token with their epilogues. A warp computes the dot
+// products of several rows with a Q8_1 activation (the loads of all rows are in flight together).
+
+#define IK_MOE_BLOCK 256
+#define IK_MOE_WARPS (IK_MOE_BLOCK/WARP_SIZE)
+#define IK_MOE_MAX_K 4096
+
+template <ggml_type type> struct ik_vec_dot;
+template <> struct ik_vec_dot<GGML_TYPE_Q8_0> {
+    static constexpr int qi = QI8_0, vdr = VDR_Q8_0_Q8_1_MMVQ;
+    static __device__ __forceinline__ float dot(const void * vbq, const block_q8_1 * y, const int kbx, const int iqs) { return vec_dot_q8_0_q8_1(vbq, y, kbx, iqs); }
+};
+template <> struct ik_vec_dot<GGML_TYPE_IQ4_NL> {
+    static constexpr int qi = QI4_NL, vdr = VDR_IQ4_NL_Q8_1_MMVQ;
+    static __device__ __forceinline__ float dot(const void * vbq, const block_q8_1 * y, const int kbx, const int iqs) { return vec_dot_iq4_nl_q8_1(vbq, y, kbx, iqs); }
+};
+
+// acc[r] = rows[r] . y over n_blocks blocks of 32, the result in every lane
+template <ggml_type type, int n_rows>
+static __device__ __forceinline__ void ik_warp_dot_rows(const char * const * rows, const block_q8_1 * __restrict__ y, const int n_blocks, float * acc) {
+    constexpr int lpb = ik_vec_dot<type>::qi/ik_vec_dot<type>::vdr; // lanes per block
+    const int lane = threadIdx.x % WARP_SIZE;
+#pragma unroll
+    for (int r = 0; r < n_rows; ++r) {
+        acc[r] = 0.0f;
+    }
+    for (int unit = lane; unit < n_blocks*lpb; unit += WARP_SIZE) {
+        const int kbx = unit/lpb;
+        const int iqs = ik_vec_dot<type>::vdr*(unit % lpb);
+#pragma unroll
+        for (int r = 0; r < n_rows; ++r) {
+            acc[r] += ik_vec_dot<type>::dot(rows[r], y + kbx, kbx, iqs);
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < n_rows; ++r) {
+        acc[r] = warp_reduce_sum(acc[r]);
+    }
+}
+
+// one block per (32 channels, expert slot): the 32 gate and 32 up rows over W warps (2*32/W rows per warp), the SITU
+// activation, one Q8_1 block out
+template <ggml_type type, int W>
+static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_moe_up_kernel(const char * __restrict__ as, const int64_t nb1, const int64_t nb2,
+        const float * __restrict__ x, const int32_t * __restrict__ ids, block_q8_1 * __restrict__ dst,
+        const int n_embd, const int n_ff, const float beta, const float lb) {
+    constexpr int CPW = 32/W; // channels per warp
+    __shared__ block_q8_1 s_x[IK_MOE_MAX_K/QK8_1];
+    __shared__ float      s_out[32];
+
+    const int tid  = threadIdx.x;
+    const int lane = tid % WARP_SIZE;
+    const int warp = tid / WARP_SIZE;
+    const int nblk = n_embd/QK8_1;
+
+    // the activation quantized like the mmvq path does
+    for (int b = warp; b < nblk; b += W) {
+        ik_warp_store_q8_1(x[b*QK8_1 + lane], &s_x[b], lane, true);
+    }
+    __syncthreads();
+
+    const int e_slot = blockIdx.y;
+    const int e      = ids[e_slot];
+    const int c0     = blockIdx.x*32;
+    const char * base = as + (int64_t) e*nb2;
+    const char * rows[2*CPW];
+#pragma unroll
+    for (int j = 0; j < CPW; ++j) {
+        rows[j]       = base + (int64_t) (c0 + CPW*warp + j)*nb1;
+        rows[CPW + j] = base + (int64_t) (n_ff + c0 + CPW*warp + j)*nb1;
+    }
+    float acc[2*CPW];
+    ik_warp_dot_rows<type, 2*CPW>(rows, s_x, nblk, acc);
+
+    if (lane < CPW) {
+        float g = 0.0f, u = 0.0f;
+#pragma unroll
+        for (int j = 0; j < CPW; ++j) {
+            if (lane == j) {
+                g = acc[j];
+                u = acc[CPW + j];
+            }
+        }
+        const float sig = 1.0f/(1.0f + expf(-g));
+        const float act = tanhf(g*(1.0f/beta))*beta*sig;
+        if (lb > 0.0f) {
+            u = tanhf(u*(1.0f/lb))*lb;
+        }
+        s_out[CPW*warp + lane] = act*u;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        ik_warp_store_q8_1(s_out[lane], dst + ((int64_t) e_slot*n_ff + c0)/QK8_1, lane, true);
+    }
+}
+
+// one block per C channels: warp e computes the C rows of expert slot e, the weighted sum over the experts, then the FFN
+// short convolution with the residual (channels chan_offset.. of the recurrent state)
+template <ggml_type type, int C>
+static __global__ void __launch_bounds__(IK_MOE_BLOCK) inkling_moe_down_kernel(const char * __restrict__ as, const int64_t nb1, const int64_t nb2,
+        const block_q8_1 * __restrict__ h, const int h_blocks, const int32_t * __restrict__ ids, const float * __restrict__ weights, const int w_stride,
+        const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
+        const int write_cell, const int chan_offset, const float scale, const float * __restrict__ residual, float * __restrict__ dst,
+        const int n_used, const int n_conv) {
+    __shared__ float s_dot[8][C];
+
+    const int tid  = threadIdx.x;
+    const int lane = tid % WARP_SIZE;
+    const int warp = tid / WARP_SIZE;
+    const int c0   = blockIdx.x*C;
+
+    if (warp < n_used) {
+        const int e = ids[warp];
+        const char * base = as + (int64_t) e*nb2;
+        const char * rows[C];
+#pragma unroll
+        for (int j = 0; j < C; ++j) {
+            rows[j] = base + (int64_t) (c0 + j)*nb1;
+        }
+        float acc[C];
+        ik_warp_dot_rows<type, C>(rows, h + (int64_t) warp*h_blocks, h_blocks, acc);
+#pragma unroll
+        for (int j = 0; j < C; ++j) {
+            if (lane == j) {
+                s_dot[warp][j] = acc[j];
+            }
+        }
+    }
+    __syncthreads();
+
+    if (tid < C) {
+        const int c = c0 + tid;
+        float sum = 0.0f;
+        for (int e = 0; e < n_used; ++e) {
+            sum += s_dot[e][tid]*weights[e*w_stride];
+        }
+        const int64_t ch = chan_offset + c;
+        const float * past = state + (int64_t) rs_ids[0]*state_s1 + ch*(n_conv - 1);
+        const float * w    = conv_w + (int64_t) c*n_conv;
+        float xs[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            xs[j] = j < n_conv - 1 ? past[j] : (j == n_conv - 1 ? sum : 0.0f);
+        }
+        float out = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            if (j < n_conv) {
+                out += xs[j]*w[j];
+            }
+        }
+        float * st = state + (int64_t) write_cell*state_s1 + ch*(n_conv - 1);
+#pragma unroll
+        for (int j = 0; j < 7; ++j) {
+            if (j < n_conv - 1) {
+                st[j] = xs[j + 1];
+            }
+        }
+        dst[c] = residual[c] + (sum + out)*scale;
+    }
+}
+
+void ggml_cuda_op_inkling_moe_up(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * as  = dst->src[0];
+    const ggml_tensor * x   = dst->src[1];
+    const ggml_tensor * ids = dst->src[2];
+
+    const int n_embd = as->ne[0];
+    const int n_ff   = dst->ne[0];
+    const int n_used = dst->ne[1];
+    GGML_ASSERT(n_embd % QK8_1 == 0 && n_embd <= IK_MOE_MAX_K && n_ff % 32 == 0 && n_used <= 8);
+    GGML_ASSERT(dst->type == GGML_TYPE_Q8_1 && ggml_is_contiguous(dst));
+
+    const float beta = ggml_get_op_params_f32(dst, 0);
+    const float lb   = ggml_get_op_params_f32(dst, 1);
+
+    const dim3 grid(n_ff/32, n_used, 1);
+    cudaStream_t stream = ctx.stream();
+    static const int W = getenv("IK_MOE_UP_WARPS") ? atoi(getenv("IK_MOE_UP_WARPS")) : 8;
+    auto launch = [&](auto type_c) {
+        constexpr ggml_type T = decltype(type_c)::value;
+        const char * as_d = (const char *) as->data; const float * x_d = (const float *) x->data;
+        const int32_t * ids_d = (const int32_t *) ids->data; block_q8_1 * dst_d = (block_q8_1 *) dst->data;
+        switch (W) {
+            case 16: inkling_moe_up_kernel<T, 16><<<grid, 16*WARP_SIZE, 0, stream>>>(as_d, as->nb[1], as->nb[2], x_d, ids_d, dst_d, n_embd, n_ff, beta, lb); break;
+            case 32: inkling_moe_up_kernel<T, 32><<<grid, 32*WARP_SIZE, 0, stream>>>(as_d, as->nb[1], as->nb[2], x_d, ids_d, dst_d, n_embd, n_ff, beta, lb); break;
+            default: inkling_moe_up_kernel<T,  8><<<grid,  8*WARP_SIZE, 0, stream>>>(as_d, as->nb[1], as->nb[2], x_d, ids_d, dst_d, n_embd, n_ff, beta, lb); break;
+        }
+    };
+    switch (as->type) {
+        case GGML_TYPE_IQ4_NL: launch(std::integral_constant<ggml_type, GGML_TYPE_IQ4_NL>{}); break;
+        case GGML_TYPE_Q8_0:   launch(std::integral_constant<ggml_type, GGML_TYPE_Q8_0>{});   break;
+        default: GGML_ABORT("inkling_moe_up: unsupported type");
+    }
+}
+
+void ggml_cuda_op_inkling_moe_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * as       = dst->src[0];
+    const ggml_tensor * h        = dst->src[1];
+    const ggml_tensor * ids      = dst->src[2];
+    const ggml_tensor * weights  = dst->src[3];
+    const ggml_tensor * conv_w   = dst->src[4];
+    ggml_tensor       * state    = dst->src[5];
+    const ggml_tensor * rs_ids   = dst->src[6];
+    const ggml_tensor * residual = dst->src[7];
+
+    const int n_ff   = as->ne[0];
+    const int n_embd = dst->ne[0];
+    const int n_used = ids->ne[0];
+    const int n_conv = conv_w->ne[0];
+    GGML_ASSERT(n_ff % QK8_1 == 0 && n_embd % 8 == 0 && n_used <= 8 && n_conv <= 8);
+
+    const int   write_cell  = ggml_get_op_params_i32(dst, 0);
+    const int   chan_offset = ggml_get_op_params_i32(dst, 1);
+    const float scale       = ggml_get_op_params_f32(dst, 2);
+
+    cudaStream_t stream = ctx.stream();
+    static const int C = getenv("IK_MOE_DOWN_CH") ? atoi(getenv("IK_MOE_DOWN_CH")) : 8;
+    auto launch = [&](auto kernel, int c) {
+        const dim3 grid(n_embd/c, 1, 1);
+        kernel<<<grid, IK_MOE_BLOCK, 0, stream>>>((const char *) as->data, as->nb[1], as->nb[2],
+                (const block_q8_1 *) h->data, n_ff/QK8_1, (const int32_t *) ids->data, (const float *) weights->data, (int) (weights->nb[1]/sizeof(float)),
+                (const float *) conv_w->data, (float *) state->data, (int64_t) (state->nb[1]/sizeof(float)), (const int32_t *) rs_ids->data,
+                write_cell, chan_offset, scale, (const float *) residual->data, (float *) dst->data, n_used, n_conv);
+    };
+    switch (as->type) {
+        case GGML_TYPE_IQ4_NL: if (C == 4) launch(inkling_moe_down_kernel<GGML_TYPE_IQ4_NL, 4>, 4); else if (C == 2) launch(inkling_moe_down_kernel<GGML_TYPE_IQ4_NL, 2>, 2); else launch(inkling_moe_down_kernel<GGML_TYPE_IQ4_NL, 8>, 8); break;
+        case GGML_TYPE_Q8_0:   if (C == 4) launch(inkling_moe_down_kernel<GGML_TYPE_Q8_0, 4>, 4);   else if (C == 2) launch(inkling_moe_down_kernel<GGML_TYPE_Q8_0, 2>, 2);   else launch(inkling_moe_down_kernel<GGML_TYPE_Q8_0, 8>, 8);   break;
+        default: GGML_ABORT("inkling_moe_down: unsupported type");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// inkling_moe_sum_conv: the weighted expert sum, the FFN short convolution and the residual, one thread per channel
+
+static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a, const int64_t a_s1, const float * __restrict__ w, const int w_s1,
+        const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
+        const int write_cell, const int chan_offset, const float scale, const float * __restrict__ residual, float * __restrict__ dst,
+        const int n_embd, const int n_used, const int n_conv) {
+    const int c = blockIdx.x*blockDim.x + threadIdx.x;
+    if (c >= n_embd) {
+        return;
+    }
+    const int64_t ch   = chan_offset + c;
+    const float * past = state + (int64_t) rs_ids[0]*state_s1 + ch*(n_conv - 1);
+    const float * cw   = conv_w + (int64_t) c*n_conv;
+
+    // all the loads first
+    float av[8], xs[8], wv[8];
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+        av[e] = e < n_used ? a[c + e*a_s1] : 0.0f;
+    }
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        xs[j] = j < n_conv - 1 ? past[j] : 0.0f;
+        wv[j] = j < n_conv ? cw[j] : 0.0f;
+    }
+    const float res = residual[c];
+
+    float sum = 0.0f;
+    for (int e = 0; e < n_used; ++e) {
+        sum += av[e]*w[e*w_s1];
+    }
+    xs[n_conv - 1] = sum;
+    float out = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        if (j < n_conv) {
+            out += xs[j]*wv[j];
+        }
+    }
+    float * st = state + (int64_t) write_cell*state_s1 + ch*(n_conv - 1);
+#pragma unroll
+    for (int j = 0; j < 7; ++j) {
+        if (j < n_conv - 1) {
+            st[j] = xs[j + 1];
+        }
+    }
+    dst[c] = res + (sum + out)*scale;
+}
+
+void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * a        = dst->src[0];
+    const ggml_tensor * w        = dst->src[1];
+    const ggml_tensor * conv_w   = dst->src[2];
+    ggml_tensor       * state    = dst->src[3];
+    const ggml_tensor * rs_ids   = dst->src[4];
+    const ggml_tensor * residual = dst->src[5];
+
+    const int n_embd = dst->ne[0];
+    const int n_used = a->ne[1];
+    const int n_conv = conv_w->ne[0];
+    GGML_ASSERT(n_used <= 8 && n_conv <= 8);
+
+    const int   write_cell  = ggml_get_op_params_i32(dst, 0);
+    const int   chan_offset = ggml_get_op_params_i32(dst, 1);
+    const float scale       = ggml_get_op_params_f32(dst, 2);
+
+    const int block = 256;
+    inkling_moe_sum_conv_kernel<<<(n_embd + block - 1)/block, block, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float),
+            (const float *) w->data, (int) (w->nb[1]/sizeof(float)), (const float *) conv_w->data, (float *) state->data, state->nb[1]/sizeof(float),
+            (const int32_t *) rs_ids->data, write_cell, chan_offset, scale, (const float *) residual->data, (float *) dst->data, n_embd, n_used, n_conv);
 }

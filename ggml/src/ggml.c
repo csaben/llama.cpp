@@ -1126,9 +1126,12 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "LOOP_CTRL_APPLY",
     "MOE_SUM",
     "INKLING_ATTN",
+    "INKLING_MOE_UP",
+    "INKLING_MOE_DOWN",
+    "INKLING_MOE_SUM_CONV",
 };
 
-static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
+static_assert(GGML_OP_COUNT == 111, "GGML_OP_COUNT != 111");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1250,9 +1253,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "loop_ctrl_apply(x,m,d)",
     "moe_sum(x,w)",
     "inkling_attn(p,k,v)",
+    "inkling_moe_up(as,x,ids)",
+    "inkling_moe_down(as,h,ids)",
+    "inkling_moe_sum_conv(a,w)",
 };
 
-static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
+static_assert(GGML_OP_COUNT == 111, "GGML_OP_COUNT != 111");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6099,6 +6105,122 @@ struct ggml_tensor * ggml_inkling_attn(
     result->src[7] = rel_pos;
     result->src[8] = mask;
     result->src[9] = pos;
+
+    return result;
+}
+
+// ggml_inkling_moe_up
+
+struct ggml_tensor * ggml_inkling_moe_up(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * as,
+        struct ggml_tensor  * x,
+        struct ggml_tensor  * ids,
+        float                 beta,
+        float                 linear_beta) {
+    GGML_ASSERT(as->type == GGML_TYPE_IQ4_NL || as->type == GGML_TYPE_Q8_0);
+    GGML_ASSERT(as->ne[3] == 1 && as->nb[0] == ggml_type_size(as->type) && as->ne[1] % 64 == 0);
+    GGML_ASSERT(x->type == GGML_TYPE_F32 && x->ne[0] == as->ne[0] && x->ne[1] == 1 && x->ne[2] == 1 && x->ne[3] == 1);
+    GGML_ASSERT(x->nb[0] == sizeof(float) && x->ne[0] % QK8_1 == 0);
+    GGML_ASSERT(ids->type == GGML_TYPE_I32 && ids->ne[1] == 1 && ids->ne[2] == 1 && ids->ne[3] == 1 && ids->ne[0] <= 8);
+
+    const int64_t n_ff = as->ne[1]/2;
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_Q8_1, n_ff, ids->ne[0], 1);
+
+    ggml_set_op_params_f32(result, 0, beta);
+    ggml_set_op_params_f32(result, 1, linear_beta);
+
+    result->op     = GGML_OP_INKLING_MOE_UP;
+    result->src[0] = as;
+    result->src[1] = x;
+    result->src[2] = ids;
+
+    return result;
+}
+
+// ggml_inkling_moe_down
+
+struct ggml_tensor * ggml_inkling_moe_down(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * as,
+        struct ggml_tensor  * h,
+        struct ggml_tensor  * ids,
+        struct ggml_tensor  * weights,
+        struct ggml_tensor  * conv_w,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * rs_ids,
+        struct ggml_tensor  * residual,
+        int                   write_cell,
+        int                   chan_offset,
+        float                 scale) {
+    GGML_ASSERT(as->type == GGML_TYPE_IQ4_NL || as->type == GGML_TYPE_Q8_0);
+    GGML_ASSERT(as->ne[3] == 1 && as->nb[0] == ggml_type_size(as->type) && as->ne[1] % 8 == 0);
+    const int64_t n_ff   = as->ne[0];
+    const int64_t n_embd = as->ne[1];
+    GGML_ASSERT(h->type == GGML_TYPE_Q8_1 && h->ne[0] == n_ff && h->ne[2] == 1 && h->ne[3] == 1 && ggml_is_contiguous(h));
+    GGML_ASSERT(ids->type == GGML_TYPE_I32 && ids->ne[0] == h->ne[1] && ids->ne[0] <= 8 && ids->ne[1] == 1);
+    GGML_ASSERT(weights->type == GGML_TYPE_F32 && weights->ne[0] == 1 && weights->ne[1] == ids->ne[0] && weights->ne[2] == 1);
+    GGML_ASSERT(conv_w->type == GGML_TYPE_F32 && ggml_is_contiguous(conv_w) && conv_w->ne[1] == n_embd && conv_w->ne[0] >= 2 && conv_w->ne[0] <= 8);
+    GGML_ASSERT(state->type == GGML_TYPE_F32 && state->nb[0] == sizeof(float));
+    GGML_ASSERT(state->ne[0] >= (conv_w->ne[0] - 1)*(chan_offset + n_embd) && write_cell >= 0 && write_cell < state->ne[1]);
+    GGML_ASSERT(rs_ids->type == GGML_TYPE_I32 && rs_ids->ne[0] >= 1);
+    GGML_ASSERT(residual->type == GGML_TYPE_F32 && residual->ne[0] == n_embd && residual->nb[0] == sizeof(float));
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+
+    ggml_set_op_params_i32(result, 0, write_cell);
+    ggml_set_op_params_i32(result, 1, chan_offset);
+    ggml_set_op_params_f32(result, 2, scale);
+
+    result->op     = GGML_OP_INKLING_MOE_DOWN;
+    result->src[0] = as;
+    result->src[1] = h;
+    result->src[2] = ids;
+    result->src[3] = weights;
+    result->src[4] = conv_w;
+    result->src[5] = state;
+    result->src[6] = rs_ids;
+    result->src[7] = residual;
+
+    return result;
+}
+
+// ggml_inkling_moe_sum_conv
+
+struct ggml_tensor * ggml_inkling_moe_sum_conv(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * w,
+        struct ggml_tensor  * conv_w,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * rs_ids,
+        struct ggml_tensor  * residual,
+        int                   write_cell,
+        int                   chan_offset,
+        float                 scale) {
+    const int64_t n_embd = a->ne[0];
+    GGML_ASSERT(a->type == GGML_TYPE_F32 && a->nb[0] == sizeof(float) && a->ne[2] == 1 && a->ne[3] == 1);
+    GGML_ASSERT(w->type == GGML_TYPE_F32 && w->ne[0] == 1 && w->ne[1] == a->ne[1] && w->ne[2] == 1);
+    GGML_ASSERT(conv_w->type == GGML_TYPE_F32 && ggml_is_contiguous(conv_w) && conv_w->ne[1] == n_embd && conv_w->ne[0] >= 2 && conv_w->ne[0] <= 8);
+    GGML_ASSERT(state->type == GGML_TYPE_F32 && state->nb[0] == sizeof(float));
+    GGML_ASSERT(state->ne[0] >= (conv_w->ne[0] - 1)*(chan_offset + n_embd) && write_cell >= 0 && write_cell < state->ne[1]);
+    GGML_ASSERT(rs_ids->type == GGML_TYPE_I32 && rs_ids->ne[0] >= 1);
+    GGML_ASSERT(residual->type == GGML_TYPE_F32 && residual->ne[0] == n_embd && residual->nb[0] == sizeof(float));
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+
+    ggml_set_op_params_i32(result, 0, write_cell);
+    ggml_set_op_params_i32(result, 1, chan_offset);
+    ggml_set_op_params_f32(result, 2, scale);
+
+    result->op     = GGML_OP_INKLING_MOE_SUM_CONV;
+    result->src[0] = a;
+    result->src[1] = w;
+    result->src[2] = conv_w;
+    result->src[3] = state;
+    result->src[4] = rs_ids;
+    result->src[5] = residual;
 
     return result;
 }

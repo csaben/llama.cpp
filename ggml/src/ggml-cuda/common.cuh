@@ -1427,6 +1427,9 @@ struct ggml_backend_cuda_context {
 
     std::unique_ptr<ggml_cuda_stream_context> concurrent_stream_context;
 
+    // persistent arrival counters of the inkling kernels (see ik_counters in inkling.cu)
+    int * ik_counters = nullptr;
+
     ~ggml_backend_cuda_context();
 
     cudaStream_t stream(int device, int stream) {
@@ -1498,6 +1501,7 @@ struct ggml_cuda_mm_fusion_args_host {
     const ggml_tensor * gate_scale = nullptr;
     ggml_glu_op glu_op;
     float glu_limit = 0.0f;
+    float glu_param2 = 0.0f; // second GLU parameter (SITU: beta; glu_limit is then the linear beta)
     ggml_prec prec_src1 = GGML_PREC_UNDEFINED; // src1 precision requested by the fused MUL_MATs (MMQ)
     const ggml_tensor * shared_up = nullptr;
     const ggml_tensor * shared_gate = nullptr;
@@ -1511,6 +1515,7 @@ struct ggml_cuda_mm_fusion_args_device {
     const void * gate_scale = nullptr;
     ggml_glu_op glu_op;
     float glu_limit = 0.0f;
+    float glu_param2 = 0.0f;
     const void * shared_up = nullptr;
     const void * shared_gate = nullptr;
     float * shared_dst = nullptr;

@@ -995,6 +995,9 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     if (copy_event != nullptr) {
         CUDA_CHECK(cudaEventDestroy(copy_event));
     }
+    if (ik_counters != nullptr) {
+        CUDA_CHECK(cudaFree(ik_counters));
+    }
     for (int i = 0; i < GGML_CUDA_MAX_DEVICES; ++i) {
         for (int j = 0; j < GGML_CUDA_MAX_STREAMS; ++j) {
             if (streams[i][j] != nullptr) {
@@ -2288,7 +2291,7 @@ static bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
         return false;
     }
 
-    static constexpr std::array<ggml_glu_op, 4> valid_glu_ops = { GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU, GGML_GLU_OP_SWIGLU_OAI, GGML_GLU_OP_SWIGLU_CLAMP };
+    static constexpr std::array<ggml_glu_op, 5> valid_glu_ops = { GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU, GGML_GLU_OP_SWIGLU_OAI, GGML_GLU_OP_SWIGLU_CLAMP, GGML_GLU_OP_SITU };
 
     if (std::find(valid_glu_ops.begin(), valid_glu_ops.end(), ggml_get_glu_op(glu)) == valid_glu_ops.end()) {
         return false;
@@ -2496,6 +2499,9 @@ static bool ggml_cuda_mul_mat_q_fusion_matches(const ggml_tensor * up, const ggm
 
 static bool ggml_cuda_should_fuse_mul_mat_q(const ggml_tensor * up, const ggml_tensor * gate, const ggml_tensor * glu,
         const ggml_tensor * up_scale = nullptr, const ggml_tensor * gate_scale = nullptr) {
+    if (ggml_get_glu_op(glu) == GGML_GLU_OP_SITU) {
+        return false; // the MMQ write-back has a single GLU parameter
+    }
     // A hinted matmul can be fused, but its unfused path may be faster (e.g. FWHT for GGML_HINT_SRC0_IS_HADAMARD).
     if (ggml_get_op_params_i32(up, 1) != GGML_HINT_NONE || ggml_get_op_params_i32(gate, 1) != GGML_HINT_NONE) {
         return false;
@@ -3142,6 +3148,15 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_INKLING_ATTN:
             ggml_cuda_op_inkling_attn(ctx, dst);
+            break;
+        case GGML_OP_INKLING_MOE_UP:
+            ggml_cuda_op_inkling_moe_up(ctx, dst);
+            break;
+        case GGML_OP_INKLING_MOE_DOWN:
+            ggml_cuda_op_inkling_moe_down(ctx, dst);
+            break;
+        case GGML_OP_INKLING_MOE_SUM_CONV:
+            ggml_cuda_op_inkling_moe_sum_conv(ctx, dst);
             break;
         case GGML_OP_SSM_SCAN:
             ggml_cuda_op_ssm_scan(ctx, dst);
@@ -4532,7 +4547,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
             ggml_cuda_mm_fusion_args_host fusion{};
             fusion.gate = routed->src[0]->src[0];
             fusion.glu_op = ggml_get_glu_op(routed);
-            fusion.glu_limit = ggml_get_op_params_f32(routed, 3);
+            fusion.glu_limit  = ggml_get_op_params_f32(routed, 3);
+            fusion.glu_param2 = ggml_get_op_params_f32(routed, 2);
             fusion.shared_up = shared->src[1]->src[0];
             fusion.shared_gate = shared->src[0]->src[0];
             fusion.shared_dst = shared;
@@ -4845,6 +4861,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 fusion_data.gate_scale = gate_scale;
                 fusion_data.glu_op     = ggml_get_glu_op(glu);
                 fusion_data.glu_limit  = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_param2 = ggml_get_op_params_f32(glu, 2);
 
                 if (ggml_cuda_should_fuse_mul_mat_vec_f(up_n, gate_n)) {
                     ggml_cuda_mul_mat_vec_f(*cuda_ctx, src0, src1, ids, cgraph->nodes[glu_idx], &fusion_data);
@@ -4954,6 +4971,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 fusion_data.gate_scale = gate_scale;
                 fusion_data.glu_op     = ggml_get_glu_op(glu);
                 fusion_data.glu_limit  = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_param2 = ggml_get_op_params_f32(glu, 2);
 
                 if (ggml_cuda_should_fuse_mul_mat_vec_f(up_n, gate_n)) {
                     ggml_cuda_mul_mat_vec_f(*cuda_ctx, src0, src1, ids, cgraph->nodes[glu_idx], &fusion_data);
@@ -5025,7 +5043,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 fusion_data.x_bias    = up_bias_tensor;
                 fusion_data.gate_bias = gate_bias_tensor;
                 fusion_data.glu_op    = ggml_get_glu_op(glu);
-                fusion_data.glu_limit = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_limit  = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_param2 = ggml_get_op_params_f32(glu, 2);
 
                 ggml_cuda_mul_mat_vec_f(*cuda_ctx, src0, src1, ids, glu, &fusion_data);
                 fused_mul_mat_vec = true;
@@ -5039,7 +5058,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 fusion_data.x_bias    = up_bias_tensor;
                 fusion_data.gate_bias = gate_bias_tensor;
                 fusion_data.glu_op    = ggml_get_glu_op(glu);
-                fusion_data.glu_limit = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_limit  = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_param2 = ggml_get_op_params_f32(glu, 2);
 
                 ggml_cuda_mul_mat_vec_q(*cuda_ctx, src0, src1, ids, glu, &fusion_data);
                 fused_mul_mat_vec = true;
@@ -5066,7 +5086,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 ggml_cuda_mm_fusion_args_host fusion_data{};
                 fusion_data.gate      = gate->src[0];
                 fusion_data.glu_op    = ggml_get_glu_op(glu);
-                fusion_data.glu_limit = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_limit  = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_param2 = ggml_get_op_params_f32(glu, 2);
 
                 ggml_cuda_mul_mat_vec_f(*cuda_ctx, src0, src1, ids, glu, &fusion_data);
                 fused_mul_mat_vec = true;
@@ -5078,7 +5099,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 ggml_cuda_mm_fusion_args_host fusion_data{};
                 fusion_data.gate      = gate->src[0];
                 fusion_data.glu_op    = ggml_get_glu_op(glu);
-                fusion_data.glu_limit = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_limit  = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_param2 = ggml_get_op_params_f32(glu, 2);
 
                 ggml_cuda_mul_mat_vec_q(*cuda_ctx, src0, src1, ids, glu, &fusion_data);
                 fused_mul_mat_vec = true;
@@ -5090,7 +5112,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 ggml_cuda_mm_fusion_args_host fusion_data{};
                 fusion_data.gate      = gate->src[0];
                 fusion_data.glu_op    = ggml_get_glu_op(glu);
-                fusion_data.glu_limit = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_limit  = ggml_get_op_params_f32(glu, 3);
+                fusion_data.glu_param2 = ggml_get_op_params_f32(glu, 2);
                 fusion_data.prec_src1 = ggml_prec_get_src(up, 1);
 
                 ggml_cuda_mul_mat_q(*cuda_ctx, src0, src1, ids, glu, &fusion_data);
@@ -6795,9 +6818,15 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 const int hd = ggml_get_op_params_i32(op, 2), n_rel = ggml_get_op_params_i32(op, 3), n_conv = ggml_get_op_params_i32(op, 4);
                 const int64_t n_fixed = (int64_t) hd*n_head + (int64_t) n_rel*n_head + 2*(int64_t) n_conv*hd*n_head_kv;
                 const int64_t n_extent = (ggml_nelements(op->src[1]) - n_fixed)/n_rel;
-                return hd == 128 && n_head/n_head_kv <= 4 && n_rel <= 32 && n_conv <= 8 && n_extent <= 1024 &&
+                return hd == 128 && n_head/n_head_kv <= 4 && n_rel <= 16 && n_conv <= 8 && n_extent <= 1024 &&
                     op->src[4]->type == op->src[5]->type && (op->src[4]->type == GGML_TYPE_F16 || op->src[4]->type == GGML_TYPE_Q8_0);
             }
+        case GGML_OP_INKLING_MOE_UP:
+            return (op->src[0]->type == GGML_TYPE_IQ4_NL || op->src[0]->type == GGML_TYPE_Q8_0) && op->src[0]->ne[0] <= 4096;
+        case GGML_OP_INKLING_MOE_DOWN:
+            return op->src[0]->type == GGML_TYPE_IQ4_NL || op->src[0]->type == GGML_TYPE_Q8_0;
+        case GGML_OP_INKLING_MOE_SUM_CONV:
+            return true;
         case GGML_OP_REL_BIAS:
             return op->src[0]->ne[0] <= 16;
         case GGML_OP_CONT:

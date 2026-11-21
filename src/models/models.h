@@ -2528,6 +2528,8 @@ struct llama_model_inkling2 : public llama_model_base {
     std::vector<attn_fused> fused_attn; // indexed by physical layer; w == nullptr: not fused
     // the q, k, v input norms of a full-attention layer stacked as [n_embd, 3] (nullptr for SWA layers)
     std::vector<ggml_tensor *> attn_inp_norm_qkv;
+    // the constants of the fused decode attention op per physical layer: q_clip | rel_clip | k_conv | v_conv | rel_bias table
+    std::vector<ggml_tensor *> attn_consts;
 
     // tensors assembled from several file tensors after loading: each piece is a file tensor copied to a byte offset
     struct fused_tensor {
@@ -2577,6 +2579,10 @@ struct llama_model_inkling2 : public llama_model_base {
         // the matmul activations are quantized to Q8_1 by the producing op (CUDA/CPU mmvq path); LLAMA_INKLING_Q8_ACT=0 disables
         ggml_type act_type(int il) const;
         bool q8_act = false;
+        // the single-token attention block as one op (LLAMA_INKLING_ATTN_OP=0 disables)
+        bool attn_op = false;
+        // the single-token MoE as two ops (LLAMA_INKLING_MOE_OP=0 disables)
+        bool moe_op = false;
 
         // the mixed output of query j: [n_embd, n_tokens]
         ggml_tensor * mixed_view(ggml_tensor * mixed, int j);
@@ -2599,6 +2605,7 @@ struct llama_model_inkling2 : public llama_model_base {
         llm_graph_input_rs                  * recr = nullptr;
 
         ggml_tensor * inp_out_ids = nullptr;
+        ggml_tensor * inp_pos     = nullptr;
         ggml_tensor * tau         = nullptr; // log-scaled positions
     };
 

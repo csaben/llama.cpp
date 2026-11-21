@@ -422,6 +422,9 @@ static __global__ void mul_mat_vec_f(
                 case GGML_GLU_OP_SWIGLU_CLAMP:
                     value = ggml_cuda_op_swiglu_clamp_single(gate_value, value, glu_limit);
                     break;
+                case GGML_GLU_OP_SITU:
+                    value = ggml_cuda_op_situ_single(gate_value, value, fusion.glu_param2, glu_limit);
+                    break;
                 default:
                     break;
             }

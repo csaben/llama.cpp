@@ -441,6 +441,9 @@ extern "C" {
         GGML_OP_LOOP_CTRL_APPLY,
         GGML_OP_MOE_SUM,
         GGML_OP_INKLING_ATTN,
+        GGML_OP_INKLING_MOE_UP,
+        GGML_OP_INKLING_MOE_DOWN,
+        GGML_OP_INKLING_MOE_SUM_CONV,
 
         GGML_OP_COUNT,
     };
@@ -2483,6 +2486,55 @@ extern "C" {
             float                 tau_floor,
             float                 kq_scale,
             enum ggml_type        out_type);
+
+    // the MoE up projection of inkling2 for one token: the gate and up rows of the selected experts with the SITU activation,
+    // written as the Q8_1 activation of the down projection
+    //   as [n_embd, 2*n_ff, n_expert] (IQ4_NL or Q8_0; the gate rows first), x [n_embd, 1] F32 (quantized to Q8_1 by the op),
+    //   ids [n_expert_used, 1] I32 -> [n_ff, n_expert_used, 1] Q8_1
+    GGML_API struct ggml_tensor * ggml_inkling_moe_up(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * as,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * ids,
+            float                 beta,
+            float                 linear_beta);
+
+    // the MoE down projection of inkling2 for one token, with the weighted sum over the experts and the FFN short
+    // convolution + residual: y = residual + (d + conv([past, d], conv_w))*scale, d = sum_e w[e]*(as[ids[e]] h[e])
+    //   as [n_ff, n_embd, n_expert] (IQ4_NL or Q8_0), h [n_ff, n_expert_used, 1] Q8_1, ids [n_expert_used, 1] I32,
+    //   weights [1, n_expert_used, 1] F32, conv_w [n_conv, n_embd] F32, state [(n_conv - 1)*n_channels, n_cells] F32
+    //   (channels chan_offset.. of cell rs_ids[0] are the past, cell write_cell receives the new state), rs_ids [1] I32,
+    //   residual [n_embd, 1] F32 -> [n_embd, 1] F32
+    GGML_API struct ggml_tensor * ggml_inkling_moe_down(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * as,
+            struct ggml_tensor  * h,
+            struct ggml_tensor  * ids,
+            struct ggml_tensor  * weights,
+            struct ggml_tensor  * conv_w,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rs_ids,
+            struct ggml_tensor  * residual,
+            int                   write_cell,
+            int                   chan_offset,
+            float                 scale);
+
+    // the weighted expert sum followed by the FFN short convolution + residual of inkling2 for one token:
+    //   y = residual + (d + conv([past, d], conv_w))*scale, d[c] = sum_e w[e]*a[c, e]
+    //   a [n_embd, n_expert_used, 1] F32, w [1, n_expert_used, 1] F32, conv_w [n_conv, n_embd] F32,
+    //   state [(n_conv - 1)*n_channels, n_cells] F32 (channels chan_offset.. of cell rs_ids[0] read, cell write_cell written),
+    //   rs_ids [1] I32, residual [n_embd, 1] F32 -> [n_embd, 1] F32
+    GGML_API struct ggml_tensor * ggml_inkling_moe_sum_conv(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * w,
+            struct ggml_tensor  * conv_w,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rs_ids,
+            struct ggml_tensor  * residual,
+            int                   write_cell,
+            int                   chan_offset,
+            float                 scale);
 
     // weighted sum over the second dimension: a [n0, n1, n2], w [1, n1, n2] -> [n0, n2] = sum_k a[:, k, t]*w[0, k, t]
     GGML_API struct ggml_tensor * ggml_moe_sum(

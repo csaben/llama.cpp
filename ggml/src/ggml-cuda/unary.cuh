@@ -119,6 +119,16 @@ __device__ __forceinline__ float ggml_cuda_op_swiglu_oai_single(float x, float g
     return out_glu;
 }
 
+// situ(gate, up) = beta*tanh(gate/beta)*sigmoid(gate) * lb*tanh(up/lb)   (lb <= 0: plain up)
+__device__ __forceinline__ float ggml_cuda_op_situ_single(float gate, float up, float beta, float lb) {
+    const float sig = 1.0f / (1.0f + expf(-gate));
+    const float act = tanhf(gate * (1.0f/beta)) * beta * sig;
+    if (lb > 0.0f) {
+        up = tanhf(up * (1.0f/lb)) * lb;
+    }
+    return act * up;
+}
+
 __device__ __forceinline__ float ggml_cuda_op_swiglu_clamp_single(float gate, float up, float limit) {
     gate = fminf(gate, limit);
     up = fmaxf(fminf(up, limit), -limit);

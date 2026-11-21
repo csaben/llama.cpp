@@ -2107,6 +2107,18 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_inkling_attn(params, tensor);
             } break;
+        case GGML_OP_INKLING_MOE_UP:
+            {
+                ggml_compute_forward_inkling_moe_up(params, tensor);
+            } break;
+        case GGML_OP_INKLING_MOE_DOWN:
+            {
+                ggml_compute_forward_inkling_moe_down(params, tensor);
+            } break;
+        case GGML_OP_INKLING_MOE_SUM_CONV:
+            {
+                ggml_compute_forward_inkling_moe_sum_conv(params, tensor);
+            } break;
         case GGML_OP_SSM_SCAN:
             {
                 ggml_compute_forward_ssm_scan(params, tensor);
@@ -2507,6 +2519,9 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_LOOP_CTRL_APPLY:
         case GGML_OP_MOE_SUM:
         case GGML_OP_INKLING_ATTN:
+        case GGML_OP_INKLING_MOE_UP:
+        case GGML_OP_INKLING_MOE_DOWN:
+        case GGML_OP_INKLING_MOE_SUM_CONV:
             {
                 n_tasks = n_threads;
             } break;

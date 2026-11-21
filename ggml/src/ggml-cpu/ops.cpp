@@ -13120,7 +13120,7 @@ static void ik_attn_conv_head(const ik_attn_params & p, const ggml_tensor * proj
 
         float out = 0.0f;
         for (int64_t j = 0; j < n_conv; ++j) {
-            out += x[j]*w[c*n_conv + j];
+            out += x[j]*w[((int64_t) g*hd + i)*n_conv + j]; // the weights are indexed by the K or V channel
         }
         if (p.has_taps) {
             for (int64_t lag = 0; lag < n_conv; ++lag) {
@@ -13291,6 +13291,177 @@ void ggml_compute_forward_inkling_attn(const ggml_compute_params * params, ggml_
             out[i] = acc[i]/l * (1.0f/(1.0f + expf(-gate)));
         }
         ggml_cpu_write_row_f32_or_q8_1(dst, out.data(), hd, (char *) dst->data + ggml_row_size(dst->type, (int64_t) h*hd));
+    }
+}
+
+// ggml_compute_forward_inkling_moe_up / ggml_compute_forward_inkling_moe_down
+
+// a Q8_1 row as the Q8_0 operand of the CPU vec_dot (same scale and quants)
+static void ik_q8_1_to_q8_0(const block_q8_1 * x, block_q8_0 * y, int64_t n) {
+    for (int64_t i = 0; i < n/QK8_0; ++i) {
+        y[i].d = x[i].d;
+        memcpy(y[i].qs, x[i].qs, QK8_0);
+    }
+}
+
+void ggml_compute_forward_inkling_moe_up(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * as  = dst->src[0];
+    const ggml_tensor * x   = dst->src[1];
+    const ggml_tensor * ids = dst->src[2];
+
+    const float beta = ggml_get_op_params_f32(dst, 0);
+    const float lb   = ggml_get_op_params_f32(dst, 1);
+
+    const int64_t n_embd = as->ne[0];
+    const int64_t n_ff   = dst->ne[0];
+    const int64_t n_used = dst->ne[1];
+
+    const ggml_type_traits_cpu * traits = ggml_get_type_traits_cpu(as->type);
+    GGML_ASSERT(traits->vec_dot_type == GGML_TYPE_Q8_0);
+
+    // the activation, quantized like the CUDA kernel does (Q8_1), as Q8_0 for the vec_dot
+    std::vector<block_q8_1> xq1(n_embd/QK8_1);
+    std::vector<block_q8_0> xq(n_embd/QK8_0);
+    quantize_row_q8_1_ref((const float *) x->data, xq1.data(), n_embd);
+    ik_q8_1_to_q8_0(xq1.data(), xq.data(), n_embd);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    // units of 32 channels of one expert slot (a Q8_1 block of the output)
+    const int64_t n_units = n_used*(n_ff/QK8_1);
+    float out[QK8_1];
+    for (int64_t u = ith; u < n_units; u += nth) {
+        const int64_t e  = u/(n_ff/QK8_1);
+        const int64_t c0 = (u - e*(n_ff/QK8_1))*QK8_1;
+        const int32_t id = ((const int32_t *) ids->data)[e];
+        const char * base = (const char *) as->data + id*as->nb[2];
+        for (int64_t j = 0; j < QK8_1; ++j) {
+            const int64_t c = c0 + j;
+            float g = 0.0f, up = 0.0f;
+            traits->vec_dot(n_embd, &g,  0, base + c*as->nb[1],          0, xq.data(), 0, 1);
+            traits->vec_dot(n_embd, &up, 0, base + (n_ff + c)*as->nb[1], 0, xq.data(), 0, 1);
+            const float sig = 1.0f/(1.0f + expf(-g));
+            const float act = tanhf(g*(1.0f/beta))*beta*sig;
+            if (lb > 0.0f) {
+                up = tanhf(up*(1.0f/lb))*lb;
+            }
+            out[j] = act*up;
+        }
+        quantize_row_q8_1_ref(out, (block_q8_1 *) ((char *) dst->data + e*dst->nb[1]) + c0/QK8_1, QK8_1);
+    }
+}
+
+void ggml_compute_forward_inkling_moe_down(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * as       = dst->src[0];
+    const ggml_tensor * h        = dst->src[1];
+    const ggml_tensor * ids      = dst->src[2];
+    const ggml_tensor * weights  = dst->src[3];
+    const ggml_tensor * conv_w   = dst->src[4];
+    ggml_tensor       * state    = dst->src[5];
+    const ggml_tensor * rs_ids   = dst->src[6];
+    const ggml_tensor * residual = dst->src[7];
+
+    const int   write_cell  = ggml_get_op_params_i32(dst, 0);
+    const int   chan_offset = ggml_get_op_params_i32(dst, 1);
+    const float scale       = ggml_get_op_params_f32(dst, 2);
+
+    const int64_t n_ff   = as->ne[0];
+    const int64_t n_embd = dst->ne[0];
+    const int64_t n_used = ids->ne[0];
+    const int64_t n_conv = conv_w->ne[0];
+
+    const ggml_type_traits_cpu * traits = ggml_get_type_traits_cpu(as->type);
+    GGML_ASSERT(traits->vec_dot_type == GGML_TYPE_Q8_0);
+
+    std::vector<block_q8_0> hq(n_used*(n_ff/QK8_0));
+    for (int64_t e = 0; e < n_used; ++e) {
+        ik_q8_1_to_q8_0((const block_q8_1 *) ((const char *) h->data + e*h->nb[1]), hq.data() + e*(n_ff/QK8_0), n_ff);
+    }
+
+    const int32_t read_cell = ((const int32_t *) rs_ids->data)[0];
+    GGML_ASSERT(read_cell >= 0 && read_cell < state->ne[1]);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    for (int64_t c = ith; c < n_embd; c += nth) {
+        float sum = 0.0f;
+        for (int64_t e = 0; e < n_used; ++e) {
+            const int32_t id = ((const int32_t *) ids->data)[e];
+            float d = 0.0f;
+            traits->vec_dot(n_ff, &d, 0, (const char *) as->data + id*as->nb[2] + c*as->nb[1], 0, hq.data() + e*(n_ff/QK8_0), 0, 1);
+            sum += d*((const float *) ((const char *) weights->data + e*weights->nb[1]))[0];
+        }
+
+        const int64_t ch = chan_offset + c;
+        const float * past = (const float *) ((const char *) state->data + read_cell*state->nb[1]) + ch*(n_conv - 1);
+        const float * w    = (const float *) conv_w->data + c*n_conv;
+        float xs[8];
+        for (int64_t j = 0; j < n_conv - 1; ++j) {
+            xs[j] = past[j];
+        }
+        xs[n_conv - 1] = sum;
+        float out = 0.0f;
+        for (int64_t j = 0; j < n_conv; ++j) {
+            out += xs[j]*w[j];
+        }
+        float * st = (float *) ((char *) state->data + (int64_t) write_cell*state->nb[1]) + ch*(n_conv - 1);
+        for (int64_t j = 0; j < n_conv - 1; ++j) {
+            st[j] = xs[j + 1];
+        }
+        ((float *) dst->data)[c] = ((const float *) residual->data)[c] + (sum + out)*scale;
+    }
+}
+
+// ggml_compute_forward_inkling_moe_sum_conv
+
+void ggml_compute_forward_inkling_moe_sum_conv(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * a        = dst->src[0];
+    const ggml_tensor * w        = dst->src[1];
+    const ggml_tensor * conv_w   = dst->src[2];
+    ggml_tensor       * state    = dst->src[3];
+    const ggml_tensor * rs_ids   = dst->src[4];
+    const ggml_tensor * residual = dst->src[5];
+
+    const int   write_cell  = ggml_get_op_params_i32(dst, 0);
+    const int   chan_offset = ggml_get_op_params_i32(dst, 1);
+    const float scale       = ggml_get_op_params_f32(dst, 2);
+
+    const int64_t n_embd = dst->ne[0];
+    const int64_t n_used = a->ne[1];
+    const int64_t n_conv = conv_w->ne[0];
+
+    const int32_t read_cell = ((const int32_t *) rs_ids->data)[0];
+    GGML_ASSERT(read_cell >= 0 && read_cell < state->ne[1]);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    for (int64_t c = ith; c < n_embd; c += nth) {
+        float sum = 0.0f;
+        for (int64_t e = 0; e < n_used; ++e) {
+            const float x  = *(const float *) ((const char *) a->data + c*sizeof(float) + e*a->nb[1]);
+            const float we = *(const float *) ((const char *) w->data + e*w->nb[1]);
+            sum += x*we;
+        }
+        const int64_t ch = chan_offset + c;
+        const float * past = (const float *) ((const char *) state->data + read_cell*state->nb[1]) + ch*(n_conv - 1);
+        const float * cw   = (const float *) conv_w->data + c*n_conv;
+        float xs[8];
+        for (int64_t j = 0; j < n_conv - 1; ++j) {
+            xs[j] = past[j];
+        }
+        xs[n_conv - 1] = sum;
+        float out = 0.0f;
+        for (int64_t j = 0; j < n_conv; ++j) {
+            out += xs[j]*cw[j];
+        }
+        float * st = (float *) ((char *) state->data + (int64_t) write_cell*state->nb[1]) + ch*(n_conv - 1);
+        for (int64_t j = 0; j < n_conv - 1; ++j) {
+            st[j] = xs[j + 1];
+        }
+        ((float *) dst->data)[c] = ((const float *) residual->data)[c] + (sum + out)*scale;
     }
 }
 
