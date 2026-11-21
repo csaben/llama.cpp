@@ -515,8 +515,9 @@ void llama_model_inkling2::graph::init_fused() {
 
 // Q8_1 activations go to the quantized matvec kernels of the CUDA and CPU backends
 ggml_type llama_model_inkling2::graph::act_type(int il) const {
-    // only the matvec path (few columns) consumes Q8_1 activations
-    if (!q8_act || n_tokens > 8) {
+    // only the matvec path consumes Q8_1 activations: at most 8 columns, and the attention projection of the three
+    // inputs of a full-attention or looped layer takes 3*n_tokens columns
+    if (!q8_act || 3*n_tokens > 8) {
         return GGML_TYPE_F32;
     }
     ggml_backend_dev_t dev = model.dev_layer(il);

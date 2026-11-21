@@ -10,6 +10,7 @@
 
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
+#include <cinttypes>
 #include "ggml-alloc.h"
 #include "ggml-impl.h"
 
@@ -1707,6 +1708,16 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         // if the node is still unassigned, assign it to the first backend that supports it
         for (int b = 0; b < sched->n_backends && *cur_backend_id == -1; b++) {
             ggml_backend_sched_set_if_supported(sched, node, b, cur_backend_id);
+        }
+        if (*cur_backend_id == -1) {
+            GGML_LOG_ERROR("%s: no backend supports node %s (op %s, type %s, ne %" PRId64 " x %" PRId64 " x %" PRId64 ")\n", __func__,
+                node->name, ggml_op_desc(node), ggml_type_name(node->type), node->ne[0], node->ne[1], node->ne[2]);
+            for (int j = 0; j < GGML_MAX_SRC; j++) {
+                if (node->src[j]) {
+                    GGML_LOG_ERROR("  src[%d] %s: op %s type %s ne %" PRId64 " x %" PRId64 " x %" PRId64 "\n", j, node->src[j]->name,
+                        ggml_op_desc(node->src[j]), ggml_type_name(node->src[j]->type), node->src[j]->ne[0], node->src[j]->ne[1], node->src[j]->ne[2]);
+                }
+            }
         }
         GGML_ASSERT(*cur_backend_id != -1);
     }

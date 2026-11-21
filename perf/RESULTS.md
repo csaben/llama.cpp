@@ -132,7 +132,7 @@ where the time is.
 | exact (default) | Inkling-2-Mini-IQ4_NL.gguf as published | 140.7 | 2.9412 | 4.0674 | the reference; unfused 2.9401 / 4.0660 |
 | F16 loop controllers | `LLAMA_INKLING_CTRL_F16=1` (the F32 controller weights, 340 MB/token, are converted to F16 at load) | 141.9 | 2.9380 | 4.0532 | opt-in at run time, no model change |
 | Q6_K dense | `Inkling-2-Mini-IQ4_NL-dense-q6k.gguf`: attention projections and the output head requantized Q8_0 -> Q6_K (llama-quantize --allow-requantize with per-tensor overrides, experts and embeddings untouched) | 145.6 | 2.9402 | 4.0704 | 16.16 GiB; dense bytes 1373 -> 1030 MB, head 492 -> 362 MB |
-| Q6_K dense + F16 controllers | both | 149.3 | 2.9407 | - | |
+| Q6_K dense + F16 controllers | both | 149.3 | 2.9407 | - | served 136.0 tok/s (bench.py, q8_0 KV); exact model served 128.2 |
 All PPL values are within the 0.064 standard error of each other.
 
 Variant GGUF:
@@ -142,3 +142,64 @@ Variant GGUF:
     --tensor-type 'attn_k_conv_proj=q6_k' --tensor-type 'attn_v_conv_proj=q6_k' \
     --tensor-type 'blk\.(1[0-9]|[0-9])\.ffn_.*_exps=iq4_nl' --tensor-type 'blk\.2[0-3]\.ffn_.*_exps=q8_0' \
     ~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL.gguf ~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL-dense-q6k.gguf iq4_nl
+
+## Phase 2 summary
+Start: 124.4 tok/s (8.04 ms/token, 1614 launches). End: 140.7 tok/s exact (7.11 ms, 654 launches); 149.3 tok/s with the
+two quality-gated variants (Q6_K dense projections/head + F16 loop controllers, PPL unchanged within noise).
+Served (llama-server, q8_0 KV, perf/bench.py, 700-token generations): see the rows above (the server adds ~0.7 ms/token).
+
+What the decode graph looks like now (per layer pass, 48 passes/token): attention input mix+norm -> Q8_1 (1 launch, or the
+loop controllers: 2-3 launches), one attention-projection matvec (all three inputs, weights read once), the attention block
+(1 launch: K/V conv + norm/clip + cache store, Q/R clips, relative bias, softmax with the zero sink, gate, Q8_1 output),
+wo matvec, wo conv+residual (1), FFN mix+norm+router+top-k (1, Q8_1 side output), gate|up matvec, SITU -> Q8_1 (1),
+down matvec, weighted sum + FFN conv + residual (1). 13-14 launches per pass instead of 34.
+
+## Where the remaining 7.1 ms go (exact model, checkpoint-140tok, nsys)
+| part | ms/token | note |
+|---|---|---|
+| expert matvecs (gate\|up 1152x8 + down 576x8, mmvq) | 2.34 | 1847 MB at ~790 GB/s |
+| attention projection matvecs (4300 / 4332 blocks) | 1.26 | 1370 MB (Q8_0) at ~800 GB/s |
+| output head matvec | 0.56 | 492 MB at 883 GB/s |
+| wo matvecs | 0.54 | 361 MB at 720 GB/s (small matrices: ramp/tail) |
+| fused attention kernel | 0.63 | 13 us x 48; ~6 dependent memory round trips + a split combine per launch |
+| fused router kernel | 0.54 | 11 us x 48; the mix+norm chain, 1.2 MB of F32 router weights per layer, the top-k |
+| attention-input mix+norm, message mixes | 0.38 | single-block latency-bound kernels (4 us each) |
+| loop controllers (F32: 340 MB) | 0.55 | 24 looped passes; F16 variant: 0.43 |
+| conv+residual, SITU, misc small kernels | 0.30 | |
+| launch gaps | 0.25 | CUDA graph |
+Weights-only floor at the measured 891 GB/s: 4.62 ms (216 tok/s) exact, 4.0 ms with the Q6_K/F16 variants (250 tok/s).
+The matvecs run at 88% of that peak (ramp/tail of 240 dependent launches per token); the fused glue is ~2.4 ms of
+latency-bound work (ten kernels per layer, each a chain of 3-8 dependent memory round trips at ~0.7 us).
+
+## 200 tok/s: what it would take
+5.0 ms/token. With exact weights the matvecs alone need 4.6 ms at peak bandwidth, leaving 0.4 ms for 48 layers of
+attention, routing, norms and convolutions: not reachable with this kernel structure on one RTX 3090. With the Q6_K dense
+variant the floor is 4.0 ms; 200 tok/s would then need the glue at ~1 ms (about 2 us per layer pass, i.e. a persistent
+per-layer megakernel in which the attention/router/norm phases overlap with the weight streams) plus the matvecs at
+>= 95% of peak. Speculative decoding does not help here (the per-token expert routing means n draft tokens read n times
+the expert bytes; see the batched-step analysis above).
+
+## Deploy
+Build:
+  cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$HOME/opt/cuda-12.8/bin/nvcc -DLLAMA_CURL=OFF
+  cmake --build build -j 12 --target llama-server llama-bench llama-perplexity llama-completion llama-quantize
+Serve, exact weights (140.7 tok/s tg128):
+  CUDA_VISIBLE_DEVICES=1 build/bin/llama-server -m ~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL.gguf -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 16384 -np 1 --host 127.0.0.1 --port 8031
+Serve, fast variant (149.3 tok/s tg128; PPL 2.9407 vs 2.9412):
+  LLAMA_INKLING_CTRL_F16=1 CUDA_VISIBLE_DEVICES=1 build/bin/llama-server -m ~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL-dense-q6k.gguf -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 16384 -np 1 --host 127.0.0.1 --port 8031
+Switches (all default on): LLAMA_INKLING_FUSED=0 (phase-1/2 ops off), LLAMA_INKLING_FUSED_QKV=0, LLAMA_INKLING_Q8_ACT=0,
+LLAMA_INKLING_ATTN_OP=0, LLAMA_INKLING_MOE_OP=0|1|2|3 (3 = default), LLAMA_INKLING_ROUTER_OP=0; LLAMA_INKLING_CTRL_F16=1 (opt-in).
+
+## Risks / known issues (phase 2)
+- The fused decode ops apply to single-token, single-sequence ubatches only (n_tokens == 1, n_seqs == 1); batched steps
+  (speculative verify, several slots in one ubatch) use the phase-1 graph. Q8_1 activations are used for 3*n_tokens <= 8.
+- The fused attention op writes the K/V cache and the recurrent state as side effects (like the phase-1 conv op); the
+  router op writes the expert ids/weights and the Q8_1 activation into side tensors; the graph keeps those ops alive
+  explicitly (ggml_build_forward_expand).
+- Greedy outputs differ from the phase-1 build after 70-860 characters on the three test prompts (near-tie flips from
+  summation-order changes; PPL and decode-path PPL are unchanged within noise).
+- The last-block-combines kernels (attention, router) use persistent arrival counters allocated once per CUDA context.
+- The CPU backend has reference implementations of every new op (test-backend-ops compares against them), but they are not optimized.
+- The custom MoE matvec kernels (INKLING_MOE_UP/DOWN) are correct but slower than ggml's mmvq; they are opt-in (LLAMA_INKLING_MOE_OP=2).
+- The Q6_K variant's attention projection matvec runs at ~660 GB/s (the Q6_K dot product is compute-heavier); a tuned
+  Q6_K mmvq configuration for Ampere would add a few percent.
