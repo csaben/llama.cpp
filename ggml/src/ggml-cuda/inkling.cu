@@ -1349,6 +1349,7 @@ struct ik_attn_args {
     int64_t c_relclip, c_kconv, c_vconv, c_table;
     float * part;  // [n_head_kv, n_split, gqa, HD + 2]: the partial sums, max and denominator of each split
     int   * counters;
+    int     ext_scan; // the cells were scanned by inkling_attn_scan_kernel (parts 0 .. n_split - 2); this kernel adds the current cell
     int     dbg_skip; // timing experiments only (IK_ATTN_SKIP): 1 bias table, 2 attention loop, 4 Q/R phase
     long long * dbg_times; // timing experiments only (IK_ATTN_TIMING): clock64 at the phase boundaries of block (0, 0) / the last block
 };
@@ -1931,7 +1932,8 @@ static __device__ __forceinline__ uint32_t ik_pack_h2(const float a, const float
 }
 // the limb of v that an FP16 column carries: the value (rounded to FP16 by the pack), or what the rounding left
 static __device__ __forceinline__ float ik_limb(const float v, const bool lo) {
-    return lo ? v - __half2float(__float2half_rn(v)) : v;
+    const float hi = __half2float(__float2half_rn(v)); // (no branch: the lanes of a warp carry both limbs)
+    return v - (lo ? hi : 0.0f);
 }
 // A (cell, kv head) row of a Q8_0 cache: 4 blocks {half d; int8 qs[32]} = 34 aligned words. The blocks 1 and 3 have
 // aligned quants. The blocks 0 and 2 are read as the 32-byte stream qs[2..31], qs[0..1]: seven aligned words and an
@@ -1955,6 +1957,209 @@ struct ik_q8row {
         return 32*b + ((b & 1) ? p : ((p + 2) & 31));
     }
 };
+
+// The scan state of a lane (gr = lane/4, tq = lane%4): the lane holds the logits of the cells gr and gr + 8 of a step
+// for the head tq, and 16 dims of that head's output (o, scaled by IK_MMA_PS).
+#define IK_MMA_PS 4096.0f // P is scaled up before it becomes FP16 (the V scales are small)
+template <int G>
+struct ik_mma_lane {
+    uint32_t qf[4][2][2]; // the Q operand: [block][half][register]
+    float    o[4][2][4];  // the output: the C fragment of each P V product
+    float    mm, ll, sink;
+};
+
+template <int G>
+static __device__ __forceinline__ void ik_mma_init(ik_mma_lane<G> & st, const float (* s_q)[IK_ATTN_HD], const float * s_sink) {
+    const int  lane = threadIdx.x % WARP_SIZE;
+    const int  gr = lane >> 2, tq = lane & 3;
+    const int  hq = min(gr >> 1, G - 1);
+    const bool col_ok = (gr >> 1) < G; // operand column gr: head gr/2, limb gr%2
+    const bool lo_limb = gr & 1;
+    st.mm   = -INFINITY;
+    st.ll   = 0.0f;
+    st.sink = s_sink[min(tq, G - 1)];
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+#pragma unroll
+        for (int hf = 0; hf < 2; ++hf) {
+            st.o[b][hf][0] = st.o[b][hf][1] = st.o[b][hf][2] = st.o[b][hf][3] = 0.0f;
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const int p = 16*hf + 4*tq + 2*j;
+                const float x0 = s_q[hq][ik_q8row::dim(b, p)], x1 = s_q[hq][ik_q8row::dim(b, p + 1)];
+                st.qf[b][hf][j] = col_ok ? ik_pack_h2(ik_limb(x0, lo_limb), ik_limb(x1, lo_limb)) : 0u;
+            }
+        }
+    }
+}
+
+// One step: the 16 cells kt .. kt + 15, of which the cells below w1 other than kv_idx (the current token's, not stored
+// yet) count. The Q8_0 rows of the kv head are at kb + row*k_nb2 and vb + row*v_nb2, row = min(cell - row0, row_max):
+// the cache itself, or a tile of it in shared memory.
+template <int G>
+static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
+        const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
+        const int kt, const int w1, const int64_t kv_idx) {
+    constexpr float PS = IK_MMA_PS;
+    const int  lane = threadIdx.x % WARP_SIZE;
+    const int  gr = lane >> 2, tq = lane & 3;
+    const int  hq = min(gr >> 1, G - 1), ht = min(tq, G - 1);
+    const bool col_ok = (gr >> 1) < G, head_ok = tq < G;
+    const bool lo_limb = gr & 1;
+    const float * table = args.consts + args.c_table;
+    const int     n_rel = args.n_rel;
+    const int     last  = args.n_kv - 1;
+
+    // ---- every load of the step ----
+    uint32_t kh[2][2], kl[2][2], kq[2][4][2];
+    float    mk[2];
+    int      dk[2];
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        const int cell = kt + gr + 8*i;
+        const int cc   = min(cell, last);
+        const ik_q8row r = { (const uint32_t *) (kb + (int64_t) min(cell - row0, row_max)*k_nb2) };
+#pragma unroll
+        for (int P = 0; P < 2; ++P) {
+            kh[i][P] = r.head(P);
+            kl[i][P] = r.tail(P);
+        }
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+#pragma unroll
+            for (int hf = 0; hf < 2; ++hf) {
+                kq[i][b][hf] = r.quad(b, 4*hf + tq, kh[i][b >> 1]);
+            }
+        }
+        const float mv = args.mask_f16 ? __half2float(((const half *) args.mask)[cc]) : ((const float *) args.mask)[cc];
+        mk[i] = head_ok && cell < w1 && cell != kv_idx ? mv : -INFINITY;
+        dk[i] = args.rel_pos[cc];
+    }
+    uint32_t vh[4][2], vl[4][2], vq[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
+        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
+#pragma unroll
+        for (int P = 0; P < 2; ++P) {
+            vh[i][P] = r.head(P);
+            vl[i][P] = r.tail(P);
+        }
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+            vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
+        }
+    }
+    // ---- Q K^T: C[16 cells][8 columns] += A[16 cells][16 dims] B[16 dims][8 columns], block by block ----
+    float s[2] = { 0.0f, 0.0f };
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+        float cb[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+        for (int hf = 0; hf < 2; ++hf) {
+            const uint32_t x0 = kq[0][b][hf] ^ 0x80808080u, x1 = kq[1][b][hf] ^ 0x80808080u;
+            const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(x0, 0x64u, 0x4140u)), ik_u8x2_to_h2(__byte_perm(x1, 0x64u, 0x4140u)),
+                                    ik_u8x2_to_h2(__byte_perm(x0, 0x64u, 0x4342u)), ik_u8x2_to_h2(__byte_perm(x1, 0x64u, 0x4342u)) };
+            ik_mma16816(cb, a, st.qf[b][hf][0], st.qf[b][hf][1]);
+        }
+        s[0] += ik_q8row::scale(b, kh[0][b >> 1], kl[0][b >> 1])*(cb[0] + cb[1]);
+        s[1] += ik_q8row::scale(b, kh[1][b >> 1], kl[1][b >> 1])*(cb[2] + cb[3]);
+    }
+    // ---- the logits: scale, relative bias (within the extent), sink, mask ----
+    const bool e0 = dk[0] >= 0 && dk[0] < args.n_extent, e1 = dk[1] >= 0 && dk[1] < args.n_extent;
+    float bias[2] = { 0.0f, 0.0f };
+    if (__ballot_sync(0xffffffffu, e0 || e1)) {
+        const float * t0 = table + (int64_t) (e0 ? dk[0] : 0)*n_rel;
+        const float * t1 = table + (int64_t) (e1 ? dk[1] : 0)*n_rel;
+#pragma unroll
+        for (int j = 0; j < 16; ++j) {
+            if (j < n_rel) {
+                const float rj = s_r[ht][j];
+                bias[0] += t0[j]*rj;
+                bias[1] += t1[j]*rj;
+            }
+        }
+        bias[0] = e0 ? bias[0] : 0.0f;
+        bias[1] = e1 ? bias[1] : 0.0f;
+    }
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        s[i] = mk[i] == -INFINITY ? -INFINITY : args.kq_scale*s[i] + bias[i] - st.sink + mk[i];
+    }
+    float mx = fmaxf(s[0], s[1]); // over the lanes of the same head
+#pragma unroll
+    for (int sh = 4; sh < 32; sh <<= 1) {
+        mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, sh));
+    }
+    if (__ballot_sync(0xffffffffu, mx > st.mm)) { // a new maximum: rescale (rare after the first steps)
+        const float mn = fmaxf(st.mm, mx);
+        const float c  = st.mm == -INFINITY ? 0.0f : expf(st.mm - mn);
+        st.mm  = mn;
+        st.ll *= c;
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+#pragma unroll
+            for (int hf = 0; hf < 2; ++hf) {
+                st.o[b][hf][0] *= c; st.o[b][hf][1] *= c; st.o[b][hf][2] *= c; st.o[b][hf][3] *= c;
+            }
+        }
+    }
+    const float u  = st.mm == -INFINITY ? 0.0f : st.mm;
+    const float p0 = expf(s[0] - u), p1 = expf(s[1] - u);
+    st.ll += p0 + p1;
+    // ---- P to the lanes of its operand: head gr/2 of the cells 2 tq, 2 tq + 1, 2 tq + 8, 2 tq + 9 ----
+    const int src = 8*tq + hq;
+    const float pv[4] = { __shfl_sync(0xffffffffu, p0, src), __shfl_sync(0xffffffffu, p0, src + 4),
+                          __shfl_sync(0xffffffffu, p1, src), __shfl_sync(0xffffffffu, p1, src + 4) };
+    const float pvz[4] = { col_ok ? pv[0] : 0.0f, col_ok ? pv[1] : 0.0f, col_ok ? pv[2] : 0.0f, col_ok ? pv[3] : 0.0f };
+    // ---- P V: C[16 dims][8 columns] += A[16 dims][16 cells] B[16 cells][8 columns]; an mma takes 16 dims of one block
+    //      (two per lane group), so the block's scales ride on P. A cell without weight may be past the end: no scale. ----
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+        float w[4];
+        uint32_t el[4], eh[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const float d = ik_q8row::scale(b, vh[i][b >> 1], vl[i][b >> 1]);
+            w[i] = ik_limb(pvz[i]*(pvz[i] > 0.0f ? d : 0.0f)*PS, lo_limb);
+            const uint32_t x = vq[i][b] ^ 0x80808080u;
+            el[i] = __byte_perm(x, 0x64u, 0x4140u);
+            eh[i] = __byte_perm(x, 0x64u, 0x4342u);
+        }
+        const uint32_t B0 = ik_pack_h2(w[0], w[1]), B1 = ik_pack_h2(w[2], w[3]);
+        {
+            const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(el[0], el[1], 0x5410u)), ik_u8x2_to_h2(__byte_perm(el[0], el[1], 0x7632u)),
+                                    ik_u8x2_to_h2(__byte_perm(el[2], el[3], 0x5410u)), ik_u8x2_to_h2(__byte_perm(el[2], el[3], 0x7632u)) };
+            ik_mma16816(st.o[b][0], a, B0, B1);
+        }
+        {
+            const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(eh[0], eh[1], 0x5410u)), ik_u8x2_to_h2(__byte_perm(eh[0], eh[1], 0x7632u)),
+                                    ik_u8x2_to_h2(__byte_perm(eh[2], eh[3], 0x5410u)), ik_u8x2_to_h2(__byte_perm(eh[2], eh[3], 0x7632u)) };
+            ik_mma16816(st.o[b][1], a, B0, B1);
+        }
+    }
+}
+
+// the head's denominator over the lanes; the lane's 16 dims of the head tq to dst[HD]
+template <int G>
+static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float * dst) {
+    const int lane = threadIdx.x % WARP_SIZE;
+    const int gr = lane >> 2, tq = lane & 3;
+#pragma unroll
+    for (int sh = 4; sh < 32; sh <<= 1) {
+        st.ll += __shfl_xor_sync(0xffffffffu, st.ll, sh);
+    }
+    if (tq < G) {
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+#pragma unroll
+            for (int hf = 0; hf < 2; ++hf) {
+                dst[ik_q8row::dim(b, 4*gr + 2*hf)]     = (st.o[b][hf][0] + st.o[b][hf][1])*(1.0f/IK_MMA_PS);
+                dst[ik_q8row::dim(b, 4*gr + 2*hf + 1)] = (st.o[b][hf][2] + st.o[b][hf][3])*(1.0f/IK_MMA_PS);
+            }
+        }
+    }
+}
 
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
@@ -2027,8 +2232,8 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         }
     }
     // the cells of this warp
-    const int kv0 = split*args.kv_per_split;
-    const int kv1 = min(args.n_kv, kv0 + args.kv_per_split);
+    const int kv0 = args.ext_scan ? 0 : split*args.kv_per_split;
+    const int kv1 = args.ext_scan ? 0 : min(args.n_kv, kv0 + args.kv_per_split);
     const int per_warp = (kv1 - kv0 + IK_A2_WARPS - 1)/IK_A2_WARPS;
     const int w0 = kv0 + warp*per_warp;
     const int w1 = min(kv1, w0 + per_warp);
@@ -2218,188 +2423,22 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         }
     }
     if constexpr (MMA) {
-        // ===== the tensor-core scan: steps of 16 cells; a lane (gr = lane/4, tq = lane%4) holds the logits of the
-        //       cells gr and gr + 8 for the head tq, and 16 dims of that head's output =====
-        constexpr float PS = 4096.0f; // P is scaled up before it becomes FP16 (the V scales are small)
-        const int  gr = lane >> 2, tq = lane & 3;
-        const int  hq = min(gr >> 1, G - 1), ht = min(tq, G - 1);
-        const bool col_ok = (gr >> 1) < G, head_ok = tq < G; // operand column gr: head gr/2, limb gr%2
-        const bool lo_limb = gr & 1;
-        float o[4][2][4];
-        float mm = -INFINITY, ll = 0.0f;
-#pragma unroll
-        for (int b = 0; b < 4; ++b) {
-#pragma unroll
-            for (int hf = 0; hf < 2; ++hf) {
-                o[b][hf][0] = o[b][hf][1] = o[b][hf][2] = o[b][hf][3] = 0.0f;
-            }
-        }
+        // ===== the tensor-core scan of the warp's cells =====
+        const int ht = min(lane & 3, G - 1);
+        ik_mma_lane<G> st;
+        ik_mma_init<G>(st, s_q, s_sink);
         if (has_cells && !(args.dbg_skip & 2)) {
-            uint32_t qf[4][2][2];
-#pragma unroll
-            for (int b = 0; b < 4; ++b) {
-#pragma unroll
-                for (int hf = 0; hf < 2; ++hf) {
-#pragma unroll
-                    for (int j = 0; j < 2; ++j) {
-                        const int p = 16*hf + 4*tq + 2*j;
-                        const float x0 = s_q[hq][ik_q8row::dim(b, p)], x1 = s_q[hq][ik_q8row::dim(b, p + 1)];
-                        qf[b][hf][j] = col_ok ? ik_pack_h2(ik_limb(x0, lo_limb), ik_limb(x1, lo_limb)) : 0u;
-                    }
-                }
-            }
-            const float   sink  = s_sink[ht];
-            const char *  kb    = args.k_cache + g*args.kc_nb1;
-            const char *  vb    = args.v_cache + g*args.vc_nb1;
-            const int     n_rel = args.n_rel;
-            const int     last  = args.n_kv - 1;
+            const char * kb = args.k_cache + g*args.kc_nb1;
+            const char * vb = args.v_cache + g*args.vc_nb1;
             for (int kt = w0; kt < w1; kt += 16) {
-                // ---- every load of the step ----
-                uint32_t kh[2][2], kl[2][2], kq[2][4][2];
-                float    mk[2];
-                int      dk[2];
-#pragma unroll
-                for (int i = 0; i < 2; ++i) {
-                    const int cell = kt + gr + 8*i;
-                    const int cc   = min(cell, last);
-                    const ik_q8row r = { (const uint32_t *) (kb + (int64_t) cc*args.kc_nb2) };
-#pragma unroll
-                    for (int P = 0; P < 2; ++P) {
-                        kh[i][P] = r.head(P);
-                        kl[i][P] = r.tail(P);
-                    }
-#pragma unroll
-                    for (int b = 0; b < 4; ++b) {
-#pragma unroll
-                        for (int hf = 0; hf < 2; ++hf) {
-                            kq[i][b][hf] = r.quad(b, 4*hf + tq, kh[i][b >> 1]);
-                        }
-                    }
-                    const float mv = args.mask_f16 ? __half2float(((const half *) args.mask)[cc]) : ((const float *) args.mask)[cc];
-                    mk[i] = head_ok && cell < w1 && cell != kv_idx ? mv : -INFINITY;
-                    dk[i] = args.rel_pos[cc];
-                }
-                uint32_t vh[4][2], vl[4][2], vq[4][4];
-#pragma unroll
-                for (int i = 0; i < 4; ++i) {
-                    const int cc = min(kt + 2*tq + (i & 1) + 8*(i >> 1), last);
-                    const ik_q8row r = { (const uint32_t *) (vb + (int64_t) cc*args.vc_nb2) };
-#pragma unroll
-                    for (int P = 0; P < 2; ++P) {
-                        vh[i][P] = r.head(P);
-                        vl[i][P] = r.tail(P);
-                    }
-#pragma unroll
-                    for (int b = 0; b < 4; ++b) {
-                        vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
-                    }
-                }
-                // ---- Q K^T: C[16 cells][8 columns] += A[16 cells][16 dims] B[16 dims][8 columns], block by block ----
-                float s[2] = { 0.0f, 0.0f };
-#pragma unroll
-                for (int b = 0; b < 4; ++b) {
-                    float cb[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-#pragma unroll
-                    for (int hf = 0; hf < 2; ++hf) {
-                        const uint32_t x0 = kq[0][b][hf] ^ 0x80808080u, x1 = kq[1][b][hf] ^ 0x80808080u;
-                        const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(x0, 0x64u, 0x4140u)), ik_u8x2_to_h2(__byte_perm(x1, 0x64u, 0x4140u)),
-                                                ik_u8x2_to_h2(__byte_perm(x0, 0x64u, 0x4342u)), ik_u8x2_to_h2(__byte_perm(x1, 0x64u, 0x4342u)) };
-                        ik_mma16816(cb, a, qf[b][hf][0], qf[b][hf][1]);
-                    }
-                    s[0] += ik_q8row::scale(b, kh[0][b >> 1], kl[0][b >> 1])*(cb[0] + cb[1]);
-                    s[1] += ik_q8row::scale(b, kh[1][b >> 1], kl[1][b >> 1])*(cb[2] + cb[3]);
-                }
-                // ---- the logits: scale, relative bias (within the extent), sink, mask ----
-                const bool e0 = dk[0] >= 0 && dk[0] < args.n_extent, e1 = dk[1] >= 0 && dk[1] < args.n_extent;
-                float bias[2] = { 0.0f, 0.0f };
-                if (__ballot_sync(0xffffffffu, e0 || e1)) {
-                    const float * t0 = table + (int64_t) (e0 ? dk[0] : 0)*n_rel;
-                    const float * t1 = table + (int64_t) (e1 ? dk[1] : 0)*n_rel;
-#pragma unroll
-                    for (int j = 0; j < 16; ++j) {
-                        if (j < n_rel) {
-                            const float rj = s_r[ht][j];
-                            bias[0] += t0[j]*rj;
-                            bias[1] += t1[j]*rj;
-                        }
-                    }
-                    bias[0] = e0 ? bias[0] : 0.0f;
-                    bias[1] = e1 ? bias[1] : 0.0f;
-                }
-#pragma unroll
-                for (int i = 0; i < 2; ++i) {
-                    s[i] = mk[i] == -INFINITY ? -INFINITY : args.kq_scale*s[i] + bias[i] - sink + mk[i];
-                }
-                float mx = fmaxf(s[0], s[1]); // over the lanes of the same head
-#pragma unroll
-                for (int sh = 4; sh < 32; sh <<= 1) {
-                    mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, sh));
-                }
-                if (__ballot_sync(0xffffffffu, mx > mm)) { // a new maximum: rescale (rare after the first steps)
-                    const float mn = fmaxf(mm, mx);
-                    const float c  = mm == -INFINITY ? 0.0f : expf(mm - mn);
-                    mm  = mn;
-                    ll *= c;
-#pragma unroll
-                    for (int b = 0; b < 4; ++b) {
-#pragma unroll
-                        for (int hf = 0; hf < 2; ++hf) {
-                            o[b][hf][0] *= c; o[b][hf][1] *= c; o[b][hf][2] *= c; o[b][hf][3] *= c;
-                        }
-                    }
-                }
-                const float u  = mm == -INFINITY ? 0.0f : mm;
-                const float p0 = expf(s[0] - u), p1 = expf(s[1] - u);
-                ll += p0 + p1;
-                // ---- P to the lanes of its operand: head gr/2 of the cells 2 tq, 2 tq + 1, 2 tq + 8, 2 tq + 9 ----
-                const int src = 8*tq + hq;
-                float pv[4] = { __shfl_sync(0xffffffffu, p0, src), __shfl_sync(0xffffffffu, p0, src + 4),
-                                __shfl_sync(0xffffffffu, p1, src), __shfl_sync(0xffffffffu, p1, src + 4) };
-                // ---- P V: C[16 dims][8 columns] += A[16 dims][16 cells] B[16 cells][8 columns]; an mma takes 16 dims
-                //      of one block (two per lane group), so the block's scales ride on P ----
-#pragma unroll
-                for (int b = 0; b < 4; ++b) {
-                    float w[4];
-                    uint32_t el[4], eh[4];
-#pragma unroll
-                    for (int i = 0; i < 4; ++i) {
-                        w[i] = col_ok ? ik_limb(pv[i]*ik_q8row::scale(b, vh[i][b >> 1], vl[i][b >> 1])*PS, lo_limb) : 0.0f;
-                        const uint32_t x = vq[i][b] ^ 0x80808080u;
-                        el[i] = __byte_perm(x, 0x64u, 0x4140u);
-                        eh[i] = __byte_perm(x, 0x64u, 0x4342u);
-                    }
-                    const uint32_t B0 = ik_pack_h2(w[0], w[1]), B1 = ik_pack_h2(w[2], w[3]);
-                    {
-                        const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(el[0], el[1], 0x5410u)), ik_u8x2_to_h2(__byte_perm(el[0], el[1], 0x7632u)),
-                                                ik_u8x2_to_h2(__byte_perm(el[2], el[3], 0x5410u)), ik_u8x2_to_h2(__byte_perm(el[2], el[3], 0x7632u)) };
-                        ik_mma16816(o[b][0], a, B0, B1);
-                    }
-                    {
-                        const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(eh[0], eh[1], 0x5410u)), ik_u8x2_to_h2(__byte_perm(eh[0], eh[1], 0x7632u)),
-                                                ik_u8x2_to_h2(__byte_perm(eh[2], eh[3], 0x5410u)), ik_u8x2_to_h2(__byte_perm(eh[2], eh[3], 0x7632u)) };
-                        ik_mma16816(o[b][1], a, B0, B1);
-                    }
-                }
+                ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
             }
         }
         // the warp's partial result
-#pragma unroll
-        for (int sh = 4; sh < 32; sh <<= 1) {
-            ll += __shfl_xor_sync(0xffffffffu, ll, sh);
-        }
-        if (head_ok) {
-#pragma unroll
-            for (int b = 0; b < 4; ++b) {
-#pragma unroll
-                for (int hf = 0; hf < 2; ++hf) {
-                    s_acc[ht][warp][ik_q8row::dim(b, 4*gr + 2*hf)]     = (o[b][hf][0] + o[b][hf][1])*(1.0f/PS);
-                    s_acc[ht][warp][ik_q8row::dim(b, 4*gr + 2*hf + 1)] = (o[b][hf][2] + o[b][hf][3])*(1.0f/PS);
-                }
-            }
-            if (gr == 0) {
-                s_m[ht][warp] = mm;
-                s_l[ht][warp] = ll;
-            }
+        ik_mma_finish<G>(st, s_acc[ht][warp]);
+        if (lane < G) {
+            s_m[lane][warp] = st.mm;
+            s_l[lane][warp] = st.ll;
         }
     }
     IK_DBG_T(4);
@@ -2473,7 +2512,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     if constexpr (MMA) {
         init_lane_state();
     }
-    if (kv_idx >= w0 && kv_idx < w1 && !(args.dbg_skip & 2)) {
+    if ((args.ext_scan ? warp == 0 : (kv_idx >= w0 && kv_idx < w1)) && !(args.dbg_skip & 2)) {
         float kv4[4];
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
@@ -2577,7 +2616,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         if (tid < HD) {
 #pragma unroll
             for (int hh = 0; hh < G; ++hh) {
-                float * part = args.part + (((int64_t) g*args.n_split + split)*G + hh)*(HD + 2);
+                float * part = args.part + (((int64_t) g*args.n_split + (args.ext_scan ? args.n_split - 1 : split))*G + hh)*(HD + 2);
                 part[tid] = A[hh];
                 if (tid == 0) {
                     part[HD]     = M[hh];
@@ -2587,7 +2626,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         }
         __syncthreads();
         if (tid == 0) {
-            s_last = ik_atomic_add_acq_rel(&args.counters[g], 1) == args.n_split - 1;
+            s_last = args.ext_scan ? 1 : ik_atomic_add_acq_rel(&args.counters[g], 1) == args.n_split - 1;
         }
         __syncthreads();
         IK_DBG_T(6);
@@ -2632,7 +2671,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
                 M[hh] = Mt; L[hh] = Lt; A[hh] = At;
             }
         }
-        if (tid == 0) {
+        if (tid == 0 && !args.ext_scan) {
             args.counters[g] = 0;
         }
     }
@@ -2665,6 +2704,118 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         }
     }
     IK_DBG_T(7);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// inkling_attn_scan: the scan of a long Q8_0 cache as its own launch. A (cell, kv head) row is 136 bytes, so it lies
+// across two 128-byte lines that it shares with the rows of the neighbouring heads. With one block per kv head (the
+// fused kernel) those lines are fetched once per head by different SMs at different times: about twice the bytes of
+// the cache go over the memory bus once a layer's cache is larger than the L2. Here a block takes a range of cells for
+// every kv head: warp g scans head g, the warps advance over the same cells together, and a line is fetched once.
+// The blocks leave their parts where the fused kernel (ext_scan) picks them up as if they were its own splits.
+#define IK_SCAN_MAX_KV 8
+#define IK_SCAN_TILE   (IK_SCAN_MAX_KV*4*(int) sizeof(block_q8_0)) // uint4 words of 16 cells
+#ifndef IK_SCAN_MIN_BLOCKS
+#define IK_SCAN_MIN_BLOCKS 2
+#endif
+template <int G>
+static __global__ void __launch_bounds__(IK_SCAN_MAX_KV*WARP_SIZE, IK_SCAN_MIN_BLOCKS) inkling_attn_scan_kernel(const ik_attn_args args) {
+    constexpr int HD = IK_ATTN_HD;
+    const int split = blockIdx.x;
+    const int tid   = threadIdx.x;
+    const int lane  = tid % WARP_SIZE;
+    const int g     = tid / WARP_SIZE; // the warp's kv head
+
+    // The 16 cells of a step, all heads: read with 16-byte loads in cache order (the 4-byte loads of the fragments
+    // straight from the cache reach 2/3 of the bandwidth of this), then taken apart from shared memory.
+    __shared__ uint4 s_tk[IK_SCAN_TILE];
+    __shared__ uint4 s_tv[IK_SCAN_TILE];
+    __shared__ float s_r[IK_SCAN_MAX_KV][G][32];
+    __shared__ float s_sink[IK_SCAN_MAX_KV][G];
+    float (* s_q)[G][HD] = (float (*)[G][HD]) s_tk; // the clipped Q, until the lanes have their operands
+
+    const int64_t kv_idx = args.kv_idxs[0];
+    float tau = 1.0f;
+    if (args.pos) {
+        const float t = args.pos[0] + 1.0f;
+        tau = 1.0f + args.tau_alpha*logf(fmaxf(1.0f, t/args.tau_floor));
+    }
+    // the clipped Q and R of the warp's heads, scaled by tau (a lane has 4 dims of Q and one of R); warp-local
+    const float * pr0 = args.proj;
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
+        const int h = g*G + hh;
+        const float4 q4 = *(const float4 *) (pr0 + (int64_t) h*HD + 4*lane);
+        const float4 c4 = *(const float4 *) (args.consts + (int64_t) h*HD + 4*lane);
+        const float  qv[4] = { q4.x*c4.x, q4.y*c4.y, q4.z*c4.z, q4.w*c4.w };
+        const float  rv = lane < args.n_rel ? pr0[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane] : 0.0f;
+        const float  ssq = warp_reduce_sum(qv[0]*qv[0] + qv[1]*qv[1] + qv[2]*qv[2] + qv[3]*qv[3]);
+        const float  ssr = warp_reduce_sum(rv*rv);
+        const float  fq  = fminf(fmaxf(args.qk_clip/(sqrtf(ssq) + args.clip_eps), 0.0f), 1.0f);
+        const float  fr  = fminf(fmaxf(args.rel_clip/(sqrtf(ssr) + args.clip_eps), 0.0f), 1.0f);
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            s_q[g][hh][4*lane + e] = qv[e]*fq*tau;
+        }
+        s_r[g][hh][lane] = lane < args.n_rel ? rv*fr*tau : 0.0f;
+        if (lane == 0) {
+            s_sink[g][hh] = pr0[args.off_sink + h];
+        }
+    }
+    __syncwarp();
+    ik_mma_lane<G> st;
+    ik_mma_init<G>(st, s_q[g], s_sink[g]);
+    __syncthreads(); // the tiles take the place of Q
+
+    const int kv0 = split*args.kv_per_split;
+    const int kv1 = min(args.n_kv, kv0 + args.kv_per_split);
+    const int     n_thr  = args.n_head_kv*WARP_SIZE;
+    const int     n_tile = (int) args.kc_nb2;                           // uint4 words of 16 cells
+    const int64_t end    = (int64_t) args.n_kv*args.kc_nb2 - 16;        // the last word of the cache
+    const char *  kb     = (const char *) s_tk + g*args.kc_nb1;
+    const char *  vb     = (const char *) s_tv + g*args.vc_nb1;
+    if (!(args.dbg_skip & 2)) {
+        for (int kt = kv0; kt < kv1; kt += 16) {
+            const int64_t off = (int64_t) kt*args.kc_nb2;
+            uint4 tk[5], tv[5];
+#pragma unroll
+            for (int j = 0; j < 5; ++j) { // 136/32 words a thread
+                const int     c = min(j*n_thr + tid, n_tile - 1);
+                const int64_t o = min(off + 16*(int64_t) c, end);       // (past the end: cells that the mask leaves out)
+                tk[j] = *(const uint4 *) (args.k_cache + o);
+                tv[j] = *(const uint4 *) (args.v_cache + o);
+            }
+#pragma unroll
+            for (int j = 0; j < 5; ++j) {
+                const int c = j*n_thr + tid;
+                if (c < n_tile) {
+                    s_tk[c] = tk[j];
+                    s_tv[c] = tv[j];
+                }
+            }
+            __syncthreads();
+            ik_mma_step<G>(args, st, s_r[g], kb, args.kc_nb2, vb, args.vc_nb2, kt, 15, kt, kv1, kv_idx);
+            __syncthreads();
+        }
+    }
+    float * part = args.part + (((int64_t) g*args.n_split + split)*G + min(lane & 3, G - 1))*(HD + 2);
+    ik_mma_finish<G>(st, part);
+    if (lane < G) {
+        float * part_h = args.part + (((int64_t) g*args.n_split + split)*G + lane)*(HD + 2);
+        part_h[HD]     = st.mm;
+        part_h[HD + 1] = st.ll;
+    }
+}
+
+static void inkling_attn_scan_launch(const ik_attn_args & a, const int n_blocks, cudaStream_t stream) {
+    const dim3 grid(n_blocks, 1, 1);
+    const int  block = a.n_head_kv*WARP_SIZE;
+    switch (a.n_head/a.n_head_kv) {
+        case 1: inkling_attn_scan_kernel<1><<<grid, block, 0, stream>>>(a); break;
+        case 2: inkling_attn_scan_kernel<2><<<grid, block, 0, stream>>>(a); break;
+        case 3: inkling_attn_scan_kernel<3><<<grid, block, 0, stream>>>(a); break;
+        default: inkling_attn_scan_kernel<4><<<grid, block, 0, stream>>>(a); break;
+    }
 }
 
 template <typename cache_t, bool q8_out, bool MMA = false>
@@ -2770,10 +2921,22 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     const bool mma = mma_on && !v1 && a.n_kv >= mma_min && k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
             a.kc_nb1 == 4*(int64_t) sizeof(block_q8_0) && a.vc_nb1 == a.kc_nb1 && a.kc_nb2 % 4 == 0 && a.vc_nb2 % 4 == 0 &&
             (uintptr_t) a.k_cache % 4 == 0 && (uintptr_t) a.v_cache % 4 == 0;
-    if (mma) {
+    // A long cache: the scan as its own launch of small blocks (see inkling_attn_scan_kernel).
+    // Measured slower than the fused kernel's own scan (158 vs 164 tok/s at 32K), so it is opt-in: IK_ATTN_SCAN_MIN=2048.
+    static const int scan_min   = getenv("IK_ATTN_SCAN_MIN") ? atoi(getenv("IK_ATTN_SCAN_MIN")) : 0;          // cells; 0: never
+    static const int scan_split = getenv("IK_ATTN_SCAN_SPLITS") ? atoi(getenv("IK_ATTN_SCAN_SPLITS")) : 82;   // most blocks
+    static const int scan_spw   = getenv("IK_ATTN_SCAN_SPW") ? atoi(getenv("IK_ATTN_SCAN_SPW")) : 1;         // steps per warp before another block
+    const bool ext = mma && scan_min > 0 && a.n_kv >= scan_min && a.n_head_kv <= IK_SCAN_MAX_KV && a.kc_nb2 == a.vc_nb2 &&
+            a.kc_nb2 == a.n_head_kv*a.kc_nb1 && a.kc_nb2 % 16 == 0 && (uintptr_t) a.k_cache % 16 == 0 && (uintptr_t) a.v_cache % 16 == 0;
+    a.ext_scan = 0;
+    int n_ext = 0;
+    if (ext) {
+        n_ext = std::max(1, std::min(scan_split, (a.n_kv + 16*scan_spw - 1)/(16*scan_spw)));
+        a.n_split = n_ext + 1; // the parts of the scan, then the fused kernel's own (the current cell)
+    } else if (mma) {
         a.n_split = std::max(1, std::min(mma_split, (a.n_kv + 16*IK_A2_WARPS*mma_spw - 1)/(16*IK_A2_WARPS*mma_spw)));
     }
-    a.kv_per_split = (a.n_kv + a.n_split - 1)/a.n_split;
+    a.kv_per_split = ext ? (a.n_kv + n_ext - 1)/n_ext : (a.n_kv + a.n_split - 1)/a.n_split;
 
     cudaStream_t stream = ctx.stream();
     const int gqa = a.n_head/a.n_head_kv;
@@ -2783,13 +2946,20 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     if (a.n_split > 1) {
         part.alloc((size_t) a.n_head_kv*a.n_split*gqa*(IK_ATTN_HD + 2));
         a.part     = part.get();
-        a.counters = ik_counters(ctx, 0, a.n_head_kv); // self-resetting arrival counters
+        a.counters = ext ? nullptr : ik_counters(ctx, 0, a.n_head_kv); // self-resetting arrival counters
     }
 
     const bool q8 = dst->type == GGML_TYPE_Q8_1;
     GGML_ASSERT(dst->type == GGML_TYPE_F32 || q8);
     GGML_ASSERT(k_cache->type == v_cache->type && (k_cache->type == GGML_TYPE_F16 || k_cache->type == GGML_TYPE_Q8_0));
 
+    if (ext) {
+        inkling_attn_scan_launch(a, n_ext, stream);
+        a.ext_scan = 1;
+        const dim3 grid1(a.n_head_kv, 1, 1);
+        if (q8) { inkling_attn2_launch<block_q8_0, true>(a, grid1, stream); } else { inkling_attn2_launch<block_q8_0, false>(a, grid1, stream); }
+        return;
+    }
     const dim3 grid(a.n_head_kv, a.n_split, 1);
     if (!v1) {
         if (k_cache->type == GGML_TYPE_F16) {
