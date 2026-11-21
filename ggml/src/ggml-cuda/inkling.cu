@@ -3095,7 +3095,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
     __shared__ float s_w[2*NS + 1];            // rms[NS], p[NS], factor
     __shared__ float s_sel[IK_R2_MAX_EXPERT];
     __shared__ float s_prob[IK_R2_MAX_EXPERT];
-    __shared__ float s_wsum;
+    __shared__ float s_selected[8];
     __shared__ int   s_last;
 
     const int tid  = threadIdx.x;
@@ -3340,9 +3340,6 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         s_prob[tid] = p;
         s_sel[tid]  = p + args.probs_b[tid];
     }
-    if (tid == 0) {
-        s_wsum = 0.0f;
-    }
     __syncthreads();
     int rank = n_expert;
     if (tid < n_expert) {
@@ -3355,12 +3352,17 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         }
         if (rank < args.n_used) {
             args.route[rank] = tid;
-            atomicAdd(&s_wsum, s_prob[tid]);
+            s_selected[rank] = s_prob[tid];
         }
     }
     __syncthreads();
     if (rank < args.n_used) {
-        const float w = s_prob[tid]/(s_wsum + args.w_eps)*args.w_scale;
+        // Normalize in top-k order, independent of which warp won the atomic race.
+        float sum = 0.0f;
+        for (int i = 0; i < args.n_used; ++i) {
+            sum += s_selected[i];
+        }
+        const float w = s_prob[tid]/(sum + args.w_eps)*args.w_scale;
         args.route[args.n_used + rank] = __float_as_int(w);
     }
     if (tid == 0) {
