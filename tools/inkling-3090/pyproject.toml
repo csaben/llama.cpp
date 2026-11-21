@@ -1,6 +1,6 @@
 [project]
 name = "inkling-3090"
-version = "0.1.0"
+version = "0.1.1"
 description = "Run Inkling 2 Mini at ~200 tok/s on one RTX 3090: downloads a prebuilt llama.cpp fork, the CUDA runtime and the model, then starts an OpenAI-compatible server."
 readme = "README.md"
 requires-python = ">=3.10"

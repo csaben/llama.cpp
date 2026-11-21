@@ -1,6 +1,6 @@
 """inkling-3090: one command to run Inkling 2 Mini fast on an RTX 3090.
 
-    uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090-v1#subdirectory=tools/inkling-3090" inkling-3090
+    uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090-v1.1#subdirectory=tools/inkling-3090" inkling-3090
 
 Downloads (once, cached under ~/.cache/inkling-3090):
   - a prebuilt llama-server from the csaben/llama.cpp `inkling-3090` fork (Linux x86-64, CUDA 12.8, sm_86),
@@ -26,9 +26,11 @@ ASSET = "llama-server-inkling-linux-x64-cuda12.8-sm86.tar.gz"
 ASSET_SHA256 = "92344638f9702913033e4f71fc07f47a958b27fdf755b12c742c067404401238"
 ASSET_URL = f"https://github.com/csaben/llama.cpp/releases/download/{RELEASE_TAG}/{ASSET}"
 
+# name: (repo, file, default context, fused-kernel switches beyond TUNED_ENV)
 MODELS = {
-    False: ("arelius/Inkling-2-Mini-Q2-3090-GGUF", "Inkling-2-Mini-Q2K-Q2_0.gguf"),
-    True: ("arelius/Inkling-2-Mini-Uncensored-Q2-3090-GGUF", "Inkling-2-Mini-Uncensored-Q2K-Q2_0.gguf"),
+    "fast": ("arelius/Inkling-2-Mini-Q2-3090-GGUF", "Inkling-2-Mini-Q2K-Q2_0.gguf", 65536, {"IK_CTRL_APPLY8": "1"}),
+    "uncensored": ("arelius/Inkling-2-Mini-Uncensored-Q2-3090-GGUF", "Inkling-2-Mini-Uncensored-Q2K-Q2_0.gguf", 65536, {"IK_CTRL_APPLY8": "1"}),
+    "quality": ("arelius/Inkling-2-Mini-Q6K-3090-GGUF", "Inkling-2-Mini-Q6K-dense.gguf", 32768, {}),
 }
 # the fused-kernel switches the measured numbers were taken with (see INKLING.md in the fork)
 TUNED_ENV = {
@@ -37,7 +39,6 @@ TUNED_ENV = {
     "IK_SEGMENTED_IQ4": "1",
     "IK_SEGMENTED_Q6": "1",
     "IK_MIX_SPECIALIZE": "1",
-    "IK_CTRL_APPLY8": "1",
 }
 CACHE = Path(os.environ.get("INKLING3090_CACHE", Path.home() / ".cache" / "inkling-3090"))
 
@@ -61,7 +62,7 @@ def check_gpu(index: int) -> None:
     if cc != "8.6":
         say("warning: the kernels are tuned for compute 8.6 (RTX 3090/3080/A6000-class); other GPUs are untested.")
     if int(total) - int(used) < 13000:
-        say("warning: about 13 GB of free VRAM is needed at 64K context; lower it with --ctx if loading fails.")
+        say("warning: about 13 GB of free VRAM is needed for the default model at 64K context (about 20 GB for --quality at 32K); lower --ctx if loading fails.")
     if int(driver.split(".")[0]) < 570:
         sys.exit("[inkling-3090] NVIDIA driver 570 or newer is required for the CUDA 12.8 runtime.")
 
@@ -103,15 +104,21 @@ def cuda_lib_dirs() -> list[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="inkling-3090", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--uncensored", action="store_true", help="use AtomicChat's uncensored build (same speed)")
+    ap.add_argument("--uncensored", action="store_true", help="use AtomicChat's uncensored build (same speed as the default)")
+    ap.add_argument("--quality", action="store_true", help="use the near-exact Q6_K build: ~152 tok/s served, perplexity within noise of the 4-bit original")
     ap.add_argument("--model", help="path to a local GGUF instead of downloading one")
     ap.add_argument("--gpu", type=int, default=0, help="GPU index (default 0)")
-    ap.add_argument("--ctx", type=int, default=65536, help="context length (default 65536)")
+    ap.add_argument("--ctx", type=int, default=None, help="context length (default 65536; 32768 with --quality)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8031)
     ap.add_argument("--opencode", action="store_true", help="print an OpenCode provider config and exit")
     ap.add_argument("extra", nargs=argparse.REMAINDER, help="extra llama-server arguments after --")
     a = ap.parse_args()
+    if a.quality and a.uncensored:
+        sys.exit("[inkling-3090] --quality and --uncensored are separate builds; pick one.")
+    choice = "quality" if a.quality else "uncensored" if a.uncensored else "fast"
+    repo, fname, default_ctx, extra_env = MODELS[choice]
+    a.ctx = a.ctx or default_ctx
 
     if a.opencode:
         # the provider block tested with OpenCode 1.2.5 (perf/opencode-inkling.json in the fork)
@@ -129,12 +136,12 @@ def main() -> None:
         model = a.model
     else:
         from huggingface_hub import hf_hub_download
-        repo, fname = MODELS[a.uncensored]
-        say(f"model: {repo}/{fname} (9.9 GB, cached after the first run)")
+        say(f"model: {repo}/{fname} ({'17.4' if choice == 'quality' else '9.9'} GB, cached after the first run)")
         model = hf_hub_download(repo, fname)
 
     env = dict(os.environ)
     env.update(TUNED_ENV)
+    env.update(extra_env)
     env["CUDA_VISIBLE_DEVICES"] = str(a.gpu)
     env["LD_LIBRARY_PATH"] = os.pathsep.join(cuda_lib_dirs() + [str(server.parent), env.get("LD_LIBRARY_PATH", "")])
     cmd = [str(server), "-m", model, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", str(a.ctx),

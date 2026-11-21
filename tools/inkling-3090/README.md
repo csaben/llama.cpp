@@ -3,7 +3,7 @@
 Run Inkling 2 Mini at about 200 tok/s on one RTX 3090. One command, with no CUDA toolkit and no build:
 
 ```bash
-uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090-v1#subdirectory=tools/inkling-3090" inkling-3090
+uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090-v1.1#subdirectory=tools/inkling-3090" inkling-3090
 ```
 
 The first run downloads the following once and caches it under `~/.cache/inkling-3090` and the Hugging Face cache:
@@ -18,7 +18,8 @@ It then serves an OpenAI-compatible API at `http://127.0.0.1:8031/v1`, with mode
 
 | Flag | Effect |
 |---|---|
-| `--uncensored` | Use [AtomicChat's uncensored build](https://huggingface.co/arelius/Inkling-2-Mini-Uncensored-Q2-3090-GGUF) instead. Same speed. |
+| `--quality` | Use the [near-exact Q6_K build](https://huggingface.co/arelius/Inkling-2-Mini-Q6K-3090-GGUF) (17.4 GB): ~159 tok/s, ~152 served, perplexity within noise of the 4-bit original. Defaults to 32K of context. |
+| `--uncensored` | Use [AtomicChat's uncensored build](https://huggingface.co/arelius/Inkling-2-Mini-Uncensored-Q2-3090-GGUF) instead. Same speed as the default. |
 | `--gpu N` | Choose the GPU (default 0). |
 | `--ctx N` | Set the context length (default 65536; it needs about 13 GB of free VRAM at 64K). |
 | `--port N`, `--host H` | Set where to listen (default 127.0.0.1:8031). |
@@ -44,8 +45,7 @@ These were measured on an RTX 3090, using this fork's numbers and an independent
 | 16K–24K | ~141 |
 | 32K–48K | ~123 |
 
-Coding agents usually start with 16K+ tokens of tool prompt, so expect 120–140 tok/s there. Quality is about 3–4%
-higher perplexity than the 4-bit conversion. For quality-first use, build the fork yourself (see
-[INKLING.md](../../INKLING.md)) and run ggml-org's IQ4_NL GGUF.
+Coding agents usually start with 16K+ tokens of tool prompt, so expect 120–140 tok/s there. The default model's
+perplexity is about 3–4% higher than the 4-bit conversion. For quality first, use `--quality`.
 
 The code is MIT, like llama.cpp. The models are Apache-2.0; see their cards.
