@@ -118,6 +118,12 @@ void ggml_compute_forward_opt_step_adamw(const struct ggml_compute_params * para
 void ggml_compute_forward_mul_mat(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_fwht(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_opt_step_sgd(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_l2_clip(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_res_mix(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_shortconv_res(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_rel_bias(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_loop_ctrl_down(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_loop_ctrl_apply(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 #ifdef __cplusplus
 }
 #endif

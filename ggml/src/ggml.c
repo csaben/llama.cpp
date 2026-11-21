@@ -1116,9 +1116,16 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 
     "SLEEP",
+
+    "L2_CLIP",
+    "RES_MIX",
+    "SHORTCONV_RES",
+    "REL_BIAS",
+    "LOOP_CTRL_DOWN",
+    "LOOP_CTRL_APPLY",
 };
 
-static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
+static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1231,9 +1238,16 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 
     "sleep(x)",
+
+    "l2_clip(x)",
+    "res_mix(q,x...)",
+    "shortconv_res(x,w)",
+    "rel_bias(r,table)",
+    "loop_ctrl_down(w,a,b)",
+    "loop_ctrl_apply(x,m,d)",
 };
 
-static_assert(GGML_OP_COUNT == 100, "GGML_OP_COUNT != 100");
+static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -1272,9 +1286,11 @@ static const char * GGML_GLU_OP_NAME[GGML_GLU_OP_COUNT] = {
     "GEGLU_ERF",
     "GEGLU_QUICK",
     "SWIGLU_CLAMP",
+    "SITU",
+    "SIGLU",
 };
 
-static_assert(GGML_GLU_OP_COUNT == 7, "GGML_GLU_OP_COUNT != 7");
+static_assert(GGML_GLU_OP_COUNT == 9, "GGML_GLU_OP_COUNT != 9");
 
 static_assert(sizeof(struct ggml_object)%GGML_MEM_ALIGN == 0, "ggml_object size must be a multiple of GGML_MEM_ALIGN");
 static_assert(sizeof(struct ggml_tensor)%GGML_MEM_ALIGN == 0, "ggml_tensor size must be a multiple of GGML_MEM_ALIGN");
@@ -3124,6 +3140,26 @@ struct ggml_tensor * ggml_swiglu_clamp(
     ggml_set_op_params_f32(result, 3, limit);
 
     return result;
+}
+
+struct ggml_tensor * ggml_situ_split(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        float                 beta,
+        float                 linear_beta) {
+    struct ggml_tensor * result = ggml_glu_impl(ctx, a, b, GGML_GLU_OP_SITU, false);
+    ggml_set_op_params_f32(result, 2, beta);
+    ggml_set_op_params_f32(result, 3, linear_beta);
+
+    return result;
+}
+
+struct ggml_tensor * ggml_siglu_split(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b) {
+    return ggml_glu_impl(ctx, a, b, GGML_GLU_OP_SIGLU, false);
 }
 
 // ggml_norm
@@ -5621,6 +5657,220 @@ struct ggml_tensor * ggml_ssm_conv(
     result->op     = GGML_OP_SSM_CONV;
     result->src[0] = sx;
     result->src[1] = c;
+
+    return result;
+}
+
+// ggml_l2_clip
+
+struct ggml_tensor * ggml_l2_clip(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        float                 threshold,
+        float                 eps) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32);
+    if (b) {
+        GGML_ASSERT(b->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_can_repeat(b, a));
+    }
+
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
+
+    float params[2] = { threshold, eps };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_L2_CLIP;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+
+// ggml_res_mix
+
+struct ggml_tensor * ggml_res_mix(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * query,
+        struct ggml_tensor ** states,
+        int                   n_states,
+        float                 eps,
+        float                 scale) {
+    GGML_ASSERT(n_states >= 1 && n_states <= GGML_MAX_SRC - 1);
+    GGML_ASSERT(query->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_matrix(query) && ggml_is_contiguous(query));
+
+    const int64_t n_embd = query->ne[0];
+    const int64_t n_q    = query->ne[1];
+    const int64_t n_tok  = states[0]->ne[1];
+
+    for (int i = 0; i < n_states; ++i) {
+        GGML_ASSERT(states[i]->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_is_matrix(states[i]));
+        GGML_ASSERT(states[i]->ne[0] == n_embd && states[i]->ne[1] == n_tok);
+        GGML_ASSERT(states[i]->nb[0] == sizeof(float));
+    }
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, n_tok, n_q);
+
+    float params[2] = { eps, scale };
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_RES_MIX;
+    result->src[0] = query;
+    for (int i = 0; i < n_states; ++i) {
+        result->src[1 + i] = states[i];
+    }
+
+    return result;
+}
+
+// ggml_shortconv_res
+
+struct ggml_tensor * ggml_shortconv_res(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * sx,
+        struct ggml_tensor  * w,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * taps,
+        struct ggml_tensor  * res,
+        float                 scale) {
+    GGML_ASSERT(ggml_is_3d(sx));
+    GGML_ASSERT(ggml_is_matrix(w));
+    GGML_ASSERT(sx->type == GGML_TYPE_F32 && w->type == GGML_TYPE_F32 && cur->type == GGML_TYPE_F32);
+
+    const int64_t d_conv  = w->ne[0];
+    const int64_t n_chan  = w->ne[1];
+    const int64_t n_t     = sx->ne[0] - d_conv + 1; // tokens per sequence
+    const int64_t n_s     = sx->ne[2];
+
+    GGML_ASSERT(sx->ne[0] == d_conv - 1 + n_t);
+    GGML_ASSERT(sx->ne[1] == n_chan);
+    GGML_ASSERT(n_t >= 0);
+    GGML_ASSERT(ggml_is_matrix(cur) && cur->ne[0] == n_chan && cur->ne[1] == n_t*n_s);
+    GGML_ASSERT(cur->nb[0] == sizeof(float));
+    if (taps) {
+        GGML_ASSERT(taps->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_is_3d(taps) && ggml_is_contiguous(taps));
+        GGML_ASSERT(taps->ne[0] == d_conv && taps->ne[2] == n_t*n_s && n_chan % taps->ne[1] == 0);
+    }
+    if (res) {
+        GGML_ASSERT(res->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_is_matrix(res) && res->ne[0] == n_chan && res->ne[1] == n_t*n_s);
+        GGML_ASSERT(res->nb[0] == sizeof(float));
+    }
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_chan, n_t*n_s);
+
+    ggml_set_op_params_f32(result, 0, scale);
+
+    result->op     = GGML_OP_SHORTCONV_RES;
+    result->src[0] = sx;
+    result->src[1] = w;
+    result->src[2] = cur;
+    result->src[3] = taps;
+    result->src[4] = res;
+
+    return result;
+}
+
+// ggml_rel_bias
+
+struct ggml_tensor * ggml_rel_bias(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * r_cur,
+        struct ggml_tensor  * table,
+        struct ggml_tensor  * sinks,
+        struct ggml_tensor  * pos,
+        struct ggml_tensor  * mask,
+        enum   ggml_type      type) {
+    GGML_ASSERT(type == GGML_TYPE_F32 || type == GGML_TYPE_F16);
+    GGML_ASSERT(r_cur->type == GGML_TYPE_F32 && ggml_is_3d(r_cur) && ggml_is_contiguous(r_cur));
+    GGML_ASSERT(table->type == GGML_TYPE_F32 && ggml_is_matrix(table) && ggml_is_contiguous(table));
+    GGML_ASSERT(pos->type == GGML_TYPE_I32 && ggml_is_matrix(pos) && ggml_is_contiguous(pos));
+
+    const int64_t n_rel  = r_cur->ne[0];
+    const int64_t n_head = r_cur->ne[1];
+    const int64_t n_tok  = r_cur->ne[2];
+    const int64_t n_kv   = pos->ne[0];
+
+    GGML_ASSERT(table->ne[0] == n_rel);
+    GGML_ASSERT(pos->ne[1] == n_tok);
+    if (sinks) {
+        GGML_ASSERT(sinks->type == GGML_TYPE_F32 && ggml_is_contiguous(sinks));
+        GGML_ASSERT(ggml_nelements(sinks) == n_head*n_tok);
+    }
+    if (mask) {
+        GGML_ASSERT(mask->type == GGML_TYPE_F32 || mask->type == GGML_TYPE_F16);
+        GGML_ASSERT(ggml_is_contiguous(mask));
+        GGML_ASSERT(mask->ne[0] == n_kv && mask->ne[1] >= n_tok && mask->ne[2] == 1 && mask->ne[3] == 1);
+    }
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, type, n_kv, n_tok, n_head);
+
+    result->op     = GGML_OP_REL_BIAS;
+    result->src[0] = r_cur;
+    result->src[1] = table;
+    result->src[2] = sinks;
+    result->src[3] = pos;
+    result->src[4] = mask;
+
+    return result;
+}
+
+// ggml_loop_ctrl_down
+
+struct ggml_tensor * ggml_loop_ctrl_down(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * w,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        float                 eps) {
+    GGML_ASSERT(w->type == GGML_TYPE_F32 && a->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_matrix(w) && ggml_is_contiguous(w));
+    GGML_ASSERT(ggml_is_matrix(a) && ggml_is_matrix(b));
+    GGML_ASSERT(a->nb[0] == sizeof(float) && b->nb[0] == sizeof(float));
+    GGML_ASSERT(ggml_are_same_shape(a, b));
+    GGML_ASSERT(w->ne[0] == 2*a->ne[0]);
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, w->ne[1], a->ne[1]);
+
+    ggml_set_op_params_f32(result, 0, eps);
+
+    result->op     = GGML_OP_LOOP_CTRL_DOWN;
+    result->src[0] = w;
+    result->src[1] = a;
+    result->src[2] = b;
+
+    return result;
+}
+
+// ggml_loop_ctrl_apply
+
+struct ggml_tensor * ggml_loop_ctrl_apply(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * msg,
+        struct ggml_tensor  * d,
+        struct ggml_tensor  * w_gain,
+        struct ggml_tensor  * w_forget) {
+    GGML_ASSERT(cur->type == GGML_TYPE_F32 && msg->type == GGML_TYPE_F32 && d->type == GGML_TYPE_F32);
+    GGML_ASSERT(w_gain->type == GGML_TYPE_F32 && w_forget->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_matrix(cur) && ggml_is_matrix(msg) && ggml_is_matrix(d));
+    GGML_ASSERT(ggml_are_same_shape(cur, msg));
+    GGML_ASSERT(cur->nb[0] == sizeof(float) && msg->nb[0] == sizeof(float));
+    GGML_ASSERT(ggml_is_contiguous(d) && ggml_is_contiguous(w_gain) && ggml_is_contiguous(w_forget));
+    GGML_ASSERT(ggml_are_same_shape(w_gain, w_forget));
+    GGML_ASSERT(w_gain->ne[0] == d->ne[0] && w_gain->ne[1] == cur->ne[0] && d->ne[1] == cur->ne[1]);
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cur->ne[0], cur->ne[1]);
+
+    result->op     = GGML_OP_LOOP_CTRL_APPLY;
+    result->src[0] = cur;
+    result->src[1] = msg;
+    result->src[2] = d;
+    result->src[3] = w_gain;
+    result->src[4] = w_forget;
 
     return result;
 }

@@ -433,6 +433,13 @@ extern "C" {
 
         GGML_OP_SLEEP,
 
+        GGML_OP_L2_CLIP,
+        GGML_OP_RES_MIX,
+        GGML_OP_SHORTCONV_RES,
+        GGML_OP_REL_BIAS,
+        GGML_OP_LOOP_CTRL_DOWN,
+        GGML_OP_LOOP_CTRL_APPLY,
+
         GGML_OP_COUNT,
     };
 
@@ -471,6 +478,8 @@ extern "C" {
         GGML_GLU_OP_GEGLU_ERF,
         GGML_GLU_OP_GEGLU_QUICK,
         GGML_GLU_OP_SWIGLU_CLAMP,
+        GGML_GLU_OP_SITU,
+        GGML_GLU_OP_SIGLU,
 
         GGML_GLU_OP_COUNT,
     };
@@ -1203,6 +1212,20 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b,
             float                 limit);
+
+    // situ(gate, up) = beta*tanh(gate/beta)*sigmoid(gate) * lb*tanh(up/lb)   (lb <= 0: plain up)
+    GGML_API struct ggml_tensor * ggml_situ_split(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            float                 beta,
+            float                 linear_beta);
+
+    // siglu(gate, up) = sigmoid(gate) * up
+    GGML_API struct ggml_tensor * ggml_siglu_split(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b);
 
     // normalize along rows
     GGML_API struct ggml_tensor * ggml_norm(
@@ -2296,6 +2319,72 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * sx,
             struct ggml_tensor  * c);
+
+    // scale each row of a (optionally multiplied elementwise by b, broadcast like ggml_mul) to an L2 norm
+    // of at most threshold: y = x * min(1, threshold/(|x| + eps))
+    GGML_API struct ggml_tensor * ggml_l2_clip(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            float                 threshold,
+            float                 eps);
+
+    // attention over a set of n_states vectors with learned queries: the states [n_embd, n_tokens] are
+    // RMS-normalized (eps), scored against the queries [n_embd, n_q] (softmax over the states of
+    // scale*dot) and mixed: result [n_embd, n_tokens, n_q]
+    GGML_API struct ggml_tensor * ggml_res_mix(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * query,
+            struct ggml_tensor ** states,
+            int                   n_states,
+            float                 eps,
+            float                 scale);
+
+    // causal short convolution with a residual: y = res + (cur + conv(sx, w) + dynamic taps) * scale
+    //   sx   [d_conv - 1 + n_t, n_channels, n_seqs]  (past inputs followed by the current ones)
+    //   w    [d_conv, n_channels]
+    //   cur  [n_channels, n_t*n_seqs]
+    //   taps [d_conv, n_heads, n_t*n_seqs] (optional): tap[lag, h, t] multiplies the input lag steps back
+    //   res  [n_channels, n_t*n_seqs] (optional)
+    GGML_API struct ggml_tensor * ggml_shortconv_res(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * sx,
+            struct ggml_tensor  * w,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * taps,
+            struct ggml_tensor  * res,
+            float                 scale);
+
+    // relative-position attention bias gathered by distance, with per-query sinks and the mask added:
+    //   out[kv, t, h] = sum_r table[r, pos[kv, t]] * r_cur[r, h, t] - sinks[h, t] + mask[kv, t]
+    //   r_cur [n_rel, n_head, n_tokens], table [n_rel, n_extent], sinks [n_head, n_tokens],
+    //   pos [n_kv, n_tokens] (I32, pos >= n_extent reads a zero bias), mask [n_kv, >= n_tokens] F32/F16
+    //   result [n_kv, n_tokens, n_head] of type `type` (F32 or F16)
+    GGML_API struct ggml_tensor * ggml_rel_bias(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * r_cur,
+            struct ggml_tensor  * table,
+            struct ggml_tensor  * sinks,
+            struct ggml_tensor  * pos,
+            struct ggml_tensor  * mask,
+            enum   ggml_type      type);
+
+    // d = w^T * concat(rms_norm(a, eps), rms_norm(b, eps)):  w [2*n, rank], a, b [n, n_tokens] -> [rank, n_tokens]
+    GGML_API struct ggml_tensor * ggml_loop_ctrl_down(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * w,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            float                 eps);
+
+    // out = cur - tanh(w_forget^T d)*cur + tanh(w_gain^T d)*msg:  w_* [rank, n], d [rank, n_tokens], cur, msg [n, n_tokens]
+    GGML_API struct ggml_tensor * ggml_loop_ctrl_apply(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * msg,
+            struct ggml_tensor  * d,
+            struct ggml_tensor  * w_gain,
+            struct ggml_tensor  * w_forget);
 
     GGML_API struct ggml_tensor * ggml_ssm_scan(
             struct ggml_context * ctx,

@@ -53,6 +53,7 @@
 #include "ggml-cuda/softcap.cuh"
 #include "ggml-cuda/softmax.cuh"
 #include "ggml-cuda/ssm-conv.cuh"
+#include "ggml-cuda/inkling.cuh"
 #include "ggml-cuda/ssm-scan.cuh"
 #include "ggml-cuda/sum.cuh"
 #include "ggml-cuda/sumrows.cuh"
@@ -2957,6 +2958,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 case GGML_GLU_OP_SWIGLU_CLAMP:
                     ggml_cuda_op_swiglu_clamp(ctx, dst);
                     break;
+                case GGML_GLU_OP_SITU:
+                    ggml_cuda_op_situ(ctx, dst);
+                    break;
+                case GGML_GLU_OP_SIGLU:
+                    ggml_cuda_op_siglu(ctx, dst);
+                    break;
                 default:
                     return false;
             }
@@ -3098,6 +3105,24 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_SSM_CONV:
             ggml_cuda_op_ssm_conv(ctx, dst);
+            break;
+        case GGML_OP_L2_CLIP:
+            ggml_cuda_op_l2_clip(ctx, dst);
+            break;
+        case GGML_OP_RES_MIX:
+            ggml_cuda_op_res_mix(ctx, dst);
+            break;
+        case GGML_OP_SHORTCONV_RES:
+            ggml_cuda_op_shortconv_res(ctx, dst);
+            break;
+        case GGML_OP_REL_BIAS:
+            ggml_cuda_op_rel_bias(ctx, dst);
+            break;
+        case GGML_OP_LOOP_CTRL_DOWN:
+            ggml_cuda_op_loop_ctrl_down(ctx, dst);
+            break;
+        case GGML_OP_LOOP_CTRL_APPLY:
+            ggml_cuda_op_loop_ctrl_apply(ctx, dst);
             break;
         case GGML_OP_SSM_SCAN:
             ggml_cuda_op_ssm_scan(ctx, dst);
@@ -6386,6 +6411,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 case GGML_GLU_OP_SWIGLU_OAI:
                 case GGML_GLU_OP_GEGLU_ERF:
                 case GGML_GLU_OP_GEGLU_QUICK:
+                case GGML_GLU_OP_SITU:
+                case GGML_GLU_OP_SIGLU:
+                    if (ggml_get_glu_op(op) == GGML_GLU_OP_SITU || ggml_get_glu_op(op) == GGML_GLU_OP_SIGLU) {
+                        return op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous_1(op->src[0]);
+                    }
+                    // fallthrough
                 case GGML_GLU_OP_SWIGLU_CLAMP:
                     if (op->src[0]->type == GGML_TYPE_BF16 &&
                             (ggml_get_glu_op(op) == GGML_GLU_OP_SWIGLU_OAI || ggml_get_glu_op(op) == GGML_GLU_OP_SWIGLU_CLAMP)) {
@@ -6722,6 +6753,14 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             // assumes d_inner % threads == 0
             return op->src[0]->ne[1] % 128 == 0;
         }
+        case GGML_OP_L2_CLIP:
+        case GGML_OP_RES_MIX:
+        case GGML_OP_SHORTCONV_RES:
+        case GGML_OP_LOOP_CTRL_DOWN:
+        case GGML_OP_LOOP_CTRL_APPLY:
+            return true;
+        case GGML_OP_REL_BIAS:
+            return op->src[0]->ne[0] <= 64;
         case GGML_OP_CONT:
             return true;
         case GGML_OP_SOFT_MAX:

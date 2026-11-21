@@ -2053,6 +2053,30 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_ssm_conv(params, tensor);
             } break;
+        case GGML_OP_L2_CLIP:
+            {
+                ggml_compute_forward_l2_clip(params, tensor);
+            } break;
+        case GGML_OP_RES_MIX:
+            {
+                ggml_compute_forward_res_mix(params, tensor);
+            } break;
+        case GGML_OP_SHORTCONV_RES:
+            {
+                ggml_compute_forward_shortconv_res(params, tensor);
+            } break;
+        case GGML_OP_REL_BIAS:
+            {
+                ggml_compute_forward_rel_bias(params, tensor);
+            } break;
+        case GGML_OP_LOOP_CTRL_DOWN:
+            {
+                ggml_compute_forward_loop_ctrl_down(params, tensor);
+            } break;
+        case GGML_OP_LOOP_CTRL_APPLY:
+            {
+                ggml_compute_forward_loop_ctrl_apply(params, tensor);
+            } break;
         case GGML_OP_SSM_SCAN:
             {
                 ggml_compute_forward_ssm_scan(params, tensor);
@@ -2358,6 +2382,8 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 case GGML_GLU_OP_GEGLU_ERF:
                 case GGML_GLU_OP_GEGLU_QUICK:
                 case GGML_GLU_OP_SWIGLU_CLAMP:
+                case GGML_GLU_OP_SITU:
+                case GGML_GLU_OP_SIGLU:
                     {
                         n_tasks = n_threads;
                     } break;
@@ -2443,6 +2469,12 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_SSM_CONV:
         case GGML_OP_SSM_SCAN:
         case GGML_OP_LIGHTNING_INDEXER:
+        case GGML_OP_L2_CLIP:
+        case GGML_OP_RES_MIX:
+        case GGML_OP_SHORTCONV_RES:
+        case GGML_OP_REL_BIAS:
+        case GGML_OP_LOOP_CTRL_DOWN:
+        case GGML_OP_LOOP_CTRL_APPLY:
             {
                 n_tasks = n_threads;
             } break;
