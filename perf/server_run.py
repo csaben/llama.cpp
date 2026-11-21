@@ -10,7 +10,7 @@ if no_bench:
     args.remove("--no-bench")
 extra = args[1:] if args and args[0] == "--" else args
 os.makedirs(outdir, exist_ok=True)
-M = os.path.expanduser("~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL.gguf")
+M = os.path.expanduser(os.environ.get("MODEL", "~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL.gguf"))
 PROMPTS = [
     "Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests.",
     "The history of the bicycle begins in the early nineteenth century, when",
@@ -21,7 +21,7 @@ cmd = ["build/bin/llama-server", "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8
        "--port", str(port), "--host", "127.0.0.1"] + extra
 print("server:", " ".join(cmd), flush=True)
 log = open(os.path.join(outdir, "server.log"), "w")
-p = subprocess.Popen(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES="1"), stdout=log, stderr=subprocess.STDOUT)
+p = subprocess.Popen(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=os.environ.get("GPU", "0")), stdout=log, stderr=subprocess.STDOUT)
 try:
     for _ in range(1200):
         if p.poll() is not None:
