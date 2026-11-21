@@ -6843,7 +6843,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             {
                 const int n_states = ggml_get_op_params_i32(op, 6);
                 const ggml_tensor * gate_inp = op->src[2 + n_states];
-                return op->ne[0] % 4 == 0 && op->ne[0] <= 4096 && gate_inp->ne[1] % 8 == 0 && gate_inp->ne[1] <= 256;
+                const bool has_conv = ggml_get_op_params_i32(op, 10) != 0;
+                return op->ne[0] % 4 == 0 && op->ne[0] <= (has_conv ? 2304 : 4096) && gate_inp->ne[1] % 8 == 0 && gate_inp->ne[1] <= 256 &&
+                    (!has_conv || (n_states <= 5 && ggml_get_op_params_i32(op, 8) % 4 == 0 && op->src[6 + n_states]->ne[0] == 4));
             }
         case GGML_OP_INKLING_PROJ:
             {

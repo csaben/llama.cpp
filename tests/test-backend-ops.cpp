@@ -5488,11 +5488,27 @@ struct test_inkling_router : public test_case {
     const bool with_bias;
 
     std::string vars() override {
-        return VARS_TO_STR5(n_embd, n_states, n_expert, n_used, with_bias);
+        return VARS_TO_STR6(n_embd, n_states, n_expert, n_used, with_bias, with_conv);
     }
 
-    test_inkling_router(int64_t n_embd = 2304, int n_states = 4, int n_expert = 128, int n_used = 8, bool with_bias = true)
-        : n_embd(n_embd), n_states(n_states), n_expert(n_expert), n_used(n_used), with_bias(with_bias) {}
+    const bool with_conv;
+    static constexpr int64_t n_conv = 4, n_cells = 3, write_cell = 1, chan_offset = 100;
+
+    test_inkling_router(int64_t n_embd = 2304, int n_states = 4, int n_expert = 128, int n_used = 8, bool with_bias = true, bool with_conv = false)
+        : n_embd(n_embd), n_states(n_states), n_expert(n_expert), n_used(n_used), with_bias(with_bias), with_conv(with_conv) {}
+
+    void initialize_tensors(ggml_context * ctx) override {
+        std::random_device rd;
+        std::default_random_engine rng(rd());
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (std::string(t->name) == "rs_ids") {
+                int32_t v = rng() % n_cells;
+                ggml_backend_tensor_set(t, &v, 0, sizeof(v));
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * q = nullptr;
@@ -5518,7 +5534,26 @@ struct test_inkling_router : public test_case {
             ggml_set_name(xq, "xq");
         }
 
-        ggml_tensor * out = ggml_inkling_router(ctx, q, states.data(), ns, consts, gate_inp, route, xq, 1e-6f, 1.0f/sqrtf(n_embd), 1e-6f, n_used, 8.0f, 1e-20f);
+        ggml_tensor * out = nullptr;
+        ggml_tensor * state = nullptr;
+        if (with_conv) {
+            ggml_tensor * wo_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+            ggml_set_name(wo_out, "wo_out");
+            ggml_tensor * conv_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_conv, n_embd);
+            ggml_set_name(conv_w, "conv_w");
+            state = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (n_conv - 1)*(chan_offset + n_embd + 40), n_cells);
+            ggml_set_name(state, "state");
+            ggml_tensor * rs_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+            ggml_set_name(rs_ids, "rs_ids");
+            ggml_tensor * residual = n_states % 2 == 0 ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1) : nullptr;
+            if (residual) {
+                ggml_set_name(residual, "residual");
+            }
+            out = ggml_inkling_router_conv(ctx, q, states.data(), ns, consts, gate_inp, route, xq, wo_out, conv_w, state, rs_ids, residual,
+                    write_cell, chan_offset, 0.5f, 1e-6f, 1.0f/sqrtf(n_embd), 1e-6f, n_used, 8.0f, 1e-20f);
+        } else {
+            out = ggml_inkling_router(ctx, q, states.data(), ns, consts, gate_inp, route, xq, 1e-6f, 1.0f/sqrtf(n_embd), 1e-6f, n_used, 8.0f, 1e-20f);
+        }
         ggml_set_name(out, "out");
 
         // the ids and the weight bits are part of the checked output (the readers run after the op)
@@ -5529,6 +5564,10 @@ struct test_inkling_router : public test_case {
         ggml_set_name(wts, "wts");
         GGML_UNUSED(wts);
         ggml_set_name(all, "out_all");
+        if (with_conv) {
+            all = ggml_concat(ctx, all, ggml_reshape_2d(ctx, states[ns - 1], n_embd, 1), 0);
+            all = ggml_concat(ctx, all, ggml_reshape_2d(ctx, state, ggml_nelements(state), 1), 0);
+        }
         return all;
     }
 };
@@ -12699,6 +12738,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_inkling_proj(GGML_TYPE_Q8_0, 2304, 8600, 5, 1, true));
     test_cases.emplace_back(new test_inkling_proj(GGML_TYPE_Q8_0, 2304, 8664, 3, 3, true));
     test_cases.emplace_back(new test_inkling_router(2304, 4, 128, 8, true));
+    test_cases.emplace_back(new test_inkling_router(2304, 4, 128, 8, true, true));
+    test_cases.emplace_back(new test_inkling_router(2304, 5, 128, 8, true, true));
+    test_cases.emplace_back(new test_inkling_router(2304, 1, 128, 8, false, true));
     test_cases.emplace_back(new test_inkling_router(2304, 0, 128, 8, true));
     test_cases.emplace_back(new test_inkling_router(2304, 2, 128, 8, false));
     test_cases.emplace_back(new test_inkling_router(512, 5, 64, 4, true));

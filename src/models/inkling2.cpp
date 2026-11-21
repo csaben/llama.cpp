@@ -521,6 +521,24 @@ void llama_model_inkling2::graph::init_fused() {
     proj_op = fused && attn_op && proj_op_enabled;
 }
 
+// the attention-output convolution can be folded into the router op of this layer: single-token decode, the fused
+// router with the direct state access, no loop messages (their mixes consume the attention output first), <= 5 states
+bool llama_model_inkling2::graph::router_conv_ok(int il, int ip, bool has_messages) const {
+    const auto & layer = model.layers[il];
+    const ggml_tensor * ffn_consts = static_cast<const llama_model_inkling2 &>(model).ffn_consts[ip];
+    const int n_blocks = (int) (ip/hparams.attn_res_block_size) + 1; // the states of the FFN mix: the blocks (incl. this one) + cur
+    // opt-in: measured a wash on the RTX 3090 (the 16-block router kernel is limited by its per-SM data transfer)
+    static const bool enabled = [] {
+        const char * env = getenv("LLAMA_INKLING_ROUTER_CONV");
+        return env != nullptr && atoi(env) != 0;
+    }();
+    return enabled && router_op && moe_op == 3 && !has_messages && n_tokens == 1 && ubatch.n_seqs == 1 && rs_ids != nullptr && ffn_consts != nullptr &&
+        layer.ffn_gate_inp->type == GGML_TYPE_F32 && hparams.expert_weights_norm_eps > 0.0f && hparams.n_expert % 8 == 0 && hparams.n_expert <= 256 &&
+        n_embd % 4 == 0 && n_embd <= 2304 && n_blocks + 1 <= 5 && (2*hparams.n_embd_k_gqa(il)) % 4 == 0 && layer.ffn_post_conv != nullptr &&
+        hparams.n_shortconv_l_cache == 4 && layer.attn_post_conv != nullptr &&
+        layer.ffn_gate_up_exps != nullptr && hparams.n_expert_used(il) <= 8 && !cparams.moe_random_routing;
+}
+
 void llama_model_inkling2::graph::flush_pending() {
     if (pending.d == nullptr) {
         return;
@@ -963,7 +981,15 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
 
                     const int ip_block = ip % hparams.attn_res_block_size;
                     ggml_tensor * residual = ip_block == 0 ? nullptr : inpSA;
-                    cur = convolve(build_lora_mm(layer.wo, cur), layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa, residual);
+                    if (router_conv_ok(il, ip, messages != nullptr)) {
+                        // the wo conv + residual is computed by the router op (its last state is the attention output)
+                        wo_out_pending   = build_lora_mm(layer.wo, cur);
+                        wo_residual      = residual;
+                        cur = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd);
+                        cb(cur, "attn_out_leaf", il);
+                    } else {
+                        cur = convolve(build_lora_mm(layer.wo, cur), layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa, residual);
+                    }
                     cb(cur, "attn_out", il);
                     goto attn_done;
                 }
@@ -1106,10 +1132,20 @@ attn_done:
             for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
                 states.push_back(ggml_reshape_2d(ctx0, *it, n_embd, n_tokens));
             }
-            states.push_back(ggml_reshape_2d(ctx0, cur, n_embd, n_tokens));
+            // the leaf itself (not a view) when it is the attention-output leaf the router op writes
+            states.push_back(cur->ne[1] == n_tokens && ggml_is_contiguous(cur) ? cur : ggml_reshape_2d(ctx0, cur, n_embd, n_tokens));
         }
-        cur = ggml_inkling_router(ctx0, query, states.data(), (int) states.size(), ffn_consts, layer.ffn_gate_inp, route, x_q8,
-                1e-6f, 1.0f/sqrtf(n_embd), hparams.f_norm_rms_eps, n_expert_used, hparams.expert_weights_scale, hparams.expert_weights_norm_eps);
+        if (wo_out_pending) {
+            GGML_ASSERT(states.back() == ffn_inp);
+            cur = ggml_inkling_router_conv(ctx0, query, states.data(), (int) states.size(), ffn_consts, layer.ffn_gate_inp, route, x_q8,
+                    wo_out_pending, layer.attn_post_conv, state, rs_ids, wo_residual, recr->mctx->get_head(), 2*n_embd_k_gqa,
+                    1.0f/sqrtf(hparams.n_shortconv_l_cache + 1),
+                    1e-6f, 1.0f/sqrtf(n_embd), hparams.f_norm_rms_eps, n_expert_used, hparams.expert_weights_scale, hparams.expert_weights_norm_eps);
+            wo_out_pending = nullptr;
+        } else {
+            cur = ggml_inkling_router(ctx0, query, states.data(), (int) states.size(), ffn_consts, layer.ffn_gate_inp, route, x_q8,
+                    1e-6f, 1.0f/sqrtf(n_embd), hparams.f_norm_rms_eps, n_expert_used, hparams.expert_weights_scale, hparams.expert_weights_norm_eps);
+        }
         cb(cur, "ffn_norm", il);
         // the op writes route and x_q8 as side outputs: it must be in the graph even when its F32 result is not consumed
         ggml_build_forward_expand(gf, cur);

@@ -2582,6 +2582,33 @@ extern "C" {
             float                 w_scale,
             float                 w_eps);
 
+    // the same, preceded by the attention-output short convolution + residual that produces the last state:
+    //   states[n_states-1] = attn_out receives residual + (wo_out + conv([past, wo_out], conv_w))*conv_scale
+    //   (residual may be NULL), the recurrent state channels chan_offset.. are read from cell rs_ids[0] and written at write_cell
+    GGML_API struct ggml_tensor * ggml_inkling_router_conv(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * query,
+            struct ggml_tensor ** states,
+            int                   n_states,
+            struct ggml_tensor  * consts,
+            struct ggml_tensor  * gate_inp,
+            struct ggml_tensor  * route,
+            struct ggml_tensor  * xq,
+            struct ggml_tensor  * wo_out,
+            struct ggml_tensor  * conv_w,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rs_ids,
+            struct ggml_tensor  * residual,
+            int                   write_cell,
+            int                   chan_offset,
+            float                 conv_scale,
+            float                 eps,
+            float                 scale,
+            float                 norm_eps,
+            int                   n_used,
+            float                 w_scale,
+            float                 w_eps);
+
     // the attention input of inkling2 for one token fused with its projection matvec (a persistent kernel: the glue runs
     // on a few blocks while the others preload the weights): x[:, c] = rmsnorm(mix(query[:, c], states)) * norm_w[:, c]
     // quantized to Q8_1, dst[r, c(r)] = w[r] . x[:, c(r)] where c(r) = 0 (n_cols == 1) or the row group of r (rows < n_q:

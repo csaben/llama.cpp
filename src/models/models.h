@@ -2601,6 +2601,10 @@ struct llama_model_inkling2 : public llama_model_base {
         } pending;
         // emit the deferred epilogue as its own op (before any other consumer of its output)
         void flush_pending();
+        // the attention-output convolution folded into the router op of the same layer (LLAMA_INKLING_ROUTER_CONV=0 disables)
+        bool router_conv_ok(int il, int ip, bool has_messages) const;
+        ggml_tensor * wo_out_pending = nullptr; // the wo matvec output awaiting its convolution in the router op
+        ggml_tensor * wo_residual    = nullptr;
 
         // the mixed output of query j: [n_embd, n_tokens]
         ggml_tensor * mixed_view(ggml_tensor * mixed, int j);

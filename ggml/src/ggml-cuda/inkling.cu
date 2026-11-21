@@ -2598,6 +2598,12 @@ struct ik_router_args {
     int         * counter;
     int n_embd, n_expert, n_used;
     float eps, scale, norm_eps, w_scale, w_eps;
+    // the optional attention-output convolution producing the last state
+    const float   * wo_out;          // nullptr: no convolution
+    const float   * conv_w;          // [n_conv, n_embd]
+    float         * cv_state; int64_t cv_state_s1; const int32_t * cv_rs_ids; int cv_write_cell, cv_chan_offset, cv_n_conv; float cv_scale;
+    const float   * cv_residual;     // nullptr: none
+    float         * attn_out;        // the last state, written
     int dbg_skip; // timing experiments (IK_ROUTER_SKIP): 1 no arrival/selection, 2 no router rows, 4 no mix
     long long * dbg_times; // timing experiments (IK_ROUTER_TIMING): clock64 at the phase boundaries of block 0
 };
@@ -2872,7 +2878,7 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
 #define IK_R2_MAX_STATES 5
 #define IK_R2_MAX_EXPERT 256
 
-template <int NS>
+template <int NS, int NC> // NC: taps of the fused attention-output convolution (0: none)
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args) {
     constexpr int NG = NS*(NS + 1)/2;          // Gram matrix (upper triangle)
     constexpr int NP = NG + NS;                 // + the dots with the query
@@ -2899,6 +2905,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
     // ===== all loads in one round trip: the states / query / norm weight into registers (float4, lane-consecutive),
     //       then the router row of this warp's expert into shared memory with cp.async (needed last) =====
     float4 x[NS][C4], q[C4], nw[C4];
+    constexpr bool has_conv = NC > 0;
 #pragma unroll
     for (int j = 0; j < C4; ++j) {
         const int  k  = tid + j*IK_R2_BLOCK;
@@ -2906,7 +2913,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         const float4 z = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 #pragma unroll
         for (int i = 0; i < NS; ++i) {
-            x[i][j] = ok ? ((const float4 *) args.st.p[i])[k] : z;
+            x[i][j] = ok && (i < NS - 1 || !has_conv) ? ((const float4 *) args.st.p[i])[k] : z;
         }
         q[j]  = ok && args.query ? ((const float4 *) args.query)[k] : z;
         nw[j] = ok ? ((const float4 *) args.norm_w)[k] : z;
@@ -2917,6 +2924,47 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(s_rows + warp*(IK_R2_MAX_EMBD/4) + k), row + k);
         }
         cp_async_commit_group();
+    }
+    if constexpr (has_conv) {
+        // the attention-output convolution + residual: the last state (block b writes the channels of the Q8_1 blocks
+        // (k/8) % gridDim.x == b and their new recurrent state); 4 channels per float4 slot: 4 wo values, 4*NC taps,
+        // 4*(NC-1) past values (all 16-byte aligned: chan_offset % 4 == 0)
+        const float scale = args.cv_scale;
+        const int   cell  = args.cv_rs_ids[0];
+        static_assert(NC == 4, "the fused convolution is written for 4 taps");
+#pragma unroll
+        for (int j = 0; j < C4; ++j) {
+            const int  k  = tid + j*IK_R2_BLOCK;
+            const bool ok = k < n_embd4;
+            if (!ok) {
+                continue;
+            }
+            const float4 wo  = ((const float4 *) args.wo_out)[k];
+            const float4 res = args.cv_residual ? ((const float4 *) args.cv_residual)[k] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            const float4 * cw4   = (const float4 *) (args.conv_w + (int64_t) 4*k*NC);                                             // 4 float4: taps of channels 4k..4k+3
+            const float4 * past4 = (const float4 *) (args.cv_state + (int64_t) cell*args.cv_state_s1 + ((int64_t) args.cv_chan_offset + 4*k)*(NC - 1)); // 3 float4: 12 past values
+            float4       * st4   = (float4 *) (args.cv_state + (int64_t) args.cv_write_cell*args.cv_state_s1 + ((int64_t) args.cv_chan_offset + 4*k)*(NC - 1));
+            const float4 w0 = cw4[0], w1 = cw4[1], w2 = cw4[2], w3 = cw4[3];
+            const float4 p0 = past4[0], p1 = past4[1], p2 = past4[2];
+            // channel c: past (p[3c], p[3c+1], p[3c+2]), current wo[c]; taps w[c]
+            const float pa[12] = { p0.x, p0.y, p0.z, p0.w, p1.x, p1.y, p1.z, p1.w, p2.x, p2.y, p2.z, p2.w };
+            const float ww[16] = { w0.x, w0.y, w0.z, w0.w, w1.x, w1.y, w1.z, w1.w, w2.x, w2.y, w2.z, w2.w, w3.x, w3.y, w3.z, w3.w };
+            const float wo4[4] = { wo.x, wo.y, wo.z, wo.w }, res4[4] = { res.x, res.y, res.z, res.w };
+            float cur4[4], ns[12];
+#pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                const float out = pa[3*c]*ww[4*c] + pa[3*c + 1]*ww[4*c + 1] + pa[3*c + 2]*ww[4*c + 2] + wo4[c]*ww[4*c + 3];
+                cur4[c] = res4[c] + (wo4[c] + out)*scale;
+                ns[3*c] = pa[3*c + 1]; ns[3*c + 1] = pa[3*c + 2]; ns[3*c + 2] = wo4[c];
+            }
+            x[NS - 1][j] = make_float4(cur4[0], cur4[1], cur4[2], cur4[3]);
+            if ((k/8) % gridDim.x == blockIdx.x) {
+                ((float4 *) args.attn_out)[k] = x[NS - 1][j];
+                st4[0] = make_float4(ns[0], ns[1], ns[2], ns[3]);
+                st4[1] = make_float4(ns[4], ns[5], ns[6], ns[7]);
+                st4[2] = make_float4(ns[8], ns[9], ns[10], ns[11]);
+            }
+        }
     }
 
     // ===== the Gram matrix of the states and their dots with the query: block reduction =====
@@ -3109,15 +3157,25 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
     if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); }
 }
 
-template <int NS>
-static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
+template <int NS, int NC>
+static void inkling_router2_launch_nc(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
     const size_t smem = (size_t) (IK_R2_WARPS + 1)*(IK_R2_MAX_EMBD/4)*sizeof(float4);
     static bool attr_set[GGML_CUDA_MAX_DEVICES] = { false };
     if (!attr_set[ctx.device]) {
-        CUDA_CHECK(cudaFuncSetAttribute(inkling_router2_kernel<NS>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem));
+        CUDA_CHECK(cudaFuncSetAttribute(inkling_router2_kernel<NS, NC>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem));
         attr_set[ctx.device] = true;
     }
-    inkling_router2_kernel<NS><<<a.n_expert/IK_R2_WARPS, IK_R2_BLOCK, smem, ctx.stream()>>>(a);
+    inkling_router2_kernel<NS, NC><<<a.n_expert/IK_R2_WARPS, IK_R2_BLOCK, smem, ctx.stream()>>>(a);
+}
+
+template <int NS>
+static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
+    if (a.wo_out) {
+        GGML_ASSERT(a.cv_n_conv == 4);
+        inkling_router2_launch_nc<NS, 4>(ctx, a);
+    } else {
+        inkling_router2_launch_nc<NS, 0>(ctx, a);
+    }
 }
 
 void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -3135,6 +3193,29 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
         a.st.p[i]   = (const float *) dst->src[1 + i]->data;
         a.st.nb1[i] = 0;
         GGML_ASSERT(((uintptr_t) a.st.p[i]) % 16 == 0);
+    }
+    a.wo_out = nullptr; a.conv_w = nullptr; a.cv_state = nullptr; a.cv_rs_ids = nullptr; a.cv_residual = nullptr; a.attn_out = nullptr;
+    a.cv_state_s1 = 0; a.cv_write_cell = 0; a.cv_chan_offset = 0; a.cv_n_conv = 0; a.cv_scale = 0.0f;
+    const bool has_conv = ggml_get_op_params_i32(dst, 10) != 0;
+    if (has_conv) {
+        const ggml_tensor * wo_out   = dst->src[5 + n_states];
+        const ggml_tensor * conv_w   = dst->src[6 + n_states];
+        ggml_tensor       * state    = dst->src[7 + n_states];
+        const ggml_tensor * rs_ids   = dst->src[8 + n_states];
+        const ggml_tensor * residual = dst->src[9 + n_states];
+        a.wo_out         = (const float *) wo_out->data;
+        a.conv_w         = (const float *) conv_w->data;
+        a.cv_state       = (float *) state->data;
+        a.cv_state_s1    = state->nb[1]/sizeof(float);
+        a.cv_rs_ids      = (const int32_t *) rs_ids->data;
+        a.cv_write_cell  = ggml_get_op_params_i32(dst, 7);
+        a.cv_chan_offset = ggml_get_op_params_i32(dst, 8);
+        a.cv_n_conv      = conv_w->ne[0];
+        a.cv_scale       = ggml_get_op_params_f32(dst, 9);
+        a.cv_residual    = residual ? (const float *) residual->data : nullptr;
+        a.attn_out       = (float *) dst->src[n_states]->data;
+        GGML_ASSERT(a.cv_n_conv <= 8 && a.cv_chan_offset % 4 == 0 && ((uintptr_t) a.wo_out) % 16 == 0 && ((uintptr_t) a.attn_out) % 16 == 0 &&
+                (a.cv_residual == nullptr || ((uintptr_t) a.cv_residual) % 16 == 0));
     }
     a.norm_w   = (const float *) consts->data;
     a.gate_inp = (const float *) gate_inp->data;
@@ -3177,7 +3258,8 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     a.dbg_times = dbg_times;
 
     static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
-    if (!v1 && a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES) {
+    GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
+    if ((!v1 || has_conv) && a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES) {
         switch (n_states) {
             case 1:  inkling_router2_launch<1>(ctx, a); break;
             case 2:  inkling_router2_launch<2>(ctx, a); break;

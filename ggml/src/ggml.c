@@ -6287,7 +6287,37 @@ struct ggml_tensor * ggml_inkling_router(
         int                   n_used,
         float                 w_scale,
         float                 w_eps) {
-    GGML_ASSERT(n_states >= 1 && n_states <= GGML_MAX_SRC - 5);
+    return ggml_inkling_router_conv(ctx, query, states, n_states, consts, gate_inp, route, xq, NULL, NULL, NULL, NULL, NULL, 0, 0, 0.0f,
+            eps, scale, norm_eps, n_used, w_scale, w_eps);
+}
+
+// op_params: as above, [7] write_cell, [8] chan_offset, [9] conv_scale, [10] has_conv
+// src: as above, then wo_out, conv_w, state, rs_ids, residual (optional), attn_out (== states[n_states-1])
+struct ggml_tensor * ggml_inkling_router_conv(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * query,
+        struct ggml_tensor ** states,
+        int                   n_states,
+        struct ggml_tensor  * consts,
+        struct ggml_tensor  * gate_inp,
+        struct ggml_tensor  * route,
+        struct ggml_tensor  * xq,
+        struct ggml_tensor  * wo_out,
+        struct ggml_tensor  * conv_w,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * rs_ids,
+        struct ggml_tensor  * residual,
+        int                   write_cell,
+        int                   chan_offset,
+        float                 conv_scale,
+        float                 eps,
+        float                 scale,
+        float                 norm_eps,
+        int                   n_used,
+        float                 w_scale,
+        float                 w_eps) {
+    const bool has_conv = wo_out != NULL;
+    GGML_ASSERT(n_states >= 1 && n_states <= GGML_MAX_SRC - (has_conv ? 11 : 5));
     GGML_ASSERT(query != NULL || n_states == 1);
 
     const int64_t n_embd   = states[0]->ne[0];
@@ -6304,6 +6334,17 @@ struct ggml_tensor * ggml_inkling_router(
     GGML_ASSERT(route->type == GGML_TYPE_I32 && ggml_is_contiguous(route) && ggml_nelements(route) == 2*n_used);
     GGML_ASSERT(xq == NULL || (xq->type == GGML_TYPE_Q8_1 && ggml_is_contiguous(xq) && ggml_nelements(xq) == n_embd && n_embd % QK8_1 == 0));
     GGML_ASSERT(n_used >= 1 && n_used <= 8 && n_used <= n_expert);
+    if (has_conv) {
+        GGML_ASSERT(conv_w && state && rs_ids);
+        GGML_ASSERT(wo_out->type == GGML_TYPE_F32 && ggml_nelements(wo_out) == n_embd && wo_out->nb[0] == sizeof(float));
+        GGML_ASSERT(conv_w->type == GGML_TYPE_F32 && ggml_is_contiguous(conv_w) && conv_w->ne[1] == n_embd && conv_w->ne[0] >= 2 && conv_w->ne[0] <= 8);
+        GGML_ASSERT(state->type == GGML_TYPE_F32 && state->nb[0] == sizeof(float) && state->ne[0] >= (conv_w->ne[0] - 1)*(chan_offset + n_embd));
+        GGML_ASSERT(rs_ids->type == GGML_TYPE_I32 && rs_ids->ne[0] >= 1 && write_cell >= 0 && write_cell < state->ne[1]);
+        GGML_ASSERT(residual == NULL || (residual->type == GGML_TYPE_F32 && ggml_nelements(residual) == n_embd && residual->nb[0] == sizeof(float)));
+        GGML_ASSERT(ggml_is_contiguous(states[n_states - 1]));
+    } else {
+        GGML_ASSERT(!conv_w && !state && !rs_ids && !residual);
+    }
 
     struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
 
@@ -6314,6 +6355,10 @@ struct ggml_tensor * ggml_inkling_router(
     ggml_set_op_params_f32(result, 4, w_scale);
     ggml_set_op_params_f32(result, 5, w_eps);
     ggml_set_op_params_i32(result, 6, n_states);
+    ggml_set_op_params_i32(result, 7, write_cell);
+    ggml_set_op_params_i32(result, 8, chan_offset);
+    ggml_set_op_params_f32(result, 9, conv_scale);
+    ggml_set_op_params_i32(result, 10, has_conv ? 1 : 0);
 
     result->op     = GGML_OP_INKLING_ROUTER;
     result->src[0] = query;
@@ -6324,6 +6369,14 @@ struct ggml_tensor * ggml_inkling_router(
     result->src[2 + n_states] = gate_inp;
     result->src[3 + n_states] = route;
     result->src[4 + n_states] = xq;
+    if (has_conv) {
+        result->src[5 + n_states]  = wo_out;
+        result->src[6 + n_states]  = conv_w;
+        result->src[7 + n_states]  = state;
+        result->src[8 + n_states]  = rs_ids;
+        result->src[9 + n_states]  = residual;
+        result->src[10 + n_states] = states[n_states - 1]; // the written leaf as a source: the scheduler assigns it a backend
+    }
 
     return result;
 }

@@ -13516,6 +13516,40 @@ void ggml_compute_forward_inkling_router(const ggml_compute_params * params, ggm
     // the mixed, normalized input (thread 0), then the router rows across the threads
     float * y = (float *) dst->data;
     if (ith == 0) {
+        if (ggml_get_op_params_i32(dst, 10)) {
+            // the attention-output convolution + residual into the last state (the math of shortconv_res / moe_sum_conv)
+            const ggml_tensor * wo_out   = dst->src[5 + n_states];
+            const ggml_tensor * conv_w   = dst->src[6 + n_states];
+            ggml_tensor       * state    = dst->src[7 + n_states];
+            const ggml_tensor * rs_ids   = dst->src[8 + n_states];
+            const ggml_tensor * residual = dst->src[9 + n_states];
+            float             * attn_out = (float *) dst->src[n_states]->data;
+            const int   write_cell  = ggml_get_op_params_i32(dst, 7);
+            const int   chan_offset = ggml_get_op_params_i32(dst, 8);
+            const float conv_scale  = ggml_get_op_params_f32(dst, 9);
+            const int64_t n_conv = conv_w->ne[0];
+            const int32_t read_cell = ((const int32_t *) rs_ids->data)[0];
+            GGML_ASSERT(read_cell >= 0 && read_cell < state->ne[1]);
+            for (int64_t c = 0; c < n_embd; ++c) {
+                const int64_t ch = chan_offset + c;
+                const float * past = (const float *) ((const char *) state->data + read_cell*state->nb[1]) + ch*(n_conv - 1);
+                const float * cw   = (const float *) conv_w->data + c*n_conv;
+                float xs[8];
+                for (int64_t j = 0; j < n_conv - 1; ++j) {
+                    xs[j] = past[j];
+                }
+                xs[n_conv - 1] = ((const float *) wo_out->data)[c];
+                float out = 0.0f;
+                for (int64_t j = 0; j < n_conv; ++j) {
+                    out += xs[j]*cw[j];
+                }
+                float * st = (float *) ((char *) state->data + (int64_t) write_cell*state->nb[1]) + ch*(n_conv - 1);
+                for (int64_t j = 0; j < n_conv - 1; ++j) {
+                    st[j] = xs[j + 1];
+                }
+                attn_out[c] = (residual ? ((const float *) residual->data)[c] : 0.0f) + (xs[n_conv - 1] + out)*conv_scale;
+            }
+        }
         float rms[GGML_MAX_SRC], sc[GGML_MAX_SRC];
         if (query) {
             const float * q = (const float *) query->data;
