@@ -1,0 +1,12 @@
+server: /home/arelius/llama.cpp-fast/build/bin/llama-server -m /home/arelius/models/inkling-2-mini/Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 65536 -np 1 --port 8041 --host 127.0.0.1 --backend-sampling
+GPU memory after load: 13889 MiB
+  T=0.0  700 tok  gen  202.4 tok/s  prompt  389.8
+  T=0.0  700 tok  gen  202.1 tok/s  prompt  349.4
+  T=0.0  700 tok  gen  201.3 tok/s  prompt  355.1
+  T=0.7  700 tok  gen  201.0 tok/s  prompt  256.3
+  T=0.7  700 tok  gen  200.6 tok/s  prompt  356.2
+  T=0.7  700 tok  gen  200.6 tok/s  prompt  358.1
+  mean gen @T=0.0: 201.9 tok/s
+  mean gen @T=0.7: 200.7 tok/s
+  prompt  16053 tok  TTFT   8.46 s  prefill  1910.3 tok/s  reply  500 tok  decode  147.9 tok/s
+  prompt  32054 tok  TTFT  17.87 s  prefill  1799.3 tok/s  reply  500 tok  decode  131.1 tok/s

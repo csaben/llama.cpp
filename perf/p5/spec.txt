@@ -1,0 +1,24 @@
+plain          code      prompt     47   384 tok   208.8 tok/s
+plain          edit      prompt   1025   384 tok   197.3 tok/s
+plain          prose     prompt     36   384 tok   207.4 tok/s
+plain          edit@16K  prompt  16044   384 tok   179.2 tok/s
+dspark-max3    code      prompt     47   384 tok   128.2 tok/s  accepted/proposed 223/474
+dspark-max3    edit      prompt   1025   384 tok   191.2 tok/s  accepted/proposed 282/303
+dspark-max3    prose     prompt     36   384 tok   107.5 tok/s  accepted/proposed 190/575
+dspark-max3    edit@16K  prompt  16044   384 tok   136.6 tok/s  accepted/proposed 265/352
+dspark-max1    code      prompt     47   384 tok   120.6 tok/s  accepted/proposed 174/208
+dspark-max1    edit      prompt   1025   384 tok   123.9 tok/s  accepted/proposed 186/196
+dspark-max1    prose     prompt     36   384 tok   110.7 tok/s  accepted/proposed 144/239
+dspark-max1    edit@16K  prompt  16044   384 tok    97.8 tok/s  accepted/proposed 182/201
+max8-pmin0.9   code      prompt     47   384 tok   208.9 tok/s
+max8-pmin0.9   edit      prompt   1025   384 tok   197.3 tok/s
+max8-pmin0.9   prose     prompt     36   384 tok   207.3 tok/s
+max8-pmin0.9   edit@16K  prompt  16044   384 tok   178.6 tok/s
+max4-pmin0.7   code      prompt     47   384 tok   207.0 tok/s
+max4-pmin0.7   edit      prompt   1025   384 tok   196.2 tok/s
+max4-pmin0.7   prose     prompt     36   384 tok   205.9 tok/s
+max4-pmin0.7   edit@16K  prompt  16044   384 tok   178.5 tok/s
+max8-pmin0.6   code      prompt     47   384 tok   207.2 tok/s
+max8-pmin0.6   edit      prompt   1025   384 tok   196.1 tok/s
+max8-pmin0.6   prose     prompt     36   384 tok   206.1 tok/s
+max8-pmin0.6   edit@16K  prompt  16044   384 tok   178.5 tok/s
