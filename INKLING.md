@@ -1,9 +1,9 @@
 # Inkling 2 Mini on an RTX 3090
 
 This branch (`inkling-3090`) is llama.cpp plus custom fused CUDA operators for Inkling 2 Mini's looped
-mixture-of-experts architecture (`inkling2_loop`). On one RTX 3090 it decodes at **140.7 tok/s** with the
-published ggml-org IQ4_NL weights and **149.3 tok/s** with a quality-gated Q6_K variant, against 62 tok/s
-for stock llama.cpp. Perplexity is unchanged within noise at every step.
+mixture-of-experts architecture (`inkling2_loop`). On one RTX 3090 the phase-3 Q6_K-dense variant
+decodes at **155.4 tok/s** at depth zero and **147.0 tok/s** after a 1,024-token prefix
+(tg128, Q8_0 KV, F16 controllers). The original stock tg128 benchmark was 62 tok/s.
 
 Write-up: *Looping on a 3090* (link in the repo description).
 Lab notebook with every step, number and profile: [`perf/RESULTS.md`](perf/RESULTS.md).
@@ -20,6 +20,7 @@ Lab notebook with every step, number and profile: [`perf/RESULTS.md`](perf/RESUL
 | phase 1: fused ops, load-time weight concat | 124.1 | 2.9412 | `checkpoint-124tok` |
 | phase 2: single-launch attention + router, Q8_1 activations | 140.7 | 2.9412 | `checkpoint-140tok` |
 | + Q6_K dense projections/head, F16 loop controllers | 149.3 | 2.9407 | `variant-q6k-dense` |
+| phase 3 variant, Q8_0 KV, consistent prefill/decode basis | 155.4 | 2.9404 | `da0965f` |
 
 The unfused reference (`LLAMA_INKLING_FUSED=0 LLAMA_INKLING_FUSED_QKV=0`) gives PPL 2.9401. The standard
 error is 0.064.
@@ -71,6 +72,21 @@ Switches (all on by default): `LLAMA_INKLING_FUSED`, `LLAMA_INKLING_FUSED_QKV`, 
 `LLAMA_INKLING_ATTN_OP`, `LLAMA_INKLING_ROUTER_OP`, `LLAMA_INKLING_MOE_OP=0..3`. Opt-in: `LLAMA_INKLING_CTRL_F16=1`.
 
 ## Gates for any change
+
+For Q8 KV, check a batched prefill followed by single-token decode. The fused
+attention kernel uses unrotated keys and values. Versions before `156a872`
+could pass both perplexity checks below yet generate unrelated text after a
+batched prompt: prefill rotated the cache and fused decode interpreted it in
+the original basis. Use fresh servers for this comparison:
+
+```bash
+export GPU=1 LLAMA_INKLING_CTRL_F16=1
+export MODEL="$HOME/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL-dense-q6k.gguf"
+probe=$(mktemp -d)
+LLAMA_ATTN_ROT_DISABLE=1 LLAMA_INKLING_ATTN_OP=0 python3 perf/server_run.py "$probe/reference" --kv-probe --no-bench
+python3 perf/server_run.py "$probe/fused" --kv-probe --no-bench
+cmp "$probe/reference/gen1.txt" "$probe/fused/gen1.txt"
+```
 
 1. `build/bin/test-backend-ops -o <OP>` for every op you touch (add cases for new ops, with a CPU reference).
 2. PPL within ~0.5% of the unfused 2.9401. Also check the decode-path PPL (`-ub 1 -c 1024 --chunks 2`),

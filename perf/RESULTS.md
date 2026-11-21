@@ -203,3 +203,47 @@ LLAMA_INKLING_ATTN_OP=0, LLAMA_INKLING_MOE_OP=0|1|2|3 (3 = default), LLAMA_INKLI
 - The custom MoE matvec kernels (INKLING_MOE_UP/DOWN) are correct but slower than ggml's mmvq; they are opt-in (LLAMA_INKLING_MOE_OP=2).
 - The Q6_K variant's attention projection matvec runs at ~660 GB/s (the Q6_K dot product is compute-heavier); a tuned
   Q6_K mmvq configuration for Ampere would add a few percent.
+
+## Phase 3 handoff and mixed-prefill validation (2026-11-21)
+
+`66678ff` joins the five local kernel commits through `99c35a6` with the fork's
+reproduction guide. The projection megakernel and router+convolution remain
+opt-in. Fable measured the router v2 at ~8 µs (from 11.8) and attention v2 at
+10.7 µs (from 12.5); the four-row Q6_K matvec brought the variant to ~154 tok/s.
+
+At `156a872`, an 827-token batched prefill exposed a cache-basis mismatch.
+Ordinary attention used Hadamard-rotated Q8 KV; the fused decode operator used
+raw Q8 KV. The first generated token came from prefill and matched, but the
+second token could be unrelated to the prompt. Disabling fused attention,
+using F16 KV, using single-token prefill, or disabling KV rotation eliminated
+the observed failure. Mixed prefill/decode with Q8 KV now uses one basis
+throughout. See the serving regression probe in `INKLING.md`.
+
+On GPU 1 (RTX 3090), Q6_K dense, F16 controllers, Q8_0 K/V, compare
+`IK_ATTN_CELLS_PER_SPLIT=64` against the new default. Command:
+`llama-bench -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 0 -n 128 -d 0,512,1024 -r 3`
+with the same variant model. Both columns use the corrected cache basis.
+
+| Prefix depth | Fixed 64 (tok/s) | Adaptive (tok/s) |
+|---:|---:|---:|
+| 0 | 154.72 ± 0.29 | 153.91 ± 0.34 |
+| 512 | 145.06 ± 0.14 | 148.87 ± 0.28 |
+| 1024 | 140.61 ± 0.17 | 145.86 ± 0.22 |
+
+The adaptive rule uses 128 cells per split only on GA10x with Q8_0 KV and a
+KV extent of 513–2304. Q8 served throughput (`perf/server_run.py`, localhost,
+16K context, one slot) at T=0 / 0.7 was 147.7 / 147.2 fixed and 148.7 / 148.6
+adaptive. These are decode rates. The short-context benchmark and the longer
+served generations exercise different context lengths.
+
+`da0965f` also sums the selected router weights in rank order. The three
+200-token top-1 completions then matched byte-for-byte across fixed/adaptive
+splits and a fresh server restart. The 827-token mixed-prefill probe matched
+standard unrotated attention for all 12 generated tokens. CUDA vs CPU:
+21/21 attention and router cases passed, including the opt-in convolution
+reading and writing the same recurrent cell. Quality on `perf/ppl.txt`:
+2.9404 ± 0.0640 (8 × 2048 prefill) and 4.0640 ± 0.2878 (2 × 1024, ubatch 1).
+Final tg128 at depths 0 / 512 / 1024: **155.40 / 150.08 / 146.95 tok/s**.
+Final served means: **149.5 tok/s at T=0, 149.1 at T=0.7** (three 700-token
+generations per temperature). Reaching 200 tok/s at depth zero still requires
+cutting about 1.44 ms from the 6.44 ms decode step.
