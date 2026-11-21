@@ -1902,10 +1902,64 @@ template <> struct ik_a2_raw<block_q8_0> {
     }
 };
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Tensor-core scan of the cells (IK_ATTN_MMA, phase 5). The structure (K as the A operand of mma.sync m16n8k16 straight
+// from the cache, P V with two dims of four keys per lane, one online softmax per lane group, the mma16816 wrapper and
+// the "integer as an FP16 bit pattern" conversion) is adapted from Project Maya's maya-ik2 engine
+// (attn_decode_mma_kernel in src/ik2/ik2_kernels.cu, https://github.com/alesha-pro/maya-inkling-mini):
+//   MIT License. Copyright (c) 2026 Peasant Smith and the Project Maya contributors,
+//   Copyright (c) 2026 Niko1221 and the Strata contributors. See NOTICE.inkling.
+// What differs here: the cache stays ggml Q8_0 (no new KV format). The int8 quants become FP16 exactly in registers,
+// the per-block scales are applied in FP32 (K: on the block's partial dot; V: folded into P), and Q and P go in as two
+// FP16 limbs (hi + lo) in the spare columns of the 8-column operand, so the result equals the FP32 kernel up to the
+// order of the sums.
+
+static __device__ __forceinline__ void ik_mma16816(float * c, const uint32_t * a, const uint32_t b0, const uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+// two halves with the bits 0x6400 | n (n < 256) are 1024 + n; minus 1152 they are the int8 values n - 128, exactly
+static __device__ __forceinline__ uint32_t ik_u8x2_to_h2(const uint32_t biased) {
+    uint32_t r;
+    asm("sub.rn.f16x2 %0, %1, %2;\n" : "=r"(r) : "r"(biased), "r"(0x64806480u));
+    return r;
+}
+static __device__ __forceinline__ uint32_t ik_pack_h2(const float a, const float b) {
+    const __half2 h = __floats2half2_rn(a, b);
+    return *(const uint32_t *) &h;
+}
+// the limb of v that an FP16 column carries: the value (rounded to FP16 by the pack), or what the rounding left
+static __device__ __forceinline__ float ik_limb(const float v, const bool lo) {
+    return lo ? v - __half2float(__float2half_rn(v)) : v;
+}
+// A (cell, kv head) row of a Q8_0 cache: 4 blocks {half d; int8 qs[32]} = 34 aligned words. The blocks 1 and 3 have
+// aligned quants. The blocks 0 and 2 are read as the 32-byte stream qs[2..31], qs[0..1]: seven aligned words and an
+// eighth made of the low half of the tail word (qs[30..31] | d of the next block) and the high half of the head word
+// (d | qs[0..1]). Stream position p of block b is the dim 32 b + (b odd ? p : (p + 2) % 32).
+struct ik_q8row {
+    const uint32_t * w;
+    __device__ __forceinline__ uint32_t head(const int P) const { return w[17*P]; }
+    __device__ __forceinline__ uint32_t tail(const int P) const { return w[17*P + 8]; }
+    __device__ __forceinline__ uint32_t quad(const int b, const int c, const uint32_t h) const {
+        if (b & 1) {
+            return w[17*(b >> 1) + 9 + c];
+        }
+        const uint32_t x = w[17*(b >> 1) + 1 + c]; // c == 7: the tail word
+        return c == 7 ? (x & 0xffffu) | (h & 0xffff0000u) : x;
+    }
+    static __device__ __forceinline__ float scale(const int b, const uint32_t h, const uint32_t t) {
+        return __half2float(__ushort_as_half((unsigned short) ((b & 1) ? t >> 16 : h & 0xffffu)));
+    }
+    static __device__ __forceinline__ int dim(const int b, const int p) {
+        return 32*b + ((b & 1) ? p : ((p + 2) & 31));
+    }
+};
+
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
 #endif
-template <typename cache_t, bool q8_out, int G>
+template <typename cache_t, bool q8_out, int G, bool MMA = false>
 static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -1986,7 +2040,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     };
     float mv_l = -INFINITY;
     int   d_l  = 0;
-    if (has_cells) {
+    if (!MMA && has_cells) {
         load_tile(w0, mv_l, d_l);
     }
     // the first step's raw K/V and table rows
@@ -2006,7 +2060,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         }
     };
     IK_DBG_T(3); // round-1 loads issued
-    if (has_cells) {
+    if (!MMA && has_cells) {
         load_step(w0, 0);
     }
     IK_DBG_T(1); // the first tile's distances landed (the table rows need them)
@@ -2052,17 +2106,22 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     // ===== the attention over the cells of this warp (online softmax per head, a lane holds 4 dims), the current
     //       token's cell skipped (added last from the convolved K/V) =====
     float qreg[G][4], rreg[G], acc[G][4], m[G], l[G], sinks[G];
+    auto init_lane_state = [&]() {
 #pragma unroll
-    for (int hh = 0; hh < G; ++hh) {
-        m[hh] = -INFINITY;
-        l[hh] = 0.0f;
-        rreg[hh]  = (lane % 16) < args.n_rel ? s_r[hh][lane % 16] : 0.0f;
-        sinks[hh] = s_sink[hh];
+        for (int hh = 0; hh < G; ++hh) {
+            m[hh] = -INFINITY;
+            l[hh] = 0.0f;
+            rreg[hh]  = (lane % 16) < args.n_rel ? s_r[hh][lane % 16] : 0.0f;
+            sinks[hh] = s_sink[hh];
 #pragma unroll
-        for (int e = 0; e < 4; ++e) {
-            qreg[hh][e] = s_q[hh][4*lane + e];
-            acc[hh][e]  = 0.0f;
+            for (int e = 0; e < 4; ++e) {
+                qreg[hh][e] = s_q[hh][4*lane + e];
+                acc[hh][e]  = 0.0f;
+            }
         }
+    };
+    if constexpr (!MMA) {
+        init_lane_state();
     }
     // one step of U cells with the raw words in registers; the scores and the softmax update
     auto step = [&](const int tile, const int u0, const int n_tile, const bool skip_cur) {
@@ -2131,7 +2190,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
             m[hh] = m_new;
         }
     };
-    if (has_cells && !(args.dbg_skip & 2)) {
+    if (!MMA && has_cells && !(args.dbg_skip & 2)) {
         int n_tile = min(WARP_SIZE, w1 - w0);
         int tile = w0, u0 = 0;
         while (true) {
@@ -2156,6 +2215,191 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
                 load_tile(tile, mv_l, d_l);
             }
             load_step(tile, u0);
+        }
+    }
+    if constexpr (MMA) {
+        // ===== the tensor-core scan: steps of 16 cells; a lane (gr = lane/4, tq = lane%4) holds the logits of the
+        //       cells gr and gr + 8 for the head tq, and 16 dims of that head's output =====
+        constexpr float PS = 4096.0f; // P is scaled up before it becomes FP16 (the V scales are small)
+        const int  gr = lane >> 2, tq = lane & 3;
+        const int  hq = min(gr >> 1, G - 1), ht = min(tq, G - 1);
+        const bool col_ok = (gr >> 1) < G, head_ok = tq < G; // operand column gr: head gr/2, limb gr%2
+        const bool lo_limb = gr & 1;
+        float o[4][2][4];
+        float mm = -INFINITY, ll = 0.0f;
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+#pragma unroll
+            for (int hf = 0; hf < 2; ++hf) {
+                o[b][hf][0] = o[b][hf][1] = o[b][hf][2] = o[b][hf][3] = 0.0f;
+            }
+        }
+        if (has_cells && !(args.dbg_skip & 2)) {
+            uint32_t qf[4][2][2];
+#pragma unroll
+            for (int b = 0; b < 4; ++b) {
+#pragma unroll
+                for (int hf = 0; hf < 2; ++hf) {
+#pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        const int p = 16*hf + 4*tq + 2*j;
+                        const float x0 = s_q[hq][ik_q8row::dim(b, p)], x1 = s_q[hq][ik_q8row::dim(b, p + 1)];
+                        qf[b][hf][j] = col_ok ? ik_pack_h2(ik_limb(x0, lo_limb), ik_limb(x1, lo_limb)) : 0u;
+                    }
+                }
+            }
+            const float   sink  = s_sink[ht];
+            const char *  kb    = args.k_cache + g*args.kc_nb1;
+            const char *  vb    = args.v_cache + g*args.vc_nb1;
+            const int     n_rel = args.n_rel;
+            const int     last  = args.n_kv - 1;
+            for (int kt = w0; kt < w1; kt += 16) {
+                // ---- every load of the step ----
+                uint32_t kh[2][2], kl[2][2], kq[2][4][2];
+                float    mk[2];
+                int      dk[2];
+#pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    const int cell = kt + gr + 8*i;
+                    const int cc   = min(cell, last);
+                    const ik_q8row r = { (const uint32_t *) (kb + (int64_t) cc*args.kc_nb2) };
+#pragma unroll
+                    for (int P = 0; P < 2; ++P) {
+                        kh[i][P] = r.head(P);
+                        kl[i][P] = r.tail(P);
+                    }
+#pragma unroll
+                    for (int b = 0; b < 4; ++b) {
+#pragma unroll
+                        for (int hf = 0; hf < 2; ++hf) {
+                            kq[i][b][hf] = r.quad(b, 4*hf + tq, kh[i][b >> 1]);
+                        }
+                    }
+                    const float mv = args.mask_f16 ? __half2float(((const half *) args.mask)[cc]) : ((const float *) args.mask)[cc];
+                    mk[i] = head_ok && cell < w1 && cell != kv_idx ? mv : -INFINITY;
+                    dk[i] = args.rel_pos[cc];
+                }
+                uint32_t vh[4][2], vl[4][2], vq[4][4];
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const int cc = min(kt + 2*tq + (i & 1) + 8*(i >> 1), last);
+                    const ik_q8row r = { (const uint32_t *) (vb + (int64_t) cc*args.vc_nb2) };
+#pragma unroll
+                    for (int P = 0; P < 2; ++P) {
+                        vh[i][P] = r.head(P);
+                        vl[i][P] = r.tail(P);
+                    }
+#pragma unroll
+                    for (int b = 0; b < 4; ++b) {
+                        vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
+                    }
+                }
+                // ---- Q K^T: C[16 cells][8 columns] += A[16 cells][16 dims] B[16 dims][8 columns], block by block ----
+                float s[2] = { 0.0f, 0.0f };
+#pragma unroll
+                for (int b = 0; b < 4; ++b) {
+                    float cb[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+                    for (int hf = 0; hf < 2; ++hf) {
+                        const uint32_t x0 = kq[0][b][hf] ^ 0x80808080u, x1 = kq[1][b][hf] ^ 0x80808080u;
+                        const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(x0, 0x64u, 0x4140u)), ik_u8x2_to_h2(__byte_perm(x1, 0x64u, 0x4140u)),
+                                                ik_u8x2_to_h2(__byte_perm(x0, 0x64u, 0x4342u)), ik_u8x2_to_h2(__byte_perm(x1, 0x64u, 0x4342u)) };
+                        ik_mma16816(cb, a, qf[b][hf][0], qf[b][hf][1]);
+                    }
+                    s[0] += ik_q8row::scale(b, kh[0][b >> 1], kl[0][b >> 1])*(cb[0] + cb[1]);
+                    s[1] += ik_q8row::scale(b, kh[1][b >> 1], kl[1][b >> 1])*(cb[2] + cb[3]);
+                }
+                // ---- the logits: scale, relative bias (within the extent), sink, mask ----
+                const bool e0 = dk[0] >= 0 && dk[0] < args.n_extent, e1 = dk[1] >= 0 && dk[1] < args.n_extent;
+                float bias[2] = { 0.0f, 0.0f };
+                if (__ballot_sync(0xffffffffu, e0 || e1)) {
+                    const float * t0 = table + (int64_t) (e0 ? dk[0] : 0)*n_rel;
+                    const float * t1 = table + (int64_t) (e1 ? dk[1] : 0)*n_rel;
+#pragma unroll
+                    for (int j = 0; j < 16; ++j) {
+                        if (j < n_rel) {
+                            const float rj = s_r[ht][j];
+                            bias[0] += t0[j]*rj;
+                            bias[1] += t1[j]*rj;
+                        }
+                    }
+                    bias[0] = e0 ? bias[0] : 0.0f;
+                    bias[1] = e1 ? bias[1] : 0.0f;
+                }
+#pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    s[i] = mk[i] == -INFINITY ? -INFINITY : args.kq_scale*s[i] + bias[i] - sink + mk[i];
+                }
+                float mx = fmaxf(s[0], s[1]); // over the lanes of the same head
+#pragma unroll
+                for (int sh = 4; sh < 32; sh <<= 1) {
+                    mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, sh));
+                }
+                if (__ballot_sync(0xffffffffu, mx > mm)) { // a new maximum: rescale (rare after the first steps)
+                    const float mn = fmaxf(mm, mx);
+                    const float c  = mm == -INFINITY ? 0.0f : expf(mm - mn);
+                    mm  = mn;
+                    ll *= c;
+#pragma unroll
+                    for (int b = 0; b < 4; ++b) {
+#pragma unroll
+                        for (int hf = 0; hf < 2; ++hf) {
+                            o[b][hf][0] *= c; o[b][hf][1] *= c; o[b][hf][2] *= c; o[b][hf][3] *= c;
+                        }
+                    }
+                }
+                const float u  = mm == -INFINITY ? 0.0f : mm;
+                const float p0 = expf(s[0] - u), p1 = expf(s[1] - u);
+                ll += p0 + p1;
+                // ---- P to the lanes of its operand: head gr/2 of the cells 2 tq, 2 tq + 1, 2 tq + 8, 2 tq + 9 ----
+                const int src = 8*tq + hq;
+                float pv[4] = { __shfl_sync(0xffffffffu, p0, src), __shfl_sync(0xffffffffu, p0, src + 4),
+                                __shfl_sync(0xffffffffu, p1, src), __shfl_sync(0xffffffffu, p1, src + 4) };
+                // ---- P V: C[16 dims][8 columns] += A[16 dims][16 cells] B[16 cells][8 columns]; an mma takes 16 dims
+                //      of one block (two per lane group), so the block's scales ride on P ----
+#pragma unroll
+                for (int b = 0; b < 4; ++b) {
+                    float w[4];
+                    uint32_t el[4], eh[4];
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        w[i] = col_ok ? ik_limb(pv[i]*ik_q8row::scale(b, vh[i][b >> 1], vl[i][b >> 1])*PS, lo_limb) : 0.0f;
+                        const uint32_t x = vq[i][b] ^ 0x80808080u;
+                        el[i] = __byte_perm(x, 0x64u, 0x4140u);
+                        eh[i] = __byte_perm(x, 0x64u, 0x4342u);
+                    }
+                    const uint32_t B0 = ik_pack_h2(w[0], w[1]), B1 = ik_pack_h2(w[2], w[3]);
+                    {
+                        const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(el[0], el[1], 0x5410u)), ik_u8x2_to_h2(__byte_perm(el[0], el[1], 0x7632u)),
+                                                ik_u8x2_to_h2(__byte_perm(el[2], el[3], 0x5410u)), ik_u8x2_to_h2(__byte_perm(el[2], el[3], 0x7632u)) };
+                        ik_mma16816(o[b][0], a, B0, B1);
+                    }
+                    {
+                        const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(eh[0], eh[1], 0x5410u)), ik_u8x2_to_h2(__byte_perm(eh[0], eh[1], 0x7632u)),
+                                                ik_u8x2_to_h2(__byte_perm(eh[2], eh[3], 0x5410u)), ik_u8x2_to_h2(__byte_perm(eh[2], eh[3], 0x7632u)) };
+                        ik_mma16816(o[b][1], a, B0, B1);
+                    }
+                }
+            }
+        }
+        // the warp's partial result
+#pragma unroll
+        for (int sh = 4; sh < 32; sh <<= 1) {
+            ll += __shfl_xor_sync(0xffffffffu, ll, sh);
+        }
+        if (head_ok) {
+#pragma unroll
+            for (int b = 0; b < 4; ++b) {
+#pragma unroll
+                for (int hf = 0; hf < 2; ++hf) {
+                    s_acc[ht][warp][ik_q8row::dim(b, 4*gr + 2*hf)]     = (o[b][hf][0] + o[b][hf][1])*(1.0f/PS);
+                    s_acc[ht][warp][ik_q8row::dim(b, 4*gr + 2*hf + 1)] = (o[b][hf][2] + o[b][hf][3])*(1.0f/PS);
+                }
+            }
+            if (gr == 0) {
+                s_m[ht][warp] = mm;
+                s_l[ht][warp] = ll;
+            }
         }
     }
     IK_DBG_T(4);
@@ -2226,6 +2470,9 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     __syncthreads();
 
     // ===== the current token's cell, by the warp whose range holds it =====
+    if constexpr (MMA) {
+        init_lane_state();
+    }
     if (kv_idx >= w0 && kv_idx < w1 && !(args.dbg_skip & 2)) {
         float kv4[4];
 #pragma unroll
@@ -2270,15 +2517,36 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     }
 
     // ===== combine the warps =====
+    if constexpr (MMA) {
+        // the scan left the warp's partial in shared memory; the warp with the current cell merges it in
 #pragma unroll
-    for (int hh = 0; hh < G; ++hh) {
-        if (lane == 0) {
-            s_m[hh][warp] = m[hh];
-            s_l[hh][warp] = l[hh];
+        for (int hh = 0; hh < G; ++hh) {
+            if (m[hh] != -INFINITY) {
+                const float mo = s_m[hh][warp], lo = s_l[hh][warp];
+                const float mn = fmaxf(mo, m[hh]);
+                const float co = mo == -INFINITY ? 0.0f : expf(mo - mn);
+                const float cn = expf(m[hh] - mn);
+#pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    s_acc[hh][warp][4*lane + e] = (mo == -INFINITY ? 0.0f : s_acc[hh][warp][4*lane + e]*co) + acc[hh][e]*cn;
+                }
+                if (lane == 0) {
+                    s_m[hh][warp] = mn;
+                    s_l[hh][warp] = lo*co + l[hh]*cn;
+                }
+            }
         }
+    } else {
 #pragma unroll
-        for (int e = 0; e < 4; ++e) {
-            s_acc[hh][warp][4*lane + e] = acc[hh][e];
+        for (int hh = 0; hh < G; ++hh) {
+            if (lane == 0) {
+                s_m[hh][warp] = m[hh];
+                s_l[hh][warp] = l[hh];
+            }
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                s_acc[hh][warp][4*lane + e] = acc[hh][e];
+            }
         }
     }
     __syncthreads();
@@ -2399,13 +2667,13 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     IK_DBG_T(7);
 }
 
-template <typename cache_t, bool q8_out>
+template <typename cache_t, bool q8_out, bool MMA = false>
 static void inkling_attn2_launch(const ik_attn_args & a, const dim3 grid, cudaStream_t stream) {
     switch (a.n_head/a.n_head_kv) {
-        case 1: inkling_attn2_kernel<cache_t, q8_out, 1><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
-        case 2: inkling_attn2_kernel<cache_t, q8_out, 2><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
-        case 3: inkling_attn2_kernel<cache_t, q8_out, 3><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
-        default: inkling_attn2_kernel<cache_t, q8_out, 4><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        case 1: inkling_attn2_kernel<cache_t, q8_out, 1, MMA><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        case 2: inkling_attn2_kernel<cache_t, q8_out, 2, MMA><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        case 3: inkling_attn2_kernel<cache_t, q8_out, 3, MMA><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        default: inkling_attn2_kernel<cache_t, q8_out, 4, MMA><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
     }
 }
 
@@ -2494,6 +2762,17 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     }();
     a.dbg_times    = dbg_times;
     a.n_split      = a.n_kv <= cells_per_split ? 1 : std::min(64, (a.n_kv + cells_per_split - 1)/cells_per_split);
+    // The tensor-core scan (Q8_0 cache): a warp takes steps of 16 cells; few blocks, all resident at once.
+    static const int mma_on    = getenv("IK_ATTN_MMA") ? atoi(getenv("IK_ATTN_MMA")) : 1;
+    static const int mma_min   = getenv("IK_ATTN_MMA_MIN") ? atoi(getenv("IK_ATTN_MMA_MIN")) : 1;
+    static const int mma_spw   = getenv("IK_ATTN_MMA_SPW") ? atoi(getenv("IK_ATTN_MMA_SPW")) : 1;         // steps per warp before another split
+    static const int mma_split = getenv("IK_ATTN_MMA_SPLITS") ? atoi(getenv("IK_ATTN_MMA_SPLITS")) : 10;  // most splits (blocks per kv head)
+    const bool mma = mma_on && !v1 && a.n_kv >= mma_min && k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
+            a.kc_nb1 == 4*(int64_t) sizeof(block_q8_0) && a.vc_nb1 == a.kc_nb1 && a.kc_nb2 % 4 == 0 && a.vc_nb2 % 4 == 0 &&
+            (uintptr_t) a.k_cache % 4 == 0 && (uintptr_t) a.v_cache % 4 == 0;
+    if (mma) {
+        a.n_split = std::max(1, std::min(mma_split, (a.n_kv + 16*IK_A2_WARPS*mma_spw - 1)/(16*IK_A2_WARPS*mma_spw)));
+    }
     a.kv_per_split = (a.n_kv + a.n_split - 1)/a.n_split;
 
     cudaStream_t stream = ctx.stream();
@@ -2516,7 +2795,11 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         if (k_cache->type == GGML_TYPE_F16) {
             if (q8) { inkling_attn2_launch<half, true>(a, grid, stream); } else { inkling_attn2_launch<half, false>(a, grid, stream); }
         } else {
-            if (q8) { inkling_attn2_launch<block_q8_0, true>(a, grid, stream); } else { inkling_attn2_launch<block_q8_0, false>(a, grid, stream); }
+            if (mma) {
+                if (q8) { inkling_attn2_launch<block_q8_0, true, true>(a, grid, stream); } else { inkling_attn2_launch<block_q8_0, false, true>(a, grid, stream); }
+            } else {
+                if (q8) { inkling_attn2_launch<block_q8_0, true>(a, grid, stream); } else { inkling_attn2_launch<block_q8_0, false>(a, grid, stream); }
+            }
         }
         return;
     }
