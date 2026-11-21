@@ -1166,6 +1166,37 @@ static void loop_ctrl_apply2_launch(ggml_backend_cuda_context & ctx, const float
     }
 }
 
+// Four rank-64 output rows per warp. Each eight-lane group loads two
+// contiguous four-element vectors per lane, keeping the full-warp sum order.
+static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, const float * d,
+        const half * wg, const half * wf, float * y, int n, size_t cur_stride, size_t msg_stride) {
+    const int i = blockIdx.x*32 + threadIdx.x/8;
+    const int lane = threadIdx.x % 8;
+    const int b = blockIdx.y;
+    const int row = b*n + i;
+    const float * dv = d + b*64 + lane*4;
+    float gv[4], fv[4];
+    const half * g = wg + row*64 + lane*4;
+    const half * f = wf + row*64 + lane*4;
+    float4 d0 = *(const float4 *) dv, d1 = *(const float4 *) (dv+32);
+    uint2 g0 = *(const uint2 *) g, g1 = *(const uint2 *) (g+32);
+    uint2 f0 = *(const uint2 *) f, f1 = *(const uint2 *) (f+32);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const float a = ((const float *) &d0)[j], z = ((const float *) &d1)[j];
+        gv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *) &g1)[j]), z,
+                __fmul_rn(__half2float(((const half *) &g0)[j]), a)));
+        fv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *) &f1)[j]), z,
+                __fmul_rn(__half2float(((const half *) &f0)[j]), a)));
+    }
+    if (lane == 0) {
+        const float c = cur[b*cur_stride+i], m = msg[b*msg_stride+i];
+        const float gain = tanhf((gv[0]+gv[2])+(gv[1]+gv[3]));
+        const float forget = tanhf((fv[0]+fv[2])+(fv[1]+fv[3]));
+        y[row] = (c-forget*c) + gain*m;
+    }
+}
+
 void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * cur = dst->src[0];
     const ggml_tensor * msg = dst->src[1];
@@ -1225,7 +1256,13 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
 #define IK_CA_LAUNCH(wt_t, NORM, Q8) loop_ctrl_apply_f32<wt_t, NORM, Q8><<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data, \
             (const float *) d->data, (const wt_t *) wg->data, (const wt_t *) wf->data, y, n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2], \
             nw ? (const float *) nw->data : nullptr, nw_nb1, dst->data, eps, counters)
-    if (wg->type == GGML_TYPE_F16) {
+    static const bool group8 = getenv("IK_CTRL_APPLY8") && atoi(getenv("IK_CTRL_APPLY8"));
+    if (group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n_tok == 1 && n % 32 == 0 &&
+            (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 && (uintptr_t) wf->data % 8 == 0) {
+        ik_ctrl_apply8<<<dim3(n/32, B), 256, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
+                (const float *) d->data, (const half *) wg->data, (const half *) wf->data, y, n,
+                cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float), msg->nb[2]/sizeof(float));
+    } else if (wg->type == GGML_TYPE_F16) {
         if (!fused) { IK_CA_LAUNCH(half, 0, false); } else if (q8) { IK_CA_LAUNCH(half, 1, true); } else { IK_CA_LAUNCH(half, 1, false); }
     } else {
         if (!fused) { IK_CA_LAUNCH(float, 0, false); } else if (q8) { IK_CA_LAUNCH(float, 1, true); } else { IK_CA_LAUNCH(float, 1, false); }

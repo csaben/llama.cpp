@@ -1110,10 +1110,26 @@ attn_done:
     // MoE
     const int64_t n_expert      = hparams.n_expert;
     const int64_t n_expert_used = hparams.n_expert_used(il);
-    const bool moe_fused = moe_op && n_tokens == 1 && ubatch.n_seqs == 1 && rs_ids != nullptr && layer.ffn_gate_up_exps != nullptr &&
+    const ggml_tensor * gate_up = layer.ffn_gate_up_exps;
+    const ggml_tensor * down = layer.ffn_down_exps;
+    const bool ordinary_experts = gate_up && down && gate_up->type == down->type &&
+        (gate_up->type == GGML_TYPE_IQ4_NL || gate_up->type == GGML_TYPE_Q8_0);
+    // Mode 3 dispatches each expert matrix separately. Its Q8_1 activation
+    // requires a supported MMVQ for both weights on the same CUDA device.
+    bool mixed_cuda_experts = false;
+    if (moe_op == 3 && n_tokens == 1 && a_type == GGML_TYPE_Q8_1 && gate_up && down &&
+            (gate_up->type == GGML_TYPE_Q2_K || gate_up->type == GGML_TYPE_Q3_K) &&
+            (down->type == GGML_TYPE_Q2_0 || down->type == GGML_TYPE_Q4_0 || down->type == GGML_TYPE_IQ4_NL)) {
+        const auto dev = model.dev_layer(il);
+        if (dev && strncmp(ggml_backend_dev_name(dev), "CUDA", 4) == 0 && gate_up->buffer && down->buffer) {
+            const auto buft = ggml_backend_dev_buffer_type(dev);
+            mixed_cuda_experts = ggml_backend_buffer_get_type(gate_up->buffer) == buft &&
+                                 ggml_backend_buffer_get_type(down->buffer) == buft;
+        }
+    }
+    const bool moe_fused = moe_op && n_tokens == 1 && ubatch.n_seqs == 1 && rs_ids != nullptr &&
         !layer.ffn_up_exps_s && !layer.ffn_gate_exps_s && !layer.ffn_down_exps_s && n_expert_used <= 8 && !cparams.moe_random_routing &&
-        (layer.ffn_gate_up_exps->type == GGML_TYPE_IQ4_NL || layer.ffn_gate_up_exps->type == GGML_TYPE_Q8_0) &&
-        layer.ffn_down_exps->type == layer.ffn_gate_up_exps->type && n_embd <= 4096;
+        (ordinary_experts || mixed_cuda_experts) && n_embd <= 4096;
     // the fused router op: the mix (or the controlled input), the FFN norm, the router and the top-k selection in one op
     ggml_tensor * ffn_consts = static_cast<const llama_model_inkling2 &>(model).ffn_consts[ip];
     const bool router_fused = moe_fused && router_op && ffn_consts != nullptr && n_expert % 8 == 0 && n_expert <= 256 && n_embd % 4 == 0 &&
