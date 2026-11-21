@@ -2616,6 +2616,12 @@ static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int c
     const ggml_tensor * src1 = dst->src[1];
     const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
 
+    // a Q8_1 activation goes straight to the quantized matvec kernel (no synchronization)
+    if (src1->type == GGML_TYPE_Q8_1 && dst->type == GGML_TYPE_F32 && ggml_is_quantized(src0->type) &&
+            dst->ne[2] <= get_mmvq_mmid_max_batch(src0->type, cc)) {
+        return false;
+    }
+
     if (src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
         return true;
     }
