@@ -618,6 +618,10 @@ static void ggml_gallocr_free_extra_space(ggml_gallocr_t galloc, struct ggml_ten
 }
 
 static void ggml_gallocr_allocate_node(ggml_gallocr_t galloc, struct ggml_tensor * node, int buffer_id) {
+    if (buffer_id < 0) {
+        GGML_LOG_ERROR("%s: tensor %s (op %s, view_src %s, flags %d) has no buffer\n", __func__, node->name, ggml_op_name(node->op),
+                node->view_src ? node->view_src->name : "-", node->flags);
+    }
     GGML_ASSERT(buffer_id >= 0);
     struct hash_node * hn = ggml_gallocr_hash_get(galloc, node);
 

@@ -13612,6 +13612,152 @@ void ggml_compute_forward_inkling_router(const ggml_compute_params * params, ggm
     }
 }
 
+// ggml_compute_forward_inkling_proj
+
+void ggml_compute_forward_inkling_proj(const ggml_compute_params * params, ggml_tensor * dst) {
+    const int n_states = ggml_get_op_params_i32(dst, 3);
+    const ggml_tensor * query  = dst->src[0];
+    const ggml_tensor * norm_w = dst->src[1 + n_states];
+    const ggml_tensor * w      = dst->src[2 + n_states];
+    const ggml_tensor * moe_d  = dst->src[3 + n_states];
+
+    const float eps      = ggml_get_op_params_f32(dst, 0);
+    const float scale    = ggml_get_op_params_f32(dst, 1);
+    const float norm_eps = ggml_get_op_params_f32(dst, 2);
+    const int   n_cols   = ggml_get_op_params_i32(dst, 4);
+    const int   n_q      = ggml_get_op_params_i32(dst, 5);
+    const int   n_k      = ggml_get_op_params_i32(dst, 6);
+
+    const int64_t n_embd = w->ne[0];
+    const int64_t n_rows = w->ne[1];
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    float * y   = (float *) params->wdata;          // [n_cols][n_embd]: the activation columns, rounded through Q8_1
+    float * row = y + n_cols*n_embd + ith*n_embd;   // a dequantized weight row
+    GGML_ASSERT(params->wsize >= (size_t) (n_cols + nth)*n_embd*sizeof(float));
+
+    if (ith == 0) {
+        if (moe_d) {
+            // the MoE epilogue of the previous layer into the last state (same math as inkling_moe_sum_conv)
+            const ggml_tensor * moe_w    = dst->src[4 + n_states];
+            const ggml_tensor * conv_w   = dst->src[5 + n_states];
+            ggml_tensor       * state    = dst->src[6 + n_states];
+            const ggml_tensor * rs_ids   = dst->src[7 + n_states];
+            const ggml_tensor * residual = dst->src[8 + n_states];
+            ggml_tensor       * layer_out = dst->src[9 + n_states];
+            const int   write_cell  = ggml_get_op_params_i32(dst, 7);
+            const int   chan_offset = ggml_get_op_params_i32(dst, 8);
+            const float conv_scale  = ggml_get_op_params_f32(dst, 9);
+            const int64_t n_used = moe_d->ne[1];
+            const int64_t n_conv = conv_w->ne[0];
+            const int32_t read_cell = ((const int32_t *) rs_ids->data)[0];
+            GGML_ASSERT(read_cell >= 0 && read_cell < state->ne[1]);
+            for (int64_t c = 0; c < n_embd; ++c) {
+                float sum = 0.0f;
+                for (int64_t e = 0; e < n_used; ++e) {
+                    const float x  = *(const float *) ((const char *) moe_d->data + c*sizeof(float) + e*moe_d->nb[1]);
+                    const float we = *(const float *) ((const char *) moe_w->data + e*moe_w->nb[1]);
+                    sum += x*we;
+                }
+                const int64_t ch = chan_offset + c;
+                const float * past = (const float *) ((const char *) state->data + read_cell*state->nb[1]) + ch*(n_conv - 1);
+                const float * cw   = (const float *) conv_w->data + c*n_conv;
+                float xs[8];
+                for (int64_t j = 0; j < n_conv - 1; ++j) {
+                    xs[j] = past[j];
+                }
+                xs[n_conv - 1] = sum;
+                float out = 0.0f;
+                for (int64_t j = 0; j < n_conv; ++j) {
+                    out += xs[j]*cw[j];
+                }
+                float * st = (float *) ((char *) state->data + (int64_t) write_cell*state->nb[1]) + ch*(n_conv - 1);
+                for (int64_t j = 0; j < n_conv - 1; ++j) {
+                    st[j] = xs[j + 1];
+                }
+                ((float *) layer_out->data)[c] = ((const float *) residual->data)[c] + (sum + out)*conv_scale;
+            }
+        }
+
+        std::vector<block_q8_1> q(n_embd/QK8_1);
+        for (int c = 0; c < n_cols; ++c) {
+            float * yc = y + c*n_embd;
+            if (query) {
+                const float * qv = (const float *) ((const char *) query->data + c*query->nb[1]);
+                float rms[GGML_MAX_SRC], sc[GGML_MAX_SRC];
+                for (int i = 0; i < n_states; ++i) {
+                    const float * x = (const float *) dst->src[1 + i]->data;
+                    ggml_float sum = 0.0;
+                    for (int64_t k = 0; k < n_embd; ++k) {
+                        sum += (ggml_float) (x[k]*x[k]);
+                    }
+                    rms[i] = 1.0f/sqrtf((float) (sum/n_embd) + eps);
+                    float dot = 0.0f;
+                    for (int64_t k = 0; k < n_embd; ++k) {
+                        dot += (x[k]*rms[i])*qv[k];
+                    }
+                    sc[i] = dot*scale;
+                }
+                float mx = -INFINITY;
+                for (int i = 0; i < n_states; ++i) {
+                    mx = MAX(mx, sc[i]);
+                }
+                float sum = 0.0f;
+                for (int i = 0; i < n_states; ++i) {
+                    sc[i] = expf(sc[i] - mx);
+                    sum += sc[i];
+                }
+                for (int64_t k = 0; k < n_embd; ++k) {
+                    yc[k] = 0.0f;
+                }
+                for (int i = 0; i < n_states; ++i) {
+                    const float * x = (const float *) dst->src[1 + i]->data;
+                    for (int64_t k = 0; k < n_embd; ++k) {
+                        yc[k] += (x[k]*rms[i])*(sc[i]/sum);
+                    }
+                }
+            } else {
+                memcpy(yc, dst->src[1]->data, n_embd*sizeof(float));
+            }
+            const float * nw = (const float *) ((const char *) norm_w->data + (norm_w->ne[1] == 1 ? 0 : c*norm_w->nb[1]));
+            ggml_float ss = 0.0;
+            for (int64_t k = 0; k < n_embd; ++k) {
+                ss += (ggml_float) (yc[k]*yc[k]);
+            }
+            const float r = 1.0f/sqrtf((float) (ss/n_embd) + norm_eps);
+            for (int64_t k = 0; k < n_embd; ++k) {
+                yc[k] = yc[k]*r*nw[k];
+            }
+            // the activation as the matvec sees it: rounded through Q8_1
+            quantize_row_q8_1_ref(yc, q.data(), n_embd);
+            for (int64_t b = 0; b < n_embd/QK8_1; ++b) {
+                const float d = GGML_FP16_TO_FP32(q[b].d);
+                for (int j = 0; j < QK8_1; ++j) {
+                    yc[b*QK8_1 + j] = d*q[b].qs[j];
+                }
+            }
+        }
+    }
+    ggml_barrier(params->threadpool);
+
+    const ggml_type_traits * traits = ggml_get_type_traits(w->type);
+    GGML_ASSERT(traits->to_float != NULL);
+    for (int64_t r = ith; r < n_rows; r += nth) {
+        traits->to_float((const char *) w->data + r*w->nb[1], row, n_embd);
+        const int c = n_cols == 1 ? 0 : (r < n_q ? 0 : (r < n_q + n_k ? 1 : 2));
+        const float * yc = y + c*n_embd;
+        ggml_float dot = 0.0;
+        for (int64_t k = 0; k < n_embd; ++k) {
+            dot += (ggml_float) (row[k]*yc[k]);
+        }
+        for (int cc = 0; cc < n_cols; ++cc) {
+            *(float *) ((char *) dst->data + cc*dst->nb[1] + r*sizeof(float)) = cc == c ? (float) dot : 0.0f;
+        }
+    }
+}
+
 // ggml_compute_forward_moe_sum
 
 void ggml_compute_forward_moe_sum(const ggml_compute_params * params, ggml_tensor * dst) {

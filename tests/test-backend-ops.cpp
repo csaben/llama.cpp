@@ -5395,6 +5395,90 @@ struct test_situ_q8 : public test_case {
     }
 };
 
+// GGML_OP_INKLING_PROJ
+struct test_inkling_proj : public test_case {
+    const ggml_type type_w;
+    const int64_t n_embd;
+    const int64_t n_rows;
+    const int n_states; // 0: no mix (norm of one state)
+    const int n_cols;
+    const bool with_moe;
+
+    static constexpr int64_t n_conv = 4, n_cells = 3, write_cell = 1, chan_offset = 100, n_used = 8;
+
+    std::string vars() override {
+        return VARS_TO_STR6(type_w, n_embd, n_rows, n_states, n_cols, with_moe);
+    }
+
+    double max_nmse_err() override {
+        return 5e-4;
+    }
+
+    test_inkling_proj(ggml_type type_w = GGML_TYPE_Q8_0, int64_t n_embd = 2304, int64_t n_rows = 1000, int n_states = 4, int n_cols = 1, bool with_moe = false)
+        : type_w(type_w), n_embd(n_embd), n_rows(n_rows), n_states(n_states), n_cols(n_cols), with_moe(with_moe) {}
+
+    void initialize_tensors(ggml_context * ctx) override {
+        std::random_device rd;
+        std::default_random_engine rng(rd());
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            const std::string name = t->name;
+            if (name == "rs_ids") {
+                int32_t v = rng() % n_cells;
+                ggml_backend_tensor_set(t, &v, 0, sizeof(v));
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * q = nullptr;
+        if (n_states > 0) {
+            q = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_cols);
+            ggml_set_name(q, "q");
+        }
+        const int ns = n_states > 0 ? n_states : 1;
+        std::vector<ggml_tensor *> states(ns);
+        for (int i = 0; i < ns; ++i) {
+            states[i] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+            ggml_set_name(states[i], ("s" + std::to_string(i)).c_str());
+        }
+        ggml_tensor * norm_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_cols);
+        ggml_set_name(norm_w, "norm_w");
+        ggml_tensor * w = ggml_new_tensor_2d(ctx, type_w, n_embd, n_rows);
+        ggml_set_name(w, "w");
+
+        ggml_tensor * moe_d = nullptr, * moe_w = nullptr, * conv_w = nullptr, * state = nullptr, * rs_ids = nullptr, * residual = nullptr;
+        if (with_moe) {
+            moe_d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_used);
+            ggml_set_name(moe_d, "moe_d");
+            moe_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, n_used);
+            ggml_set_name(moe_w, "moe_w");
+            conv_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_conv, n_embd);
+            ggml_set_name(conv_w, "conv_w");
+            state = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (n_conv - 1)*(chan_offset + n_embd + 50), n_cells);
+            ggml_set_name(state, "state");
+            rs_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+            ggml_set_name(rs_ids, "rs_ids");
+            residual = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+            ggml_set_name(residual, "residual");
+        }
+        const int64_t n_q = n_cols == 3 ? n_rows/2 : 0;
+        const int64_t n_k = n_cols == 3 ? n_rows/4 : 0;
+        ggml_tensor * out = ggml_inkling_proj(ctx, q, states.data(), ns, norm_w, w, n_cols, n_q, n_k, 1e-6f, 1.0f/sqrtf(n_embd), 1e-6f,
+                moe_d, moe_w, conv_w, state, rs_ids, residual, with_moe ? states[ns - 1] : nullptr, write_cell, chan_offset, 0.5f);
+        ggml_set_name(out, "out");
+        if (!with_moe) {
+            return out;
+        }
+        // the computed last state and the stored conv state are part of the checked output (the readers run after the op)
+        ggml_tensor * all = ggml_concat(ctx, ggml_reshape_2d(ctx, out, n_rows*n_cols, 1), ggml_reshape_2d(ctx, states[ns - 1], n_embd, 1), 0);
+        all = ggml_concat(ctx, all, ggml_reshape_2d(ctx, state, ggml_nelements(state), 1), 0);
+        ggml_set_name(all, "out_all");
+        return all;
+    }
+};
+
 // GGML_OP_INKLING_ROUTER
 struct test_inkling_router : public test_case {
     const int64_t n_embd;
@@ -12606,6 +12690,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_inkling_moe_sum_conv(100, 3));
     test_cases.emplace_back(new test_situ_q8(1152, 8));
     test_cases.emplace_back(new test_situ_q8(96, 3));
+    for (ggml_type type_w : { GGML_TYPE_Q8_0, GGML_TYPE_Q6_K, GGML_TYPE_IQ4_NL }) {
+        test_cases.emplace_back(new test_inkling_proj(type_w, 2304, 1000, 4, 1, false));
+        test_cases.emplace_back(new test_inkling_proj(type_w, 2304, 1001, 0, 1, true));
+        test_cases.emplace_back(new test_inkling_proj(type_w, 2304, 777, 3, 3, true));
+        test_cases.emplace_back(new test_inkling_proj(type_w, 512, 100, 2, 3, false));
+    }
+    test_cases.emplace_back(new test_inkling_proj(GGML_TYPE_Q8_0, 2304, 8600, 5, 1, true));
+    test_cases.emplace_back(new test_inkling_proj(GGML_TYPE_Q8_0, 2304, 8664, 3, 3, true));
     test_cases.emplace_back(new test_inkling_router(2304, 4, 128, 8, true));
     test_cases.emplace_back(new test_inkling_router(2304, 0, 128, 8, true));
     test_cases.emplace_back(new test_inkling_router(2304, 2, 128, 8, false));

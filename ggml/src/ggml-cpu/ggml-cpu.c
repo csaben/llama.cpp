@@ -2123,6 +2123,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_inkling_router(params, tensor);
             } break;
+        case GGML_OP_INKLING_PROJ:
+            {
+                ggml_compute_forward_inkling_proj(params, tensor);
+            } break;
         case GGML_OP_SSM_SCAN:
             {
                 ggml_compute_forward_ssm_scan(params, tensor);
@@ -2527,6 +2531,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_INKLING_MOE_DOWN:
         case GGML_OP_INKLING_MOE_SUM_CONV:
         case GGML_OP_INKLING_ROUTER:
+        case GGML_OP_INKLING_PROJ:
             {
                 n_tasks = n_threads;
             } break;
@@ -2989,6 +2994,12 @@ struct ggml_cplan ggml_graph_plan(
                 case GGML_OP_INKLING_ROUTER:
                     {
                         cur = node->src[2 + ggml_get_op_params_i32(node, 6)]->ne[1]*sizeof(float); // the probabilities of the experts
+                    } break;
+                case GGML_OP_INKLING_PROJ:
+                    {
+                        // the dequantized activation columns, and a dequantized weight row per thread
+                        const int64_t n_embd = node->src[2 + ggml_get_op_params_i32(node, 3)]->ne[0];
+                        cur = (ggml_get_op_params_i32(node, 4) + n_tasks)*n_embd*sizeof(float);
                     } break;
                 case GGML_OP_MUL_MAT_ID:
                     {

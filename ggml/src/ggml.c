@@ -1130,9 +1130,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "INKLING_MOE_DOWN",
     "INKLING_MOE_SUM_CONV",
     "INKLING_ROUTER",
+    "INKLING_PROJ",
 };
 
-static_assert(GGML_OP_COUNT == 112, "GGML_OP_COUNT != 112");
+static_assert(GGML_OP_COUNT == 113, "GGML_OP_COUNT != 113");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1258,9 +1259,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "inkling_moe_down(as,h,ids)",
     "inkling_moe_sum_conv(a,w)",
     "inkling_router(q,x...)",
+    "inkling_proj(q,x...,w)",
 };
 
-static_assert(GGML_OP_COUNT == 112, "GGML_OP_COUNT != 112");
+static_assert(GGML_OP_COUNT == 113, "GGML_OP_COUNT != 113");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6222,6 +6224,22 @@ struct ggml_tensor * ggml_inkling_moe_sum_conv(
         int                   write_cell,
         int                   chan_offset,
         float                 scale) {
+    return ggml_inkling_moe_sum_conv_into(ctx, a, w, conv_w, state, rs_ids, residual, NULL, write_cell, chan_offset, scale);
+}
+
+// the result written into `out` (a leaf of the graph, F32 [n_embd]): the op becomes a view of it
+struct ggml_tensor * ggml_inkling_moe_sum_conv_into(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * w,
+        struct ggml_tensor  * conv_w,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * rs_ids,
+        struct ggml_tensor  * residual,
+        struct ggml_tensor  * out,
+        int                   write_cell,
+        int                   chan_offset,
+        float                 scale) {
     const int64_t n_embd = a->ne[0];
     GGML_ASSERT(a->type == GGML_TYPE_F32 && a->nb[0] == sizeof(float) && a->ne[2] == 1 && a->ne[3] == 1);
     GGML_ASSERT((w->type == GGML_TYPE_F32 || w->type == GGML_TYPE_I32) && w->ne[0] == 1 && w->ne[1] == a->ne[1] && w->ne[2] == 1);
@@ -6231,7 +6249,8 @@ struct ggml_tensor * ggml_inkling_moe_sum_conv(
     GGML_ASSERT(rs_ids->type == GGML_TYPE_I32 && rs_ids->ne[0] >= 1);
     GGML_ASSERT(residual->type == GGML_TYPE_F32 && residual->ne[0] == n_embd && residual->nb[0] == sizeof(float));
 
-    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+    struct ggml_tensor * result = out ? ggml_view_tensor(ctx, out) : ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+    GGML_ASSERT(out == NULL || (out->type == GGML_TYPE_F32 && ggml_is_contiguous(out) && ggml_nelements(out) == n_embd));
 
     ggml_set_op_params_i32(result, 0, write_cell);
     ggml_set_op_params_i32(result, 1, chan_offset);
@@ -6244,6 +6263,7 @@ struct ggml_tensor * ggml_inkling_moe_sum_conv(
     result->src[3] = state;
     result->src[4] = rs_ids;
     result->src[5] = residual;
+    result->src[6] = out; // the written leaf as a source too: the scheduler assigns it a backend through its consumers
 
     return result;
 }
@@ -6304,6 +6324,95 @@ struct ggml_tensor * ggml_inkling_router(
     result->src[2 + n_states] = gate_inp;
     result->src[3 + n_states] = route;
     result->src[4 + n_states] = xq;
+
+    return result;
+}
+
+// ggml_inkling_proj
+// op_params: [0] eps, [1] scale, [2] norm_eps, [3] n_states (int), [4] n_cols, [5] n_q, [6] n_k, [7] write_cell, [8] chan_offset, [9] conv_scale
+// src: [0] query (optional), [1 .. n_states] states, norm_w, w, then (optional) moe_d, moe_w, conv_w, state, rs_ids, residual, layer_out
+
+struct ggml_tensor * ggml_inkling_proj(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * query,
+        struct ggml_tensor ** states,
+        int                   n_states,
+        struct ggml_tensor  * norm_w,
+        struct ggml_tensor  * w,
+        int                   n_cols,
+        int                   n_q,
+        int                   n_k,
+        float                 eps,
+        float                 scale,
+        float                 norm_eps,
+        struct ggml_tensor  * moe_d,
+        struct ggml_tensor  * moe_w,
+        struct ggml_tensor  * conv_w,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * rs_ids,
+        struct ggml_tensor  * residual,
+        struct ggml_tensor  * layer_out,
+        int                   write_cell,
+        int                   chan_offset,
+        float                 conv_scale) {
+    GGML_ASSERT(n_states >= 1 && n_states + 10 <= GGML_MAX_SRC);
+    GGML_ASSERT(query != NULL || n_states == 1);
+    GGML_ASSERT(n_cols == 1 || n_cols == 3);
+
+    const int64_t n_embd = w->ne[0];
+    const int64_t n_rows = w->ne[1];
+
+    GGML_ASSERT(ggml_is_contiguous(w) && w->ne[2] == 1 && w->ne[3] == 1 && ggml_is_quantized(w->type) && n_embd % QK8_1 == 0);
+    if (query) {
+        GGML_ASSERT(query->type == GGML_TYPE_F32 && query->ne[0] == n_embd && query->ne[1] == n_cols && query->nb[0] == sizeof(float));
+    }
+    for (int i = 0; i < n_states; ++i) {
+        GGML_ASSERT(states[i]->type == GGML_TYPE_F32 && states[i]->ne[0] == n_embd && ggml_nelements(states[i]) == n_embd && states[i]->nb[0] == sizeof(float));
+    }
+    GGML_ASSERT(norm_w->type == GGML_TYPE_F32 && norm_w->ne[0] == n_embd && (norm_w->ne[1] == 1 || norm_w->ne[1] == n_cols) && norm_w->nb[0] == sizeof(float));
+    GGML_ASSERT(n_cols == 1 || (n_q > 0 && n_k > 0 && n_q + n_k < n_rows));
+
+    if (moe_d) {
+        GGML_ASSERT(moe_w && conv_w && state && rs_ids && residual && layer_out);
+        GGML_ASSERT(moe_d->type == GGML_TYPE_F32 && moe_d->ne[0] == n_embd && moe_d->ne[1] <= 8 && moe_d->ne[2] == 1 && moe_d->nb[0] == sizeof(float));
+        GGML_ASSERT((moe_w->type == GGML_TYPE_F32 || moe_w->type == GGML_TYPE_I32) && moe_w->ne[0] == 1 && moe_w->ne[1] == moe_d->ne[1]);
+        GGML_ASSERT(conv_w->type == GGML_TYPE_F32 && conv_w->ne[1] == n_embd && conv_w->ne[0] >= 2 && conv_w->ne[0] <= 8 && ggml_is_contiguous(conv_w));
+        GGML_ASSERT(state->type == GGML_TYPE_F32 && state->nb[0] == sizeof(float) && state->ne[0] >= (conv_w->ne[0] - 1)*(chan_offset + n_embd));
+        GGML_ASSERT(rs_ids->type == GGML_TYPE_I32 && rs_ids->ne[0] >= 1);
+        GGML_ASSERT(write_cell >= 0 && write_cell < state->ne[1]);
+        GGML_ASSERT(residual->type == GGML_TYPE_F32 && ggml_nelements(residual) == n_embd && residual->nb[0] == sizeof(float));
+        GGML_ASSERT(layer_out == states[n_states - 1] && ggml_is_contiguous(layer_out));
+    } else {
+        GGML_ASSERT(!moe_w && !conv_w && !state && !rs_ids && !residual && !layer_out);
+    }
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_rows, n_cols);
+
+    ggml_set_op_params_f32(result, 0, eps);
+    ggml_set_op_params_f32(result, 1, scale);
+    ggml_set_op_params_f32(result, 2, norm_eps);
+    ggml_set_op_params_i32(result, 3, n_states);
+    ggml_set_op_params_i32(result, 4, n_cols);
+    ggml_set_op_params_i32(result, 5, n_q);
+    ggml_set_op_params_i32(result, 6, n_k);
+    ggml_set_op_params_i32(result, 7, write_cell);
+    ggml_set_op_params_i32(result, 8, chan_offset);
+    ggml_set_op_params_f32(result, 9, conv_scale);
+
+    result->op     = GGML_OP_INKLING_PROJ;
+    result->src[0] = query;
+    for (int i = 0; i < n_states; ++i) {
+        result->src[1 + i] = states[i];
+    }
+    result->src[1 + n_states] = norm_w;
+    result->src[2 + n_states] = w;
+    result->src[3 + n_states] = moe_d;
+    result->src[4 + n_states] = moe_w;
+    result->src[5 + n_states] = conv_w;
+    result->src[6 + n_states] = state;
+    result->src[7 + n_states] = rs_ids;
+    result->src[8 + n_states] = residual;
+    result->src[9 + n_states] = layer_out;
 
     return result;
 }

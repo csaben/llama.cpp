@@ -511,6 +511,24 @@ void llama_model_inkling2::graph::init_fused() {
         return env == nullptr || atoi(env) != 0;
     }();
     router_op = fused && router_op_enabled;
+
+    // opt-in for now: measured a wash on the RTX 3090 (the glue's dependent round trips inflate ~3.5x under the
+    // concurrent weight stream, see perf/RESULTS.md phase 3)
+    static const bool proj_op_enabled = [] {
+        const char * env = getenv("LLAMA_INKLING_PROJ_OP");
+        return env != nullptr && atoi(env) != 0;
+    }();
+    proj_op = fused && attn_op && proj_op_enabled;
+}
+
+void llama_model_inkling2::graph::flush_pending() {
+    if (pending.d == nullptr) {
+        return;
+    }
+    ggml_tensor * t = ggml_inkling_moe_sum_conv_into(ctx0, pending.d, pending.w, pending.conv_w, pending.state, pending.rs_ids, pending.residual,
+            pending.out, pending.write_cell, pending.chan_offset, pending.scale);
+    ggml_build_forward_expand(gf, t);
+    pending.d = nullptr;
 }
 
 // Q8_1 activations go to the quantized matvec kernels of the CUDA and CPU backends
@@ -778,7 +796,38 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
     ggml_tensor * mixed = nullptr;
     bool inputs_normed = false;
     ggml_tensor * norm3 = is_swa ? layer.attn_norm : static_cast<const llama_model_inkling2 &>(model).attn_inp_norm_qkv[ip];
-    if (use_fused && !messages && norm3 != nullptr) {
+
+    // the mix + norm + projection matvec as one persistent kernel (single-token decode), which also finishes the
+    // deferred MoE epilogue of the previous layer
+    ggml_tensor * proj_pre = nullptr;
+    const bool use_proj = proj_op && use_fused && !messages && norm3 != nullptr && a_type == GGML_TYPE_Q8_1 && n_tokens == 1 &&
+        ubatch.n_seqs == 1 && rs_ids != nullptr && n_embd % 32 == 0 && n_embd <= 3072 &&
+        (fa.w->type == GGML_TYPE_Q8_0 || fa.w->type == GGML_TYPE_Q6_K || fa.w->type == GGML_TYPE_IQ4_NL) &&
+        (layer.attn_res_query == nullptr || layer.attn_res_query->ne[1] == (is_swa ? 1 : 3)) && (pending.d == nullptr || pending.out == cur) &&
+        blocks.size() + 1 <= 6;
+    if (!use_proj) {
+        flush_pending();
+    }
+    if (use_proj) {
+        std::vector<ggml_tensor *> states;
+        if (layer.attn_res_query) {
+            for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
+                states.push_back(ggml_reshape_2d(ctx0, *it, n_embd, n_tokens));
+            }
+        }
+        states.push_back(cur);
+        const bool epi = pending.d != nullptr;
+        proj_pre = ggml_inkling_proj(ctx0, layer.attn_res_query, states.data(), (int) states.size(), norm3, fa.w, is_swa ? 1 : 3, fa.n_q, fa.n_k,
+                1e-6f, 1.0f/sqrtf(n_embd), hparams.f_norm_rms_eps,
+                epi ? pending.d : nullptr, epi ? pending.w : nullptr, epi ? pending.conv_w : nullptr, epi ? pending.state : nullptr,
+                epi ? pending.rs_ids : nullptr, epi ? pending.residual : nullptr, epi ? pending.out : nullptr,
+                pending.write_cell, pending.chan_offset, pending.scale);
+        cb(proj_pre, "attn_proj", il);
+        // the op writes the layer output (the previous epilogue) as a side output: it must precede every other consumer
+        ggml_build_forward_expand(gf, proj_pre);
+        pending.d = nullptr;
+        inputs_normed = true;
+    } else if (use_fused && !messages && norm3 != nullptr) {
         // the mix and the input norm in one op, written as the activation of the projection
         ggml_tensor * x = mix_norm(blocks, cur, layer.attn_res_query, norm3, a_type);
         cb(x, "attn_inp", il);
@@ -859,7 +908,18 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
             ggml_tensor * out_k = nullptr;
             ggml_tensor * out_v = nullptr;
             ggml_tensor * proj  = nullptr; // the whole projection output, [n_rows, 1 or 3 columns]
-            if (inputs[0] == inputs[1] && inputs[0] == inputs[2]) {
+            if (proj_pre != nullptr) {
+                proj = proj_pre;
+                if (proj->ne[1] == 1) {
+                    out_q = proj;
+                    out_k = ggml_view_2d(ctx0, proj, fa.n_k, n_tokens, proj->nb[1], fa.n_q*sizeof(float));
+                    out_v = ggml_view_2d(ctx0, proj, fa.n_v, n_tokens, proj->nb[1], (fa.n_q + fa.n_k)*sizeof(float));
+                } else {
+                    out_q = ggml_view_2d(ctx0, proj, fa.n_q, n_tokens, proj->nb[1], 0);
+                    out_k = ggml_view_2d(ctx0, proj, fa.n_k, n_tokens, proj->nb[1], 1*proj->nb[1] + fa.n_q*sizeof(float));
+                    out_v = ggml_view_2d(ctx0, proj, fa.n_v, n_tokens, proj->nb[1], 2*proj->nb[1] + (fa.n_q + fa.n_k)*sizeof(float));
+                }
+            } else if (inputs[0] == inputs[1] && inputs[0] == inputs[2]) {
                 out_q = ggml_mul_mat(ctx0, fa.w, inputs[0]);
                 out_k = ggml_view_2d(ctx0, out_q, fa.n_k, n_tokens, out_q->nb[1], fa.n_q*sizeof(float));
                 out_v = ggml_view_2d(ctx0, out_q, fa.n_v, n_tokens, out_q->nb[1], (fa.n_q + fa.n_k)*sizeof(float));
@@ -1135,8 +1195,19 @@ attn_done:
             cb(h, "ffn_moe_situ", il);
             ggml_tensor * d = ggml_mul_mat_id(ctx0, layer.ffn_down_exps, h, selected_experts); // [n_embd, n_expert_used, 1]
             cb(d, "ffn_moe_down", il);
-            cur = ggml_inkling_moe_sum_conv(ctx0, d, weights, layer.ffn_post_conv, state, rs_ids, ffn_inp,
-                    recr->mctx->get_head(), 2*n_embd_k_gqa + n_embd, conv_scale);
+            if (proj_op && router_fused) {
+                // the epilogue is deferred into the next layer's fused projection op (or flushed before any other consumer)
+                GGML_ASSERT(pending.d == nullptr);
+                ggml_tensor * out = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd);
+                cb(out, "l_out_leaf", il);
+                pending.d = d; pending.w = weights; pending.conv_w = layer.ffn_post_conv; pending.state = state; pending.rs_ids = rs_ids;
+                pending.residual = ffn_inp; pending.out = out; pending.write_cell = recr->mctx->get_head();
+                pending.chan_offset = 2*n_embd_k_gqa + n_embd; pending.scale = conv_scale;
+                cur = out;
+            } else {
+                cur = ggml_inkling_moe_sum_conv(ctx0, d, weights, layer.ffn_post_conv, state, rs_ids, ffn_inp,
+                        recr->mctx->get_head(), 2*n_embd_k_gqa + n_embd, conv_scale);
+            }
         }
         cb(cur, "l_out", il);
     } else {
@@ -1166,6 +1237,7 @@ attn_done:
 }
 
 void llama_model_inkling2::graph::build_output(ggml_tensor * cur, const std::vector<ggml_tensor *> & blocks) {
+    flush_pending();
     if (fused) {
         cur = ggml_reshape_2d(ctx0, mix_norm(blocks, cur, model.output_res_query, model.output_norm, GGML_TYPE_F32), n_embd, n_tokens);
     } else {

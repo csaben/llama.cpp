@@ -2588,6 +2588,19 @@ struct llama_model_inkling2 : public llama_model_base {
         int moe_op = 0;
         // the FFN input mix + norm + router + top-k as one op (LLAMA_INKLING_ROUTER_OP=0 disables)
         bool router_op = false;
+        // the attention-input mix + norm fused with the projection matvec in one persistent kernel, which also runs the
+        // deferred MoE epilogue of the previous layer (LLAMA_INKLING_PROJ_OP=0 disables)
+        bool proj_op = false;
+
+        // the MoE epilogue (expert sum + FFN conv + residual) of the previous layer, deferred into the next fused op;
+        // out is the leaf that receives the layer output (handed out as `cur`)
+        struct pending_epilogue {
+            ggml_tensor * d = nullptr, * w = nullptr, * conv_w = nullptr, * state = nullptr, * rs_ids = nullptr, * residual = nullptr, * out = nullptr;
+            int write_cell = 0, chan_offset = 0;
+            float scale = 0.0f;
+        } pending;
+        // emit the deferred epilogue as its own op (before any other consumer of its output)
+        void flush_pending();
 
         // the mixed output of query j: [n_embd, n_tokens]
         ggml_tensor * mixed_view(ggml_tensor * mixed, int j);

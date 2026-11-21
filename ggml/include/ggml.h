@@ -48,7 +48,7 @@
 
 #define GGML_MAX_DIMS           4
 #define GGML_MAX_PARAMS         2048
-#define GGML_MAX_SRC            10
+#define GGML_MAX_SRC            16
 #define GGML_MAX_N_THREADS      512
 #define GGML_MAX_OP_PARAMS      64
 
@@ -445,6 +445,7 @@ extern "C" {
         GGML_OP_INKLING_MOE_DOWN,
         GGML_OP_INKLING_MOE_SUM_CONV,
         GGML_OP_INKLING_ROUTER,
+        GGML_OP_INKLING_PROJ,
 
         GGML_OP_COUNT,
     };
@@ -2546,6 +2547,18 @@ extern "C" {
             int                   write_cell,
             int                   chan_offset,
             float                 scale);
+    GGML_API struct ggml_tensor * ggml_inkling_moe_sum_conv_into(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * w,
+            struct ggml_tensor  * conv_w,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rs_ids,
+            struct ggml_tensor  * residual,
+            struct ggml_tensor  * out,
+            int                   write_cell,
+            int                   chan_offset,
+            float                 scale);
 
     // the FFN input of inkling2 for one token with its routing: the attention-residual mix (query, states; query == NULL:
     // no mix) RMS-normalized by the norm weight -> result [n_embd, 1] F32; the router logits gate_inp^T x (gate_inp
@@ -2568,6 +2581,39 @@ extern "C" {
             int                   n_used,
             float                 w_scale,
             float                 w_eps);
+
+    // the attention input of inkling2 for one token fused with its projection matvec (a persistent kernel: the glue runs
+    // on a few blocks while the others preload the weights): x[:, c] = rmsnorm(mix(query[:, c], states)) * norm_w[:, c]
+    // quantized to Q8_1, dst[r, c(r)] = w[r] . x[:, c(r)] where c(r) = 0 (n_cols == 1) or the row group of r (rows < n_q:
+    // column 0, < n_q + n_k: 1, else 2); the other entries of dst are zero.
+    //   query [n_embd, n_cols] F32 (NULL: no mix, n_states == 1), states [n_embd, 1] F32, norm_w [n_embd, 1 or n_cols] F32,
+    //   w [n_embd, n_rows] quantized -> dst [n_rows, n_cols] F32
+    // Optional MoE epilogue of the previous layer, computed first: the last state must be layer_out, which receives
+    //   residual + (d + conv([past, d], conv_w))*conv_scale, d[c] = sum_e moe_w[e]*moe_d[c, e] (see ggml_inkling_moe_sum_conv);
+    //   moe_d [n_embd, n_used] F32, moe_w [1, n_used] F32/I32 bits, conv_w [n_conv, n_embd], state, rs_ids, residual [n_embd] F32.
+    GGML_API struct ggml_tensor * ggml_inkling_proj(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * query,
+            struct ggml_tensor ** states,
+            int                   n_states,
+            struct ggml_tensor  * norm_w,
+            struct ggml_tensor  * w,
+            int                   n_cols,
+            int                   n_q,
+            int                   n_k,
+            float                 eps,
+            float                 scale,
+            float                 norm_eps,
+            struct ggml_tensor  * moe_d,
+            struct ggml_tensor  * moe_w,
+            struct ggml_tensor  * conv_w,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rs_ids,
+            struct ggml_tensor  * residual,
+            struct ggml_tensor  * layer_out,
+            int                   write_cell,
+            int                   chan_offset,
+            float                 conv_scale);
 
     // weighted sum over the second dimension: a [n0, n1, n2], w [1, n1, n2] -> [n0, n2] = sum_k a[:, k, t]*w[0, k, t]
     GGML_API struct ggml_tensor * ggml_moe_sum(
