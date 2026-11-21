@@ -1,0 +1,16 @@
+{
+  "provider": {
+    "localinkling": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local Inkling",
+      "options": { "baseURL": "http://127.0.0.1:8031/v1", "apiKey": "local" },
+      "models": {
+        "inkling-mini": {
+          "name": "Inkling 2 Mini (experimental Q2)",
+          "limit": { "context": 16384, "output": 4096 },
+          "tool_call": true
+        }
+      }
+    }
+  }
+}

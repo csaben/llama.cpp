@@ -353,3 +353,52 @@ prefill perplexity of 2.9578 exceeded the branch tolerance of 0.5% over
 projection has inner dimension 1152, which requires a fallback for Q3_K
 blocks of 256. Splitting the projection on short DSpark verification batches
 also left plain single-stream decode faster across the three coding chats.
+
+### Calibrated two-bit experts on one RTX 3090
+
+The runs used all three core passes and eight experts, 16K context, one slot,
+Q8_0 K/V, F16 controllers, batched messages, specialized mixes, segmented IQ4
+projections and GPU backend sampling. The 700-token figures are mean server
+decode rates across the three prompts in `perf/bench.py`. Each Q2 checkpoint
+was quantized directly from the publisher's Q8_0 GGUF using its 1,770-chunk
+importance matrix. The output head and attention weights use IQ4_NL.
+
+| Gate/up and down in layers 0–19 | Layers 20–23 | tg128 | Served T=0 / 0.7 | Prefill / decode PPL |
+|---|---|---:|---:|---:|
+| Q3_K / IQ4_NL | Q8_0 | 180.04 ± 0.53 | 171.5 / 170.8 | 2.9553 / 4.0754 |
+| Q2_K / reference Q2_0 | IQ4_NL | 207.19 ± 0.40 | 200.2 / 199.5 | 3.3624 / — |
+| Q2_K / calibrated Q2_0 | IQ4_NL | 206.56 ± 0.55 | 202.0 / 201.0 | 3.0516 / 4.2080 |
+
+The Q3 row used CPU sampling. The final Q2 row additionally enabled
+`IK_CTRL_APPLY8=1` on rank-64 F16 controllers. The eight-lane implementation
+passed 17 CUDA/CPU cases and preserved all three 200-token greedy generations
+on the reference Q2 weights. Its paired short-context tests gave 207.94 and
+207.85 tok/s enabled against 206.64 and 205.45 disabled. On the final model,
+five-repeat tg128 was 191.81 ± 0.35 at depth 1024 and 176.58 ± 4.77 at depth
+3072. Both two-bit models exceed the established quality tolerance.
+
+The original Q2_0 encoder ignored importance weights and used the largest
+absolute weight as the scale. Commit `704a7da` fits the scale and four
+existing levels against the importance weights. It uses the same 9.25 GiB
+layout and decode kernels. To reproduce the final model from the repo root,
+set `SOURCE` to the publisher Q8_0 GGUF, `MATRIX` to its `imatrix.gguf`,
+and `OUT` to a new file:
+
+```bash
+build/bin/llama-quantize --allow-requantize --imatrix "$MATRIX" \
+  --output-tensor-type iq4_nl --token-embedding-type q8_0 \
+  --tensor-type 'attn_(q|k|v|output|gate|rel|sink_proj|k_conv_proj|v_conv_proj)\.weight=iq4_nl' \
+  --tensor-type 'blk\.(1[0-9]|[0-9])\.ffn_gate_up_exps=q2_k' \
+  --tensor-type 'blk\.(1[0-9]|[0-9])\.ffn_down_exps=q2_0' \
+  --tensor-type 'blk\.2[0-3]\.ffn_.*_exps=iq4_nl' "$SOURCE" "$OUT" iq4_nl 12
+```
+
+With the final kernel and identical sampling settings, the previous dense IQ4
+model measured 170.6 / 170.3 tok/s. A fresh launch of the calibrated Q2
+candidate repeated at 201.2 / 200.2 tok/s. The GGUF SHA-256 was
+`bc7f51192fbc35eeb5eaec6a342028b8588691023a2399d97c29eb633a049d07`.
+OpenCode 1.2.5 read a local file and returned its exact marker with both
+models. At a 2,880-token initial prompt, tool-call and follow-up generation
+rates were 144.8 / 143.1 tok/s with IQ4 and 165.7 / 163.8 with calibrated
+Q2. The short benchmark prompt and the OpenCode system prompt exercise
+different cache depths.
