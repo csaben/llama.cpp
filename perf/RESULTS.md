@@ -247,3 +247,72 @@ Final tg128 at depths 0 / 512 / 1024: **155.40 / 150.08 / 146.95 tok/s**.
 Final served means: **149.5 tok/s at T=0, 149.1 at T=0.7** (three 700-token
 generations per temperature). Reaching 200 tok/s at depth zero still requires
 cutting about 1.44 ms from the 6.44 ms decode step.
+
+## Single-GPU pass-message batching and segmented projections (2026-11-21)
+
+All runs used one RTX 3090, all three core passes, Q8_0 K/V, F16 controllers
+and eight routed experts. The server numbers are mean decode rates for three
+700-token generations per temperature, one slot and a 16K context. See
+`INKLING.md` for the commands. Neither of the following optimizations needs a
+change to the checkpoint's weights.
+
+- `81f37bf` batches the 12 independent sets of message queries against the
+  previous pass's state bank. The trace drops from 654 to 632 launches per token.
+- `2865762` (IQ4_NL) and `866e39f` (Q6_K) compute only the projection column
+  consumed by each attention row. The exact version accumulates four partials
+  in registers in the order used by GA10x MMVQ. The faster trial that changed
+  the addition order reached 174.6 tok/s but changed greedy generations.
+
+| Dense weights | tg128 | Served T=0 / 0.7 | Prefill PPL, 8 × 2048 | Decode PPL, 2 × 1024 |
+|---|---:|---:|---:|---:|
+| Prior Q6_K checkpoint | 155.4 | 149.5 / 149.1 | 2.9404 | 4.0640 |
+| Q6_K, batched messages + segmented projection | 159.0 | 152.4 / 151.7 | 2.9404 | 4.0640 |
+| IQ4_NL, batched messages + segmented projection | 173.7 | 165.9 / 165.5 | 2.9458 | 4.0990 |
+| IQ4_NL projections with Q6_K head | 165.5 | — | 2.9429 | 4.0781 |
+
+The Q6 kernels reproduced all three 200-token greedy outputs from the
+155.4 checkpoint. The IQ4 kernels reproduced all three from the same IQ4 model
+with both optimizations off. Both paths reproduced their respective 12-token
+reference continuations after the 827-token batched prefill. The backend suite
+passed 23 attention/router cases. The CPU backend skipped two additional
+Q6_K × Q8_1 projected-attention cases because it lacks that input combination.
+
+Changing dense quantization changes the model. Against Q6_K, the IQ4 model's
+first differing tokens on the three greedy prompts were 40, 50 and 30
+(one-based). The reference top-two logprob margins were 0.431, 0.528 and
+0.211. Each exceeds the branch's 0.1 near-tie tolerance. The mixed-head trial
+also exceeded the tolerance. Keep Q6_K for the checkpoint-quality path.
+The IQ4 candidate preserves the source's expert mixture, including Q8_0
+experts in layers 20–23. Its recipe is `perf/quantize-inkling-dense.sh`.
+
+Other trials on the IQ4 model included 16/32-lane expert matvecs, four routed
+row tile sizes (1/2/4/8), a 128-thread router, fused router/convolution and
+skipping fully masked cache tiles. None beat the retained configuration across
+the paired tests. The trace of the first segmented kernel still spent 2.33 ms
+per token on expert matvecs, 0.55 ms on attention and 0.35 ms on routing.
+
+### Specialized residual mixing and final checks (`a85419e`)
+
+`IK_MIX_SPECIALIZE=1` compiles the one-token residual mix with a fixed
+state count for one through five states. Validation also exposed an existing
+indexing bug in which CUDA treated the ninth state as the normalization
+weight. All 12 affected cases failed with specialization disabled before the
+fix. The corrected CUDA code counts states separately from the normalization
+weight and declines graphs beyond its nine-state capacity. The CPU supports
+the ten-state fallback case.
+
+| Dense weights | tg128, depth 0 | Depth 512 | Depth 1024 | Served T=0 / 0.7 | Decode PPL |
+|---|---:|---:|---:|---:|---:|
+| Q6_K | 159.26 ± 0.17 | 153.91 ± 0.19 | 150.32 ± 0.26 | 152.4 / 152.1 | 4.0640 |
+| IQ4_NL | 174.19 ± 0.25 | 167.69 ± 0.42 | 163.91 ± 0.15 | 167.6 / 167.1 | 4.0990 |
+
+Each final row used five `llama-bench` repetitions. The Q6 row matched all
+three 200-token greedy outputs of the 155.4 checkpoint, and the IQ4 row
+matched its own three pre-optimization baselines. Both also matched their
+respective 827-token prefill probes for all 12 generated tokens. The expanded
+CUDA/CPU suite passed 93 supported residual-mix, router and attention cases,
+including whole-graph IQ4 projection tests. Two Q6 projected-attention
+cases lack CPU support. The historical prefill command reproduced 2.9404
+(Q6_K) and 2.9458 (IQ4_NL). With explicit `-ub 2048`, eight-chunk prefill PPL was
+2.9384 (Q6_K) and 2.9479 (IQ4_NL). The faster experimental row requires
+a further 0.74 ms reduction per token to reach 200 tok/s at depth zero.

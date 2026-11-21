@@ -1,9 +1,10 @@
 # Inkling 2 Mini on an RTX 3090
 
 This branch (`inkling-3090`) is llama.cpp plus custom fused CUDA operators for Inkling 2 Mini's looped
-mixture-of-experts architecture (`inkling2_loop`). On one RTX 3090 the phase-3 Q6_K-dense variant
-decodes at **155.4 tok/s** at depth zero and **147.0 tok/s** after a 1,024-token prefix
-(tg128, Q8_0 KV, F16 controllers). The original stock tg128 benchmark was 62 tok/s.
+mixture-of-experts architecture (`inkling2_loop`). On one RTX 3090 the Q6_K checkpoint reaches **159.3 tok/s** on tg128 and **152.4 tok/s**
+in 700-token server generations at temperature zero. An experimental IQ4_NL dense model reaches
+**174.2 tok/s** on tg128 and **167.6 tok/s** served, with a measurable change in greedy output.
+Both use all three core passes, Q8_0 KV and F16 controllers.
 
 Write-up: *Looping on a 3090* (link in the repo description).
 Lab notebook with every step, number and profile: [`perf/RESULTS.md`](perf/RESULTS.md).
@@ -21,6 +22,8 @@ Lab notebook with every step, number and profile: [`perf/RESULTS.md`](perf/RESUL
 | phase 2: single-launch attention + router, Q8_1 activations | 140.7 | 2.9412 | `checkpoint-140tok` |
 | + Q6_K dense projections/head, F16 loop controllers | 149.3 | 2.9407 | `variant-q6k-dense` |
 | phase 3 variant, Q8_0 KV, consistent prefill/decode basis | 155.4 | 2.9404 | `da0965f` |
+| Q6_K with batched messages, segmented projection and specialized residual mixing | 159.3 | 2.9404 | `a85419e` |
+| Same kernels, experimental IQ4_NL dense projections and head | 174.2 | 2.9458 | `a85419e` |
 
 The unfused reference (`LLAMA_INKLING_FUSED=0 LLAMA_INKLING_FUSED_QKV=0`) gives PPL 2.9401. The standard
 error is 0.064.
@@ -51,6 +54,21 @@ python3 perf/bench.py http://127.0.0.1:8031          # served tok/s (~128 exact,
 
 The fast variant: build its GGUF with the `llama-quantize` command in `perf/RESULTS.md` ("Phase 2 variants"),
 then run with `LLAMA_INKLING_CTRL_F16=1`.
+
+To reproduce the single-GPU decode measurements from the repository root:
+
+```bash
+export GPU=1 CUDA_VISIBLE_DEVICES=1 LLAMA_INKLING_CTRL_F16=1 IK_BATCH_MESSAGES=1
+export IK_SEGMENTED_Q6=1 IK_SEGMENTED_IQ4=1 IK_MIX_SPECIALIZE=1
+export MODEL="$HOME/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL-dense-q6k.gguf"
+build/bin/llama-bench -m "$MODEL" -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 0 -n 128 -d 0,512,1024 -r 5
+python3 perf/server_run.py "$(mktemp -d)"
+```
+
+For the experimental model, use the sibling file `Inkling-2-Mini-IQ4_NL-dense-iq4nl.gguf`.
+To regenerate it, run `bash perf/quantize-inkling-dense.sh ORIGINAL.gguf NEW.gguf` with the published
+IQ4_NL GGUF as input. Each segmented kernel activates only for its matching weights on GA10x.
+See the single-GPU results in `perf/RESULTS.md` for the measured quality differences.
 
 Needs about 19 GB of VRAM at 32K context. Text only: vision and `tools` requests are broken upstream for this
 architecture at this llama.cpp version.
