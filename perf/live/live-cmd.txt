@@ -1,0 +1,1 @@
+/home/arelius/inkling-live-bin/llama-server -m /home/arelius/models/inkling-2-mini/Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 65536 -np 1 --backend-sampling --host 127.0.0.1 --port 8031 --alias inkling-mini 
