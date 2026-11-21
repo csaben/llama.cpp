@@ -582,6 +582,40 @@ static __global__ void situ_kernel(const float * gate, const float * up, float *
     }
 }
 
+// one warp per 32 consecutive outputs, written as a Q8_1 block
+template <bool is_situ>
+static __global__ void situ_q8_1_kernel(const float * gate, const float * up, block_q8_1 * dst, const int64_t n_blocks, const int64_t n, const int64_t o0, const int64_t o1, const float beta, const float lb) {
+    const int64_t b = (int64_t) blockIdx.x*(blockDim.x/WARP_SIZE) + threadIdx.x/WARP_SIZE;
+    const int lane = threadIdx.x % WARP_SIZE;
+    if (b >= n_blocks) {
+        return;
+    }
+    const int64_t i  = b*QK8_1 + lane; // output index
+    const int64_t j0 = (i / n) * o0 + (i % n);
+    const int64_t j1 = o0 == o1 ? j0 : (i / n) * o1 + (i % n);
+    const float g = gate[j0];
+    float       u = up[j1];
+    const float sig = 1.0f / (1.0f + expf(-g));
+    float v;
+    if constexpr (is_situ) {
+        const float act = tanhf(g * (1.0f/beta)) * beta * sig;
+        if (lb > 0.0f) {
+            u = tanhf(u * (1.0f/lb)) * lb;
+        }
+        v = act * u;
+    } else {
+        v = u * sig;
+    }
+    const float amax = warp_reduce_max(fabsf(v));
+    const float d    = amax/127.0f;
+    const int   q    = amax == 0.0f ? 0 : (int) roundf(v/d);
+    const int   sum  = warp_reduce_sum(q);
+    dst[b].qs[lane] = (int8_t) q;
+    if (lane == 0) {
+        dst[b].ds = make_half2(d, d*sum);
+    }
+}
+
 template <bool is_situ>
 static void ggml_cuda_op_situ_impl(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
@@ -599,7 +633,7 @@ static void ggml_cuda_op_situ_impl(ggml_backend_cuda_context & ctx, ggml_tensor 
     GGML_ASSERT(ggml_is_contiguous(dst));
 
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
-    GGML_ASSERT(src0->type == dst->type);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_Q8_1);
     GGML_ASSERT(dst->ne[0] == nc);
     GGML_ASSERT(ggml_nrows(dst) == ggml_nrows(src0));
 
@@ -623,6 +657,13 @@ static void ggml_cuda_op_situ_impl(ggml_backend_cuda_context & ctx, ggml_tensor 
     }
 
     const int64_t k = ggml_nelements(dst);
+    if (dst->type == GGML_TYPE_Q8_1) {
+        GGML_ASSERT(nc % QK8_1 == 0);
+        const int64_t n_blocks = k/QK8_1;
+        const int64_t num_blocks = (n_blocks*WARP_SIZE + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
+        situ_q8_1_kernel<is_situ><<<num_blocks, CUDA_GLU_BLOCK_SIZE, 0, stream>>>(src0_p, src1_p, (block_q8_1 *) dst_d, n_blocks, nc, src0_o / sizeof(float), src1_o / sizeof(float), beta, lb);
+        return;
+    }
     const int64_t num_blocks = (k + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
     situ_kernel<is_situ><<<num_blocks, CUDA_GLU_BLOCK_SIZE, 0, stream>>>(src0_p, src1_p, (float *) dst_d, k, nc, src0_o / sizeof(float), src1_o / sizeof(float), beta, lb);
 }

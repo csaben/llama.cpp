@@ -72,11 +72,18 @@ void llama_model_inkling2_loop::load_arch_tensors(llama_model_loader & ml) {
             l.ctrl_forget[c] = create_tensor(tn(forget[c], "weight", il), {rank, n_embd}, flags);
         }
 
+        // LLAMA_INKLING_CTRL_F16=1: the controller weights are kept as F16 (half the bytes; a quality-gated variant)
+        static const bool ctrl_f16 = [] {
+            const char * env = getenv("LLAMA_INKLING_CTRL_F16");
+            return env != nullptr && atoi(env) != 0;
+        }();
+        const ggml_type ctrl_type = ctrl_f16 ? GGML_TYPE_F16 : GGML_TYPE_F32;
+
         if (stack) {
             ggml_context * ctx = fused_context();
-            l.ctrl_down_qkv   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 2*n_embd, rank, 3);
-            l.ctrl_gain_qkv   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n_embd, 3);
-            l.ctrl_forget_qkv = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n_embd, 3);
+            l.ctrl_down_qkv   = ggml_new_tensor_3d(ctx, ctrl_type, 2*n_embd, rank, 3);
+            l.ctrl_gain_qkv   = ggml_new_tensor_3d(ctx, ctrl_type, rank, n_embd, 3);
+            l.ctrl_forget_qkv = ggml_new_tensor_3d(ctx, ctrl_type, rank, n_embd, 3);
             ggml_format_name(l.ctrl_down_qkv,   "blk.%u.loop_qkv_ctrl_down.weight",   il);
             ggml_format_name(l.ctrl_gain_qkv,   "blk.%u.loop_qkv_ctrl_gain.weight",   il);
             ggml_format_name(l.ctrl_forget_qkv, "blk.%u.loop_qkv_ctrl_forget.weight", il);
@@ -100,6 +107,25 @@ void llama_model_inkling2_loop::load_arch_tensors(llama_model_loader & ml) {
                     tensors_by_name.emplace_back(name, st.orig[c]);
                 }
                 fused_pending.push_back(std::move(f));
+            }
+
+            if (ctrl_f16) {
+                // the FFN controller too: F16 copies of its three tensors
+                ggml_tensor ** targets[3] = { &l.ctrl_down[LOOP_CTRL_FFN], &l.ctrl_gain[LOOP_CTRL_FFN], &l.ctrl_forget[LOOP_CTRL_FFN] };
+                for (ggml_tensor ** tp : targets) {
+                    ggml_tensor * src = *tp;
+                    if (src == nullptr || src->type != GGML_TYPE_F32) {
+                        continue;
+                    }
+                    ggml_tensor * t16 = ggml_new_tensor(ctx, GGML_TYPE_F16, GGML_MAX_DIMS, src->ne);
+                    ggml_format_name(t16, "%s.f16", ggml_get_name(src));
+                    fused_tensor f;
+                    f.t   = t16;
+                    f.ref = layers[il].wo;
+                    f.pieces.emplace_back(ggml_get_name(src), 0);
+                    fused_pending.push_back(std::move(f));
+                    *tp = t16;
+                }
             }
         }
     }

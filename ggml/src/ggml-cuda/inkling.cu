@@ -861,8 +861,17 @@ void ggml_cuda_op_rel_bias(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 // ---------------------------------------------------------------------------------------------------------------------
 // loop_ctrl_down: d[k, t, b] = sum_i w[i, k, b]*rmsnorm(a)[i, t, b] + w[n + i, k, b]*rmsnorm(msg)[i, t, b], one block per (k, t, b)
 
-template <int block_size>
-static __global__ void loop_ctrl_down_f32(const float * __restrict__ w, const float * __restrict__ a, const float * __restrict__ b,
+template <typename T>
+static __device__ __forceinline__ float ik_w(const T * w, const int i) {
+    if constexpr (std::is_same<T, half>::value) {
+        return __half2float(w[i]);
+    } else {
+        return w[i];
+    }
+}
+
+template <int block_size, typename wt>
+static __global__ void loop_ctrl_down_f32(const wt * __restrict__ w, const float * __restrict__ a, const float * __restrict__ b,
         float * __restrict__ dst, const int n, const int rank, const int64_t a_nb1, const int64_t a_nb2, const int64_t b_nb1, const int64_t b_nb2,
         const float eps) {
     constexpr int n_warps = block_size/WARP_SIZE;
@@ -878,17 +887,30 @@ static __global__ void loop_ctrl_down_f32(const float * __restrict__ w, const fl
 
     const float * av = (const float *) ((const char *) a + t*a_nb1 + ib*a_nb2);
     const float * bv = (const float *) ((const char *) b + t*b_nb1 + ib*b_nb2);
-    const float * wk = w + ((int64_t) ib*rank + k)*2*n;
+    const wt * wk = w + ((int64_t) ib*rank + k)*2*n;
 
     // the sums of squares and the raw dot products in one pass: w^T rmsnorm(a) = rsqrt(mean(a^2) + eps) * w^T a
+    // (the loads of the thread's elements are issued together)
+    constexpr int PER = 10; // elements per thread per round (n <= PER*block_size for one round)
     float sa = 0.0f, sb = 0.0f, da = 0.0f, db = 0.0f;
-    for (int i = threadIdx.x; i < n; i += block_size) {
-        const float x = av[i];
-        const float y = bv[i];
-        sa += x*x;
-        sb += y*y;
-        da += wk[i]*x;
-        db += wk[n + i]*y;
+    for (int i0 = 0; i0 < n; i0 += PER*block_size) {
+        float x[PER], y[PER], wa[PER], wb[PER];
+#pragma unroll
+        for (int j = 0; j < PER; ++j) {
+            const int i = i0 + threadIdx.x + j*block_size;
+            const bool ok = i < n;
+            x[j]  = ok ? av[i] : 0.0f;
+            y[j]  = ok ? bv[i] : 0.0f;
+            wa[j] = ok ? ik_w(wk, i) : 0.0f;
+            wb[j] = ok ? ik_w(wk, n + i) : 0.0f;
+        }
+#pragma unroll
+        for (int j = 0; j < PER; ++j) {
+            sa += x[j]*x[j];
+            sb += y[j]*y[j];
+            da += wa[j]*x[j];
+            db += wb[j]*y[j];
+        }
     }
     sa = warp_reduce_sum(sa);
     sb = warp_reduce_sum(sb);
@@ -931,15 +953,21 @@ void ggml_cuda_op_loop_ctrl_down(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int B     = w->ne[2];
 
     const dim3 grid(rank, n_tok, B);
-    loop_ctrl_down_f32<256><<<grid, 256, 0, ctx.stream()>>>((const float *) w->data, (const float *) a->data, (const float *) b->data,
-            (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+    if (w->type == GGML_TYPE_F16) {
+        loop_ctrl_down_f32<256, half><<<grid, 256, 0, ctx.stream()>>>((const half *) w->data, (const float *) a->data, (const float *) b->data,
+                (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+    } else {
+        loop_ctrl_down_f32<256, float><<<grid, 256, 0, ctx.stream()>>>((const float *) w->data, (const float *) a->data, (const float *) b->data,
+                (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // loop_ctrl_apply: y = cur - tanh(wf^T d)*cur + tanh(wg^T d)*msg, one warp per output element
 
+template <typename wt>
 static __global__ void loop_ctrl_apply_f32(const float * __restrict__ cur, const float * __restrict__ msg, const float * __restrict__ d,
-        const float * __restrict__ wg, const float * __restrict__ wf, float * __restrict__ dst,
+        const wt * __restrict__ wg, const wt * __restrict__ wf, float * __restrict__ dst,
         const int n, const int n_tok, const int rank, const int64_t cur_nb1, const int64_t cur_nb2, const int64_t msg_nb1, const int64_t msg_nb2) {
     const int64_t gw   = (int64_t) blockIdx.x*(blockDim.x/WARP_SIZE) + threadIdx.x/WARP_SIZE;
     const int     lane = threadIdx.x % WARP_SIZE;
@@ -955,14 +983,14 @@ static __global__ void loop_ctrl_apply_f32(const float * __restrict__ cur, const
     }
 
     const float * dv = d + ((int64_t) ib*n_tok + t)*rank;
-    const float * g  = wg + ((int64_t) ib*n + i)*rank;
-    const float * f  = wf + ((int64_t) ib*n + i)*rank;
+    const wt    * g  = wg + ((int64_t) ib*n + i)*rank;
+    const wt    * f  = wf + ((int64_t) ib*n + i)*rank;
 
     float sg = 0.0f, sf = 0.0f;
     for (int k = lane; k < rank; k += WARP_SIZE) {
         const float dk = dv[k];
-        sg += g[k]*dk;
-        sf += f[k]*dk;
+        sg += ik_w(g, k)*dk;
+        sf += ik_w(f, k)*dk;
     }
     sg = warp_reduce_sum(sg);
     sf = warp_reduce_sum(sf);
@@ -1040,9 +1068,15 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
     const int64_t nblocks = ((int64_t) n*n_tok*WARP_SIZE + block_size - 1)/block_size;
     const dim3 grid(nblocks, B, 1);
 
-    loop_ctrl_apply_f32<<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
-            (const float *) d->data, (const float *) wg->data, (const float *) wf->data, y,
-            n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2]);
+    if (wg->type == GGML_TYPE_F16) {
+        loop_ctrl_apply_f32<half><<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
+                (const float *) d->data, (const half *) wg->data, (const half *) wf->data, y,
+                n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2]);
+    } else {
+        loop_ctrl_apply_f32<float><<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
+                (const float *) d->data, (const float *) wg->data, (const float *) wf->data, y,
+                n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2]);
+    }
 
     if (nw) {
         float eps;
@@ -2078,11 +2112,12 @@ void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_ten
 struct ik_router_args {
     const float * query;              // nullptr: no mix
     ik_state_ptrs st; int n_states;
-    const float * norm_w;
+    const float * norm_w;             // [n_embd], followed by the selection bias [n_expert]
     const float * gate_inp;           // [n_embd, n_expert]
-    const float * probs_b;            // nullptr: none
+    const float * probs_b;            // the selection bias
     int32_t     * route;              // [2*n_used]: ids, then the weights as float bits
     float       * dst;                // [n_embd]
+    block_q8_1  * xq;                 // nullptr or the quantized result
     float       * logits;             // [n_expert] scratch
     int         * counter;
     int n_embd, n_expert, n_used;
@@ -2090,12 +2125,14 @@ struct ik_router_args {
     int dbg_skip; // timing experiments (IK_ROUTER_SKIP): 1 no arrival/selection, 2 no router rows, 4 no mix
 };
 
-static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(const ik_router_args args) {
+template <int W> // warps (experts) per block
+static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(const ik_router_args args) {
+    constexpr int BLOCK = W*WARP_SIZE;
     __shared__ float s_x[IK_ROUTER_MAX_EMBD];
-    __shared__ float s_red[IK_ROUTER_WARPS][2*IK_MAX_STATES];
+    __shared__ float s_red[W][2*IK_MAX_STATES];
     __shared__ float s_rms[IK_MAX_STATES];
     __shared__ float s_p[IK_MAX_STATES];
-    __shared__ float s_r[IK_ROUTER_WARPS];
+    __shared__ float s_r[W];
     __shared__ int   s_last;
 
     const int tid  = threadIdx.x;
@@ -2105,20 +2142,20 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
     const int n_embd4  = n_embd/4;
     const int n_states = args.n_states;
 
-    const int e = blockIdx.x*IK_ROUTER_WARPS + warp;
+    const int e = blockIdx.x*W + warp;
     constexpr int NV = IK_ROUTER_MAX_EMBD/4/WARP_SIZE; // float4 per lane of the router row
 
     if (args.dbg_skip & 4) {
         if (tid < WARP_SIZE) { s_rms[0] = 1.0f; s_p[0] = 1.0f; }
         __syncthreads();
-        for (int k = tid; k < n_embd4; k += IK_ROUTER_BLOCK) {
+        for (int k = tid; k < n_embd4; k += BLOCK) {
             ((float4 *) s_x)[k] = ((const float4 *) args.st.p[0])[k];
         }
         __syncthreads();
     } else {
     // --- the mix, pass 1: the sums of squares and the query dots of every state (the states are re-read in pass 2,
     //     from L2, instead of being kept in registers: that keeps the router row loads above in flight)
-    constexpr int KV = (IK_ROUTER_MAX_EMBD/4 + IK_ROUTER_BLOCK - 1)/IK_ROUTER_BLOCK; // float4 per thread
+    constexpr int KV = (IK_ROUTER_MAX_EMBD/4 + BLOCK - 1)/BLOCK; // float4 per thread
     float acc[2*IK_MAX_STATES];
 #pragma unroll
     for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
@@ -2127,7 +2164,7 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
     if (args.query) {
 #pragma unroll
         for (int j = 0; j < KV; ++j) {
-            const int k = tid + j*IK_ROUTER_BLOCK;
+            const int k = tid + j*BLOCK;
             if (k < n_embd4) {
                 const float4 q = ((const float4 *) args.query)[k];
 #pragma unroll
@@ -2161,7 +2198,7 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
             float ss = 0.0f, dt = 0.0f;
             if (lane < n_states) {
 #pragma unroll
-                for (int w = 0; w < IK_ROUTER_WARPS; ++w) {
+                for (int w = 0; w < W; ++w) {
                     ss += s_red[w][2*lane + 0];
                     dt += s_red[w][2*lane + 1];
                 }
@@ -2187,7 +2224,7 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
     float ss = 0.0f;
 #pragma unroll
     for (int j = 0; j < KV; ++j) {
-        const int k = tid + j*IK_ROUTER_BLOCK;
+        const int k = tid + j*BLOCK;
         y[j] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (k < n_embd4) {
 #pragma unroll
@@ -2203,18 +2240,23 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
             ss += y[j].x*y[j].x + y[j].y*y[j].y + y[j].z*y[j].z + y[j].w*y[j].w;
         }
     }
-    ss = ik_block_sum<IK_ROUTER_BLOCK>(ss, s_r);
+    ss = ik_block_sum<BLOCK>(ss, s_r);
     const float factor = rsqrtf(ss/n_embd + args.norm_eps);
 #pragma unroll
     for (int j = 0; j < KV; ++j) {
-        const int k = tid + j*IK_ROUTER_BLOCK;
+        const int k = tid + j*BLOCK;
+        float4 o = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (k < n_embd4) {
             const float4 w = ((const float4 *) args.norm_w)[k];
-            const float4 o = make_float4(factor*y[j].x*w.x, factor*y[j].y*w.y, factor*y[j].z*w.z, factor*y[j].w*w.w);
+            o = make_float4(factor*y[j].x*w.x, factor*y[j].y*w.y, factor*y[j].z*w.z, factor*y[j].w*w.w);
             ((float4 *) s_x)[k] = o;
             if (blockIdx.x == 0) {
                 ((float4 *) args.dst)[k] = o;
             }
+        }
+        if (args.xq && blockIdx.x == 0) {
+            // 8 consecutive lanes hold one Q8_1 block (all lanes take part in the shuffles)
+            ik_store_q8_1_vec4(o, args.xq, k, k < n_embd4);
         }
     }
     __syncthreads();
@@ -2272,7 +2314,7 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
             sel[i]  = -INFINITY;
             if (ex < args.n_expert) {
                 prob[i] = 1.0f/(1.0f + expf(-args.logits[ex]));
-                sel[i]  = prob[i] + (args.probs_b ? args.probs_b[ex] : 0.0f);
+                sel[i]  = prob[i] + args.probs_b[ex];
             }
         }
         float wsum = 0.0f;
@@ -2333,10 +2375,10 @@ static __global__ void __launch_bounds__(IK_ROUTER_BLOCK) inkling_router_kernel(
 void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
-    const ggml_tensor * norm_w   = dst->src[1 + n_states];
+    const ggml_tensor * consts   = dst->src[1 + n_states];
     const ggml_tensor * gate_inp = dst->src[2 + n_states];
-    const ggml_tensor * probs_b  = dst->src[3 + n_states];
-    ggml_tensor       * route    = dst->src[4 + n_states];
+    ggml_tensor       * route    = dst->src[3 + n_states];
+    ggml_tensor       * xq       = dst->src[4 + n_states];
 
     ik_router_args a;
     a.query    = query ? (const float *) query->data : nullptr;
@@ -2346,11 +2388,12 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
         a.st.nb1[i] = 0;
         GGML_ASSERT(((uintptr_t) a.st.p[i]) % 16 == 0);
     }
-    a.norm_w   = (const float *) norm_w->data;
+    a.norm_w   = (const float *) consts->data;
     a.gate_inp = (const float *) gate_inp->data;
-    a.probs_b  = probs_b ? (const float *) probs_b->data : nullptr;
+    a.probs_b  = (const float *) consts->data + dst->ne[0];
     a.route    = (int32_t *) route->data;
     a.dst      = (float *) dst->data;
+    a.xq       = xq ? (block_q8_1 *) xq->data : nullptr;
     a.n_embd   = dst->ne[0];
     a.n_expert = gate_inp->ne[1];
     a.n_used   = ggml_get_op_params_i32(dst, 3);
@@ -2359,7 +2402,7 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     a.norm_eps = ggml_get_op_params_f32(dst, 2);
     a.w_scale  = ggml_get_op_params_f32(dst, 4);
     a.w_eps    = ggml_get_op_params_f32(dst, 5);
-    GGML_ASSERT(a.n_embd % 4 == 0 && a.n_embd <= IK_ROUTER_MAX_EMBD && a.n_expert % IK_ROUTER_WARPS == 0 && a.n_expert <= IK_ROUTER_MAX_EXPERT);
+    GGML_ASSERT(a.n_embd % 4 == 0 && a.n_embd <= IK_ROUTER_MAX_EMBD && a.n_expert % 8 == 0 && a.n_expert <= IK_ROUTER_MAX_EXPERT);
     GGML_ASSERT(a.n_used <= 8 && n_states <= IK_MAX_STATES);
     GGML_ASSERT(((uintptr_t) a.query) % 16 == 0 && ((uintptr_t) a.norm_w) % 16 == 0 && ((uintptr_t) a.gate_inp) % 16 == 0 && ((uintptr_t) a.dst) % 16 == 0);
 
@@ -2369,5 +2412,10 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     static const int dbg_skip = getenv("IK_ROUTER_SKIP") ? atoi(getenv("IK_ROUTER_SKIP")) : 0;
     a.dbg_skip = dbg_skip;
 
-    inkling_router_kernel<<<a.n_expert/IK_ROUTER_WARPS, IK_ROUTER_BLOCK, 0, ctx.stream()>>>(a);
+    static const int W = getenv("IK_ROUTER_WARPS") ? atoi(getenv("IK_ROUTER_WARPS")) : 8;
+    switch (W) {
+        case 2:  inkling_router_kernel<2><<<a.n_expert/2, 2*WARP_SIZE, 0, ctx.stream()>>>(a); break;
+        case 8:  inkling_router_kernel<8><<<a.n_expert/8, 8*WARP_SIZE, 0, ctx.stream()>>>(a); break;
+        default: inkling_router_kernel<4><<<a.n_expert/4, 4*WARP_SIZE, 0, ctx.stream()>>>(a); break;
+    }
 }

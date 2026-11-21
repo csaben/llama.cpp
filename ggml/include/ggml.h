@@ -1227,6 +1227,15 @@ extern "C" {
             float                 beta,
             float                 linear_beta);
 
+    // situ with the output type F32 or Q8_1 (the quantized activation of a following mul_mat; ne0 % 32 == 0)
+    GGML_API struct ggml_tensor * ggml_situ_split_out(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            float                 beta,
+            float                 linear_beta,
+            enum ggml_type        out_type);
+
     // siglu(gate, up) = sigmoid(gate) * up
     GGML_API struct ggml_tensor * ggml_siglu_split(
             struct ggml_context * ctx,
@@ -2539,18 +2548,20 @@ extern "C" {
             float                 scale);
 
     // the FFN input of inkling2 for one token with its routing: the attention-residual mix (query, states; query == NULL:
-    // no mix) RMS-normalized by norm_w -> result [n_embd, 1] F32; the router logits gate_inp^T x (gate_inp [n_embd, n_expert]
-    // F32), sigmoid, selection of the n_used largest (plus probs_b [n_expert] when given), weights normalized by their sum
-    // (+ w_eps) and scaled by w_scale; route [2*n_used] I32 receives the expert ids (first n_used) and the weights (float bits)
+    // no mix) RMS-normalized by the norm weight -> result [n_embd, 1] F32; the router logits gate_inp^T x (gate_inp
+    // [n_embd, n_expert] F32), sigmoid, selection of the n_used largest (plus the selection bias), weights normalized by
+    // their sum (+ w_eps) and scaled by w_scale; route [2*n_used] I32 receives the expert ids (first n_used) and the weights (float bits)
+    //   consts [n_embd + n_expert] F32: the norm weight followed by the selection bias (zeros when the model has none)
+    //   xq (optional) [n_embd] Q8_1: receives the quantized result (the activation of the expert matmuls)
     GGML_API struct ggml_tensor * ggml_inkling_router(
             struct ggml_context * ctx,
             struct ggml_tensor  * query,
             struct ggml_tensor ** states,
             int                   n_states,
-            struct ggml_tensor  * norm_w,
+            struct ggml_tensor  * consts,
             struct ggml_tensor  * gate_inp,
-            struct ggml_tensor  * probs_b,
             struct ggml_tensor  * route,
+            struct ggml_tensor  * xq,
             float                 eps,
             float                 scale,
             float                 norm_eps,

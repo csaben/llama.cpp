@@ -110,6 +110,8 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
     const bool fuse_attn = fuse_weights;
     fused_attn.assign(n_layer_phys(), {});
     attn_inp_norm_qkv.assign(n_layer_phys(), nullptr);
+    attn_consts.assign(n_layer_phys(), nullptr); // filled by load_arch_tensors_post (not run by a memory-fit pass)
+    ffn_consts.assign(n_layer_phys(), nullptr);
 
     for (int i = 0; i < n_layer_phys(); ++i) {
         auto & layer = layers[i];
@@ -264,17 +266,31 @@ void llama_model_inkling2::load_fused(llama_model_loader & ml) {
 
     std::vector<uint8_t> staging;
     for (const auto & f : fused_pending) {
+        if (f.zero_fill) {
+            staging.assign(ggml_nbytes(f.t), 0);
+            ggml_backend_tensor_set(f.t, staging.data(), 0, staging.size());
+        }
         for (const auto & [name, offs] : f.pieces) {
             const llama_model_loader::llama_tensor_weight & w = ml.require_weight(name.c_str());
             const size_t nbytes = ggml_nbytes(w.tensor);
-            GGML_ASSERT(w.tensor->type == f.t->type && offs + nbytes <= ggml_nbytes(f.t));
 
             // read from the file: the loader unmaps the regions of the skipped tensors
             staging.resize(nbytes);
             const auto & file = ml.files.at(w.idx);
             file->seek(w.offs, SEEK_SET);
             file->read_raw(staging.data(), nbytes);
-            ggml_backend_tensor_set(f.t, staging.data(), offs, nbytes);
+            if (w.tensor->type == f.t->type) {
+                GGML_ASSERT(offs + nbytes <= ggml_nbytes(f.t));
+                ggml_backend_tensor_set(f.t, staging.data(), offs, nbytes);
+            } else {
+                // an F32 piece of an F16 assembled tensor is converted here
+                GGML_ASSERT(w.tensor->type == GGML_TYPE_F32 && f.t->type == GGML_TYPE_F16);
+                const int64_t n = ggml_nelements(w.tensor);
+                GGML_ASSERT(offs + n*sizeof(ggml_fp16_t) <= ggml_nbytes(f.t));
+                std::vector<ggml_fp16_t> h(n);
+                ggml_fp32_to_fp16_row((const float *) staging.data(), h.data(), n);
+                ggml_backend_tensor_set(f.t, h.data(), offs, n*sizeof(ggml_fp16_t));
+            }
         }
     }
 
@@ -390,7 +406,6 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
     }
 
     // the constants of the fused decode attention op
-    attn_consts.assign(n_layer_phys(), nullptr);
     if (fuse_weights) {
         for (int i = 0; i < n_layer_phys(); ++i) {
             const auto & layer = layers[i];
@@ -416,6 +431,30 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
             }
             fused_pending.push_back(std::move(f));
             attn_consts[i] = consts;
+        }
+    }
+
+    // the constants of the fused router op
+    if (fuse_weights) {
+        for (int i = 0; i < n_layer_phys(); ++i) {
+            const auto & layer = layers[i];
+            if (layer.ffn_norm == nullptr || layer.ffn_norm->type != GGML_TYPE_F32 || layer.ffn_gate_inp == nullptr ||
+                    (layer.ffn_exp_probs_b != nullptr && layer.ffn_exp_probs_b->type != GGML_TYPE_F32)) {
+                continue;
+            }
+            const int64_t n_expert = layer.ffn_gate_inp->ne[1];
+            ggml_tensor * consts = ggml_new_tensor_1d(fused_context(), GGML_TYPE_F32, n_embd + n_expert);
+            ggml_format_name(consts, "blk.%d.ffn_consts.weight", i);
+            fused_tensor f;
+            f.t   = consts;
+            f.ref = layer.wo;
+            f.pieces.emplace_back(ggml_get_name(layer.ffn_norm), 0);
+            if (layer.ffn_exp_probs_b != nullptr) {
+                f.pieces.emplace_back(ggml_get_name(layer.ffn_exp_probs_b), n_embd*sizeof(float));
+            }
+            f.zero_fill = layer.ffn_exp_probs_b == nullptr; // the bias part stays zero
+            fused_pending.push_back(std::move(f));
+            ffn_consts[i] = consts;
         }
     }
 
@@ -476,7 +515,8 @@ void llama_model_inkling2::graph::init_fused() {
 
 // Q8_1 activations go to the quantized matvec kernels of the CUDA and CPU backends
 ggml_type llama_model_inkling2::graph::act_type(int il) const {
-    if (!q8_act) {
+    // only the matvec path (few columns) consumes Q8_1 activations
+    if (!q8_act || n_tokens > 8) {
         return GGML_TYPE_F32;
     }
     ggml_backend_dev_t dev = model.dev_layer(il);
@@ -980,14 +1020,20 @@ attn_done:
         (layer.ffn_gate_up_exps->type == GGML_TYPE_IQ4_NL || layer.ffn_gate_up_exps->type == GGML_TYPE_Q8_0) &&
         layer.ffn_down_exps->type == layer.ffn_gate_up_exps->type && n_embd <= 4096;
     // the fused router op: the mix (or the controlled input), the FFN norm, the router and the top-k selection in one op
-    const bool router_fused = moe_fused && router_op && n_expert % 8 == 0 && n_expert <= 256 && n_embd % 4 == 0 &&
+    ggml_tensor * ffn_consts = static_cast<const llama_model_inkling2 &>(model).ffn_consts[ip];
+    const bool router_fused = moe_fused && router_op && ffn_consts != nullptr && n_expert % 8 == 0 && n_expert <= 256 && n_embd % 4 == 0 &&
         layer.ffn_gate_inp->type == GGML_TYPE_F32 && hparams.expert_weights_norm_eps > 0.0f;
 
     ggml_tensor * selected_experts = nullptr; // [n_expert_used, 1] I32
     ggml_tensor * weights          = nullptr; // [1, n_expert_used, 1] F32 (or the I32 bits of the fused router)
+    ggml_tensor * x_q8             = nullptr; // the FFN input as the Q8_1 activation of the expert matmul
     if (router_fused) {
         ggml_tensor * route = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 2*n_expert_used);
         cb(route, "ffn_moe_route", il);
+        if (a_type == GGML_TYPE_Q8_1) {
+            x_q8 = ggml_new_tensor_1d(ctx0, GGML_TYPE_Q8_1, n_embd);
+            cb(x_q8, "ffn_norm_q8", il);
+        }
         std::vector<ggml_tensor *> states;
         ggml_tensor * query = nullptr;
         if (messages) {
@@ -1001,9 +1047,11 @@ attn_done:
             }
             states.push_back(ggml_reshape_2d(ctx0, cur, n_embd, n_tokens));
         }
-        cur = ggml_inkling_router(ctx0, query, states.data(), (int) states.size(), layer.ffn_norm, layer.ffn_gate_inp, layer.ffn_exp_probs_b, route,
+        cur = ggml_inkling_router(ctx0, query, states.data(), (int) states.size(), ffn_consts, layer.ffn_gate_inp, route, x_q8,
                 1e-6f, 1.0f/sqrtf(n_embd), hparams.f_norm_rms_eps, n_expert_used, hparams.expert_weights_scale, hparams.expert_weights_norm_eps);
         cb(cur, "ffn_norm", il);
+        // the op writes route and x_q8 as side outputs: it must be in the graph even when its F32 result is not consumed
+        ggml_build_forward_expand(gf, cur);
         selected_experts = ggml_view_2d(ctx0, route, n_expert_used, 1, route->nb[0]*n_expert_used, 0);
         weights          = ggml_view_3d(ctx0, route, 1, n_expert_used, 1, route->nb[0], route->nb[0]*n_expert_used, route->nb[0]*n_expert_used);
     } else if (fused && !messages) {
@@ -1062,14 +1110,15 @@ attn_done:
         } else {
             ggml_tensor * gu   = layer.ffn_gate_up_exps;
             const int64_t n_ff = gu->ne[1]/2;
-            ggml_tensor * x3   = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
+            // the expert activation: the router's quantized output when there is one
+            ggml_tensor * x3   = x_q8 ? ggml_reshape_3d(ctx0, x_q8, n_embd, 1, 1) : ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
             ggml_tensor * h    = nullptr;
             if (moe_op == 3) {
-                // the merged gate|up matmul, then the activation on its two halves
+                // the merged gate|up matmul, then the activation on its two halves, quantized for the down matmul
                 ggml_tensor * gate_up = ggml_mul_mat_id(ctx0, gu, x3, selected_experts); // [2*n_ff, n_expert_used, 1]
                 ggml_tensor * gate = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
                 ggml_tensor * up   = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], n_ff*gate_up->nb[0]);
-                h = ggml_situ_split(ctx0, gate, up, hparams.situ_beta, hparams.situ_linear_beta);
+                h = ggml_situ_split_out(ctx0, gate, up, hparams.situ_beta, hparams.situ_linear_beta, n_ff % ggml_blck_size(GGML_TYPE_Q8_1) == 0 ? a_type : GGML_TYPE_F32);
             } else {
                 // the gate and up halves of the merged matrix as two matmuls with the activation: one fused matvec launch (CUDA)
                 ggml_tensor * gate_w = ggml_view_3d(ctx0, gu, n_embd, n_ff, n_expert, gu->nb[1], gu->nb[2], 0);

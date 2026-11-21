@@ -3168,6 +3168,27 @@ struct ggml_tensor * ggml_situ_split(
     return result;
 }
 
+struct ggml_tensor * ggml_situ_split_out(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        float                 beta,
+        float                 linear_beta,
+        enum ggml_type        out_type) {
+    struct ggml_tensor * result = ggml_situ_split(ctx, a, b, beta, linear_beta);
+    if (out_type != result->type) {
+        GGML_ASSERT(out_type == GGML_TYPE_Q8_1 && result->ne[0] % QK8_1 == 0);
+        // the same shape as a Q8_1 tensor (the contiguous layout of the result)
+        struct ggml_tensor * q = ggml_new_tensor(ctx, out_type, GGML_MAX_DIMS, result->ne);
+        memcpy(q->op_params, result->op_params, sizeof(q->op_params));
+        q->op     = result->op;
+        q->src[0] = result->src[0];
+        q->src[1] = result->src[1];
+        result = q;
+    }
+    return result;
+}
+
 struct ggml_tensor * ggml_siglu_split(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
@@ -5919,7 +5940,7 @@ struct ggml_tensor * ggml_loop_ctrl_down(
         struct ggml_tensor  * a,
         struct ggml_tensor  * b,
         float                 eps) {
-    GGML_ASSERT(w->type == GGML_TYPE_F32 && a->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F32);
+    GGML_ASSERT((w->type == GGML_TYPE_F32 || w->type == GGML_TYPE_F16) && a->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F32);
     GGML_ASSERT(ggml_is_contiguous(w) && w->ne[3] == 1);
     GGML_ASSERT(a->ne[3] == 1 && b->ne[3] == 1);
     GGML_ASSERT(a->nb[0] == sizeof(float) && b->nb[0] == sizeof(float));
@@ -5954,7 +5975,7 @@ struct ggml_tensor * ggml_loop_ctrl_apply_ext(
         float                 eps,
         enum ggml_type        out_type) {
     GGML_ASSERT(cur->type == GGML_TYPE_F32 && msg->type == GGML_TYPE_F32 && d->type == GGML_TYPE_F32);
-    GGML_ASSERT(w_gain->type == GGML_TYPE_F32 && w_forget->type == GGML_TYPE_F32);
+    GGML_ASSERT((w_gain->type == GGML_TYPE_F32 || w_gain->type == GGML_TYPE_F16) && w_forget->type == w_gain->type);
     GGML_ASSERT(cur->ne[3] == 1 && msg->ne[3] == 1 && d->ne[3] == 1);
     GGML_ASSERT(cur->ne[0] == msg->ne[0] && cur->ne[1] == msg->ne[1]);
     GGML_ASSERT(cur->nb[0] == sizeof(float) && msg->nb[0] == sizeof(float));
@@ -6229,17 +6250,17 @@ struct ggml_tensor * ggml_inkling_moe_sum_conv(
 
 // ggml_inkling_router
 // op_params: [0] eps, [1] scale, [2] norm_eps, [3] n_used (int), [4] w_scale, [5] w_eps, [6] n_states (int)
-// src: [0] query (optional), [1 .. n_states] states, then norm_w, gate_inp, probs_b (optional), route
+// src: [0] query (optional), [1 .. n_states] states, then consts, gate_inp, route, xq (optional)
 
 struct ggml_tensor * ggml_inkling_router(
         struct ggml_context * ctx,
         struct ggml_tensor  * query,
         struct ggml_tensor ** states,
         int                   n_states,
-        struct ggml_tensor  * norm_w,
+        struct ggml_tensor  * consts,
         struct ggml_tensor  * gate_inp,
-        struct ggml_tensor  * probs_b,
         struct ggml_tensor  * route,
+        struct ggml_tensor  * xq,
         float                 eps,
         float                 scale,
         float                 norm_eps,
@@ -6258,10 +6279,10 @@ struct ggml_tensor * ggml_inkling_router(
     for (int i = 0; i < n_states; ++i) {
         GGML_ASSERT(states[i]->type == GGML_TYPE_F32 && states[i]->ne[0] == n_embd && states[i]->ne[1] == 1 && states[i]->nb[0] == sizeof(float));
     }
-    GGML_ASSERT(norm_w->type == GGML_TYPE_F32 && ggml_is_contiguous(norm_w) && norm_w->ne[0] == n_embd && ggml_nrows(norm_w) == 1);
+    GGML_ASSERT(consts->type == GGML_TYPE_F32 && ggml_is_contiguous(consts) && ggml_nelements(consts) == n_embd + n_expert);
     GGML_ASSERT(gate_inp->type == GGML_TYPE_F32 && ggml_is_contiguous(gate_inp) && gate_inp->ne[0] == n_embd && n_expert % 8 == 0 && n_expert <= 1024);
-    GGML_ASSERT(probs_b == NULL || (probs_b->type == GGML_TYPE_F32 && ggml_is_contiguous(probs_b) && ggml_nelements(probs_b) == n_expert));
     GGML_ASSERT(route->type == GGML_TYPE_I32 && ggml_is_contiguous(route) && ggml_nelements(route) == 2*n_used);
+    GGML_ASSERT(xq == NULL || (xq->type == GGML_TYPE_Q8_1 && ggml_is_contiguous(xq) && ggml_nelements(xq) == n_embd && n_embd % QK8_1 == 0));
     GGML_ASSERT(n_used >= 1 && n_used <= 8 && n_used <= n_expert);
 
     struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
@@ -6279,10 +6300,10 @@ struct ggml_tensor * ggml_inkling_router(
     for (int i = 0; i < n_states; ++i) {
         result->src[1 + i] = states[i];
     }
-    result->src[1 + n_states] = norm_w;
+    result->src[1 + n_states] = consts;
     result->src[2 + n_states] = gate_inp;
-    result->src[3 + n_states] = probs_b;
-    result->src[4 + n_states] = route;
+    result->src[3 + n_states] = route;
+    result->src[4 + n_states] = xq;
 
     return result;
 }

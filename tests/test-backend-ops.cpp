@@ -5378,6 +5378,23 @@ struct test_inkling_moe_sum_conv : public test_case {
     }
 };
 
+// GGML_OP_GLU (SITU) with a Q8_1 output
+struct test_situ_q8 : public test_case {
+    const int64_t nc, nr;
+    std::string vars() override { return VARS_TO_STR2(nc, nr); }
+    double max_nmse_err() override { return 5e-4; }
+    test_situ_q8(int64_t nc = 1152, int64_t nr = 8) : nc(nc), nr(nr) {}
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * gu = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2*nc, nr);
+        ggml_set_name(gu, "gu");
+        ggml_tensor * gate = ggml_view_2d(ctx, gu, nc, nr, gu->nb[1], 0);
+        ggml_tensor * up   = ggml_view_2d(ctx, gu, nc, nr, gu->nb[1], nc*sizeof(float));
+        ggml_tensor * out  = ggml_situ_split_out(ctx, gate, up, 4.0f, 25.0f, GGML_TYPE_Q8_1);
+        ggml_set_name(out, "out");
+        return out;
+    }
+};
+
 // GGML_OP_INKLING_ROUTER
 struct test_inkling_router : public test_case {
     const int64_t n_embd;
@@ -5405,19 +5422,19 @@ struct test_inkling_router : public test_case {
             states[i] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
             ggml_set_name(states[i], ("s" + std::to_string(i)).c_str());
         }
-        ggml_tensor * nw = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd);
-        ggml_set_name(nw, "nw");
+        ggml_tensor * consts = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd + n_expert); // norm weight | selection bias
+        ggml_set_name(consts, "consts");
         ggml_tensor * gate_inp = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_expert);
         ggml_set_name(gate_inp, "gate_inp");
-        ggml_tensor * probs_b = nullptr;
-        if (with_bias) {
-            probs_b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_expert);
-            ggml_set_name(probs_b, "probs_b");
-        }
         ggml_tensor * route = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2*n_used);
         ggml_set_name(route, "route");
+        ggml_tensor * xq = nullptr;
+        if (with_bias) { // also the quantized output
+            xq = ggml_new_tensor_1d(ctx, GGML_TYPE_Q8_1, n_embd);
+            ggml_set_name(xq, "xq");
+        }
 
-        ggml_tensor * out = ggml_inkling_router(ctx, q, states.data(), ns, nw, gate_inp, probs_b, route, 1e-6f, 1.0f/sqrtf(n_embd), 1e-6f, n_used, 8.0f, 1e-20f);
+        ggml_tensor * out = ggml_inkling_router(ctx, q, states.data(), ns, consts, gate_inp, route, xq, 1e-6f, 1.0f/sqrtf(n_embd), 1e-6f, n_used, 8.0f, 1e-20f);
         ggml_set_name(out, "out");
 
         // the ids and the weight bits are part of the checked output (the readers run after the op)
@@ -5523,10 +5540,11 @@ struct test_loop_ctrl_down : public test_case {
         return VARS_TO_STR5(n, rank, n_tok, B, a_shared);
     }
 
-    test_loop_ctrl_down(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, int64_t B = 1, bool a_shared = false) : n(n), rank(rank), n_tok(n_tok), B(B), a_shared(a_shared) {}
+    ggml_type wtype = GGML_TYPE_F32;
+    test_loop_ctrl_down(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, int64_t B = 1, bool a_shared = false, ggml_type wtype = GGML_TYPE_F32) : n(n), rank(rank), n_tok(n_tok), B(B), a_shared(a_shared), wtype(wtype) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 2*n, rank, B);
+        ggml_tensor * w = ggml_new_tensor_3d(ctx, wtype, 2*n, rank, B);
         ggml_set_name(w, "w");
         ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, n_tok, a_shared ? 1 : B);
         ggml_set_name(a, "a");
@@ -5559,8 +5577,9 @@ struct test_loop_ctrl_apply : public test_case {
         return out_type == GGML_TYPE_Q8_1 ? 5e-4 : test_case::max_nmse_err();
     }
 
-    test_loop_ctrl_apply(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, bool with_norm = false, int64_t B = 1, bool cur_shared = false, bool norm_per_batch = false, ggml_type out_type = GGML_TYPE_F32)
-        : n(n), rank(rank), n_tok(n_tok), with_norm(with_norm), B(B), cur_shared(cur_shared), norm_per_batch(norm_per_batch), out_type(out_type) {}
+    ggml_type wtype = GGML_TYPE_F32;
+    test_loop_ctrl_apply(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, bool with_norm = false, int64_t B = 1, bool cur_shared = false, bool norm_per_batch = false, ggml_type out_type = GGML_TYPE_F32, ggml_type wtype = GGML_TYPE_F32)
+        : n(n), rank(rank), n_tok(n_tok), with_norm(with_norm), B(B), cur_shared(cur_shared), norm_per_batch(norm_per_batch), out_type(out_type), wtype(wtype) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, n_tok, cur_shared ? 1 : B);
@@ -5569,9 +5588,9 @@ struct test_loop_ctrl_apply : public test_case {
         ggml_set_name(msg, "msg");
         ggml_tensor * d = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n_tok, B);
         ggml_set_name(d, "d");
-        ggml_tensor * wg = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n, B);
+        ggml_tensor * wg = ggml_new_tensor_3d(ctx, wtype, rank, n, B);
         ggml_set_name(wg, "wg");
-        ggml_tensor * wf = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, rank, n, B);
+        ggml_tensor * wf = ggml_new_tensor_3d(ctx, wtype, rank, n, B);
         ggml_set_name(wf, "wf");
         ggml_tensor * nw = nullptr;
         if (with_norm) {
@@ -12585,6 +12604,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     test_cases.emplace_back(new test_inkling_moe_sum_conv(2304, 8));
     test_cases.emplace_back(new test_inkling_moe_sum_conv(100, 3));
+    test_cases.emplace_back(new test_situ_q8(1152, 8));
+    test_cases.emplace_back(new test_situ_q8(96, 3));
     test_cases.emplace_back(new test_inkling_router(2304, 4, 128, 8, true));
     test_cases.emplace_back(new test_inkling_router(2304, 0, 128, 8, true));
     test_cases.emplace_back(new test_inkling_router(2304, 2, 128, 8, false));
@@ -12657,6 +12678,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_loop_ctrl_apply(100, 7, 3, with_norm, 2, true, true));
     }
     test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, true, 1, false, false, GGML_TYPE_Q8_1));
+    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, true, 3, true, true, GGML_TYPE_Q8_1, GGML_TYPE_F16));
+    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 2, false, 1, false, false, GGML_TYPE_F32, GGML_TYPE_F16));
+    test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1, 3, true, GGML_TYPE_F16));
+    test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 2, 1, false, GGML_TYPE_F16));
     test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 2, true, 3, true, true, GGML_TYPE_Q8_1));
     test_cases.emplace_back(new test_loop_ctrl_apply(96, 7, 3, true, 2, true, false, GGML_TYPE_Q8_1));
     {

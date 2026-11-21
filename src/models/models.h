@@ -2530,12 +2530,15 @@ struct llama_model_inkling2 : public llama_model_base {
     std::vector<ggml_tensor *> attn_inp_norm_qkv;
     // the constants of the fused decode attention op per physical layer: q_clip | rel_clip | k_conv | v_conv | rel_bias table
     std::vector<ggml_tensor *> attn_consts;
+    // the constants of the fused router op per physical layer: ffn_norm | exp_probs_b (zeros when absent)
+    std::vector<ggml_tensor *> ffn_consts;
 
     // tensors assembled from several file tensors after loading: each piece is a file tensor copied to a byte offset
     struct fused_tensor {
         ggml_tensor * t   = nullptr;
         ggml_tensor * ref = nullptr; // a loaded tensor of the same layer, for the buffer type
         std::vector<std::pair<std::string, size_t>> pieces;
+        bool zero_fill = false; // clear the tensor before the pieces (parts without a piece stay zero)
     };
     std::vector<fused_tensor> fused_pending;
     std::vector<ggml_backend_buffer_ptr> fused_bufs;
