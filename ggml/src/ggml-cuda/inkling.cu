@@ -257,10 +257,11 @@ static __global__ void res_mix_f32(const float * __restrict__ query, const ik_st
 }
 
 // n_embd % 4 == 0 and n_embd/4 <= block_size: one float4 of every state per thread, a single pass of loads
-template <int block_size, bool q8>
+template <int block_size, bool q8, int NS = 0>
 static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
-        const int n_embd4, const int n_tok, const int n_states, const int64_t q_nb1, const float eps, const float scale,
+        const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
         const ik_res_mix_norm norm) {
+    const int n_states = NS ? NS : state_count;
     constexpr int n_warps = block_size/WARP_SIZE;
 
     const int t  = blockIdx.x;
@@ -389,22 +390,32 @@ static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const
     }
 }
 
+// The trailing normalization weight is a source but never a mixed state.
+static int ik_res_mix_state_count(const ggml_tensor * node) {
+    int count = 0;
+    while (count + 1 < GGML_MAX_SRC && node->src[1 + count]) {
+        ++count;
+    }
+    return count - (ggml_get_op_params_i32(node, 3) != 0);
+}
+
+bool ggml_cuda_supports_res_mix(const ggml_tensor * node) {
+    const int count = ik_res_mix_state_count(node);
+    return count >= 1 && count <= IK_MAX_STATES;
+}
+
 void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * query = dst->src[0];
 
     const bool has_norm = ggml_get_op_params_i32(dst, 3) != 0;
 
-    int n_states = 0;
-    ik_state_ptrs st;
-    while (n_states < IK_MAX_STATES && dst->src[1 + n_states]) {
-        st.p[n_states]   = (const float *) dst->src[1 + n_states]->data;
-        st.nb1[n_states] = dst->src[1 + n_states]->nb[1];
-        n_states++;
+    const int n_states = ik_res_mix_state_count(dst);
+    GGML_ASSERT(n_states >= 1 && n_states <= IK_MAX_STATES);
+    ik_state_ptrs st = {};
+    for (int i = 0; i < n_states; ++i) {
+        st.p[i]   = (const float *) dst->src[1 + i]->data;
+        st.nb1[i] = dst->src[1 + i]->nb[1];
     }
-    if (has_norm) {
-        n_states--;
-    }
-    GGML_ASSERT(n_states >= 1);
     const ggml_tensor * norm_w = has_norm ? dst->src[1 + n_states] : nullptr;
 
     float eps, scale, norm_eps;
@@ -446,7 +457,20 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
             } else if (n_embd4 <= 512) {
                 res_mix_f32_vec4<512, kQ8><<<grid, 512, 0, stream>>>((const float4 *) q_d, st, dst->data, n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
             } else if (n_embd4 <= 640) {
-                res_mix_f32_vec4<640, kQ8><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data, n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
+                static const bool specialize = getenv("IK_MIX_SPECIALIZE") && atoi(getenv("IK_MIX_SPECIALIZE")) != 0;
+                auto launch_mix = [&](auto state_count) {
+                    constexpr int ns = decltype(state_count)::value;
+                    res_mix_f32_vec4<640, kQ8, ns><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
+                            n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
+                };
+                switch (specialize && n_tok == 1 ? n_states : 0) {
+                    case 1: launch_mix(std::integral_constant<int, 1>{}); break;
+                    case 2: launch_mix(std::integral_constant<int, 2>{}); break;
+                    case 3: launch_mix(std::integral_constant<int, 3>{}); break;
+                    case 4: launch_mix(std::integral_constant<int, 4>{}); break;
+                    case 5: launch_mix(std::integral_constant<int, 5>{}); break;
+                    default: launch_mix(std::integral_constant<int, 0>{}); break;
+                }
             } else {
                 res_mix_f32_vec4<1024, kQ8><<<grid, 1024, 0, stream>>>((const float4 *) q_d, st, dst->data, n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
             }

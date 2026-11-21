@@ -6839,8 +6839,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             // assumes d_inner % threads == 0
             return op->src[0]->ne[1] % 128 == 0;
         }
-        case GGML_OP_L2_CLIP:
         case GGML_OP_RES_MIX:
+            return ggml_cuda_supports_res_mix(op);
+        case GGML_OP_L2_CLIP:
         case GGML_OP_SHORTCONV_RES:
         case GGML_OP_LOOP_CTRL_DOWN:
         case GGML_OP_LOOP_CTRL_APPLY:

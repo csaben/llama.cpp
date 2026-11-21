@@ -5147,8 +5147,16 @@ struct test_inkling_attn : public test_case {
 
     static constexpr int64_t hd = 128, n_rel = 16, n_conv = 4, n_cells = 3, write_cell = 1;
 
+    bool run_whole_graph() override {
+        return projection_type != GGML_TYPE_F32;
+    }
+
     std::string vars() override {
-        return VARS_TO_STR9(n_head, n_head_kv, n_kv, n_extent, has_taps, three_cols, with_pos, type_kv, out_type) + (projection_type == GGML_TYPE_F32 ? std::string() : std::string(",projection=") + ggml_type_name(projection_type));
+        std::string params = VARS_TO_STR9(n_head, n_head_kv, n_kv, n_extent, has_taps, three_cols, with_pos, type_kv, out_type);
+        if (projection_type != GGML_TYPE_F32) {
+            params += std::string(",projection=") + ggml_type_name(projection_type);
+        }
+        return params;
     }
 
     double max_nmse_err() override {
@@ -12721,6 +12729,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_l2_clip({16, 24, 5, 1}, with_scale));
         test_cases.emplace_back(new test_l2_clip({33, 3, 2, 2}, with_scale));
     }
+    for (int n_states : {3, 4}) {
+        for (ggml_type out_type : {GGML_TYPE_F32, GGML_TYPE_Q8_1}) {
+            test_cases.emplace_back(new test_res_mix(2304, 1, 1, n_states, 1, out_type));
+        }
+    }
+    // Ten states exceed the CUDA kernel's capacity. The CPU can still run the graph.
+    test_cases.emplace_back(new test_res_mix(96, 1, 1, 10, 1, GGML_TYPE_F32));
     for (int n_states : {1, 2, 5, 9}) {
         test_cases.emplace_back(new test_res_mix(2304, 1, 3, n_states));
         test_cases.emplace_back(new test_res_mix(2304, 7, 1, n_states));
