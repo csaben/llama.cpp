@@ -335,3 +335,21 @@ are accepted/proposed.
 
 Acceptance alone did not predict a speedup. The one-draft configuration
 accepted 70% of proposed tokens and still took longer on each coding chat.
+
+### Follow-up single-GPU trials
+
+With dense IQ4_NL on GPU 1, a two-stage channel-tiled residual mix passed all
+70 supported cases. In a paired run it reached 173.97 ± 0.22 tg128 against
+174.79 ± 0.22 for the existing kernel. At depth 1024 the rates were 164.10
+and 164.16. Testing KV padding at 32, 64, 128, 256 and 512 tokens also
+left the default 256 competitive. Two- and four-row router blocks passed all
+seven router tests. The four-row variant reached 174.63 ± 0.40 against
+174.54 ± 0.40 for the eight-row control. The existing kernels remain in use.
+
+A gate/up Q3_K and down Q4_0 trial in physical layers 0–19, requantized
+from the published IQ4_NL model, reached 180.83 ± 0.25 tg128. Its eight-chunk
+prefill perplexity of 2.9578 exceeded the branch tolerance of 0.5% over
+2.9401. This trial was excluded from the serving configuration. The down
+projection has inner dimension 1152, which requires a fallback for Q3_K
+blocks of 256. Splitting the projection on short DSpark verification batches
+also left plain single-stream decode faster across the three coding chats.

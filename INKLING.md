@@ -70,8 +70,20 @@ To regenerate it, run `bash perf/quantize-inkling-dense.sh ORIGINAL.gguf NEW.ggu
 IQ4_NL GGUF as input. Each segmented kernel activates only for its matching weights on GA10x.
 See the single-GPU results in `perf/RESULTS.md` for the measured quality differences.
 
-Needs about 19 GB of VRAM at 32K context. Text only: vision and `tools` requests are broken upstream for this
-architecture at this llama.cpp version.
+The original configuration needs about 19 GB of VRAM at 32K context. For an OpenCode
+experiment, use the exports above, select the desired GGUF with `MODEL`, and run:
+
+```bash
+build/bin/llama-server -m "$MODEL" -ngl 99 -fa on -ctk q8_0 -ctv q8_0 \
+  -c 16384 -np 1 --host 127.0.0.1 --port 8031 --alias inkling-mini
+```
+
+Use the OpenAI-compatible base URL `http://127.0.0.1:8031/v1` and model ID
+`inkling-mini`. On the experimental IQ4 model, a chat-completions smoke test
+returned correct arguments for automatic and required tool choice. A streamed
+automatic call and the follow-up turn also reproduced the build status and
+unique marker supplied by the tool. The checks exercised the HTTP protocol.
+Vision remains unsupported on this branch.
 
 ## Core code
 
