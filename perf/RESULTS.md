@@ -316,3 +316,22 @@ cases lack CPU support. The historical prefill command reproduced 2.9404
 (Q6_K) and 2.9458 (IQ4_NL). With explicit `-ub 2048`, eight-chunk prefill PPL was
 2.9384 (Q6_K) and 2.9479 (IQ4_NL). The faster experimental row requires
 a further 0.74 ms reduction per token to reach 200 tok/s at depth zero.
+
+### DSpark on coding chats at the optimized checkpoint
+
+Tested `a85419e` on GPU 1 with the dense IQ4_NL candidate and the flags in
+`INKLING.md`. One slot, 16K context, Q8_0 K/V, temperature zero, seed 1,
+prompt caching disabled, 384 generated tokens per request. Individual cells
+are one run. DSpark used the bundled Q8_0 drafter on the same GPU and
+`--spec-type draft-dspark`; each mode ran in a fresh server. Draft counts
+are accepted/proposed.
+
+| Coding chat | Plain tok/s | DSpark max 3 tok/s | Accepted | DSpark max 1 tok/s | Accepted |
+|---|---:|---:|---:|---:|---:|
+| ISO-8601 duration parser and tests | 170.71 | 109.74 | 224/475 | 99.83 | 157/225 |
+| Review the fork's nine-state CUDA dispatch and write edge cases | 164.36 | 135.19 | 259/370 | 109.04 | 172/211 |
+| Review the fork's quantization shell script for output-path races | 166.43 | 98.08 | 205/530 | 97.07 | 143/239 |
+| Arithmetic mean | 167.17 | 114.34 | 688/1375 | 101.98 | 472/675 |
+
+Acceptance alone did not predict a speedup. The one-draft configuration
+accepted 70% of proposed tokens and still took longer on each coding chat.
