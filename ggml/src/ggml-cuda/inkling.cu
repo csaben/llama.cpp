@@ -1596,6 +1596,557 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
     IK_DBG_T(7);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// inkling_attn v2: one block of 256 threads per (kv head, split of the cells). All independent loads are issued at the
+// start (the projection values, the constants, the first tile of the cells); the recurrent-state loads (which depend on
+// the cell id) are in flight while the warps attend over their cells; the current token's cell is skipped in the loop
+// and added last, from the convolved K/V in shared memory. Raw cache words are kept in registers (2 per cell and side)
+// so two blocks fit an SM; the last block of a head to arrive combines the splits (acq_rel hand-off).
+
+#define IK_A2_BLOCK 256
+#define IK_A2_WARPS (IK_A2_BLOCK/WARP_SIZE)
+#define IK_A2_U     8   // cells per warp step
+
+template <typename cache_t>
+struct ik_a2_raw;
+
+template <> struct ik_a2_raw<half> {
+    uint32_t w[2]; // 4 halves: dims 4*lane .. 4*lane+3
+    __device__ __forceinline__ void load(const char * row, const int lane) {
+        const uint2 v = *(const uint2 *) (row + 8*lane);
+        w[0] = v.x; w[1] = v.y;
+    }
+    __device__ __forceinline__ void get(float * v) const {
+        const float2 a = __half22float2(*(const half2 *) &w[0]);
+        const float2 b = __half22float2(*(const half2 *) &w[1]);
+        v[0] = a.x; v[1] = a.y; v[2] = b.x; v[3] = b.y;
+    }
+};
+
+template <> struct ik_a2_raw<block_q8_0> {
+    uint32_t q;  // 4 int8 quants
+    half     d;
+    __device__ __forceinline__ void load(const char * row, const int lane) {
+        const block_q8_0 * b = (const block_q8_0 *) row + lane/8;
+        ggml_cuda_memcpy_1<4, 2>(&q, b->qs + 4*(lane % 8));
+        d = b->d;
+    }
+    __device__ __forceinline__ void get(float * v) const {
+        const float df = __half2float(d);
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            v[e] = df*(float) ((int8_t) ((q >> (8*e)) & 0xff));
+        }
+    }
+};
+
+#ifndef IK_A2_MIN_BLOCKS
+#define IK_A2_MIN_BLOCKS 1
+#endif
+template <typename cache_t, bool q8_out, int G>
+static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args) {
+    constexpr int HD = IK_ATTN_HD;
+    constexpr int U  = IK_A2_U;
+    typedef ik_a2_raw<cache_t> raw_t;
+
+    const int g     = blockIdx.x;
+    const int split = blockIdx.y;
+    const int tid   = threadIdx.x;
+    const int lane  = tid % WARP_SIZE;
+    const int warp  = tid / WARP_SIZE;
+
+    __shared__ float s_q[G][HD];
+    __shared__ float s_k[HD];
+    __shared__ float s_v[HD];
+    __shared__ float s_r[G][32];
+    __shared__ float s_sink[G];
+    __shared__ float s_ssq[G][IK_A2_WARPS];
+    __shared__ float s_red[2][IK_A2_WARPS];
+    __shared__ float s_m[G][IK_A2_WARPS];
+    __shared__ float s_l[G][IK_A2_WARPS];
+    __shared__ float s_acc[G][IK_A2_WARPS][HD];
+    __shared__ int   s_last;
+    IK_DBG_T(0);
+
+    // ===== round 1: every load that does not depend on the recurrent cell =====
+    const int     read_cell = args.rs_ids[0];
+    const int64_t kv_idx    = args.kv_idxs[0];
+    float tau = 1.0f;
+    if (args.pos) {
+        const float t = args.pos[0] + 1.0f;
+        tau = 1.0f + args.tau_alpha*logf(fmaxf(1.0f, t/args.tau_floor));
+    }
+    const float * pr0    = args.proj; // column 0: Q, R, sink, gate
+    const int     which  = tid/HD;    // 0: a K channel, 1: a V channel
+    const int     ci     = tid % HD;
+    const int     n_conv = args.n_conv;
+    const int64_t ch     = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
+    float cur_in, w_c[8], taps[8];
+    {
+        const int64_t off  = which ? args.off_v : args.off_k;
+        const int64_t offt = which ? args.off_vtaps : args.off_ktaps;
+        const int     col  = args.proj_ncols == 3 ? (which ? 2 : 1) : 0;
+        const float * pr   = args.proj + col*args.proj_s1;
+        const float * w    = args.consts + (which ? args.c_vconv : args.c_kconv) + ((int64_t) g*HD + ci)*n_conv;
+        cur_in = pr[off + (int64_t) g*HD + ci];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            w_c[j]  = j < n_conv ? w[j] : 0.0f;
+            taps[j] = args.has_taps && j < n_conv ? pr[offt + (int64_t) g*n_conv + j] : 0.0f;
+        }
+    }
+    float qv[G], gate_v[G], rv[G], sink_v[G];
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
+        const int h = g*G + hh;
+        qv[hh] = gate_v[hh] = rv[hh] = sink_v[hh] = 0.0f;
+        if (tid < HD) {
+            qv[hh]     = pr0[(int64_t) h*HD + tid]*args.consts[(int64_t) h*HD + tid];
+            gate_v[hh] = pr0[args.off_gate + (int64_t) h*HD + tid];
+        } else if (warp == 4) {
+            if (lane < args.n_rel) {
+                rv[hh] = pr0[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane];
+            }
+            sink_v[hh] = pr0[args.off_sink + h];
+        }
+    }
+    // the cells of this warp
+    const int kv0 = split*args.kv_per_split;
+    const int kv1 = min(args.n_kv, kv0 + args.kv_per_split);
+    const int per_warp = (kv1 - kv0 + IK_A2_WARPS - 1)/IK_A2_WARPS;
+    const int w0 = kv0 + warp*per_warp;
+    const int w1 = min(kv1, w0 + per_warp);
+    const bool has_cells = w0 < w1;
+    auto load_tile = [&](const int tile, float & mv_l, int & d_l) {
+        const int kvl = min(tile + lane, args.n_kv - 1);
+        mv_l = tile + lane < w1 ? (args.mask_f16 ? __half2float(((const half *) args.mask)[kvl]) : ((const float *) args.mask)[kvl]) : -INFINITY;
+        d_l  = args.rel_pos[kvl];
+    };
+    float mv_l = -INFINITY;
+    int   d_l  = 0;
+    if (has_cells) {
+        load_tile(w0, mv_l, d_l);
+    }
+    // the first step's raw K/V and table rows
+    const float * table = args.consts + args.c_table;
+    raw_t kraw[U], vraw[U];
+    float trow[U];
+    auto load_step = [&](const int tile, const int u0) {
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            const int kv = min(tile + u0 + u, args.n_kv - 1);
+            kraw[u].load(args.k_cache + (int64_t) kv*args.kc_nb2 + g*args.kc_nb1, lane);
+            vraw[u].load(args.v_cache + (int64_t) kv*args.vc_nb2 + g*args.vc_nb1, lane);
+            const int d  = __shfl_sync(0xffffffff, d_l, min(u0 + u, WARP_SIZE - 1));
+            const int dc = min(max(d, 0), args.n_extent - 1);
+            trow[u] = table[(int64_t) dc*args.n_rel + min(lane % 16, args.n_rel - 1)];
+            trow[u] = d >= 0 && d < args.n_extent ? 0.5f*trow[u] : 0.0f;
+        }
+    };
+    IK_DBG_T(3); // round-1 loads issued
+    if (has_cells) {
+        load_step(w0, 0);
+    }
+    IK_DBG_T(1); // the first tile's distances landed (the table rows need them)
+
+    // ===== round 2: the past inputs of the convolution (after the cell id), consumed after the cell loop =====
+    float x[8];
+    {
+        const float * past = args.state + (int64_t) read_cell*args.state_s1 + ch*(n_conv - 1);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            x[j] = j < n_conv - 1 ? past[j] : (j == n_conv - 1 ? cur_in : 0.0f);
+        }
+    }
+
+    // ===== the clipped Q and R of the heads (block reductions), scaled by tau =====
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
+        const float v = warp_reduce_sum(tid < HD ? qv[hh]*qv[hh] : rv[hh]*rv[hh]);
+        if (lane == 0) {
+            s_ssq[hh][warp] = v;
+        }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
+        if (tid < HD) {
+            const float ssq  = s_ssq[hh][0] + s_ssq[hh][1] + s_ssq[hh][2] + s_ssq[hh][3];
+            const float norm = sqrtf(ssq) + args.clip_eps;
+            const float f    = fminf(fmaxf(args.qk_clip/norm, 0.0f), 1.0f);
+            s_q[hh][tid] = qv[hh]*f*tau;
+        } else if (warp == 4) {
+            const float norm = sqrtf(s_ssq[hh][4]) + args.clip_eps;
+            const float f    = fminf(fmaxf(args.rel_clip/norm, 0.0f), 1.0f);
+            s_r[hh][lane] = lane < args.n_rel ? rv[hh]*f*tau : 0.0f;
+            if (lane == 0) {
+                s_sink[hh] = sink_v[hh];
+            }
+        }
+    }
+    __syncthreads();
+    IK_DBG_T(2);
+
+    // ===== the attention over the cells of this warp (online softmax per head, a lane holds 4 dims), the current
+    //       token's cell skipped (added last from the convolved K/V) =====
+    float qreg[G][4], rreg[G], acc[G][4], m[G], l[G], sinks[G];
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
+        m[hh] = -INFINITY;
+        l[hh] = 0.0f;
+        rreg[hh]  = (lane % 16) < args.n_rel ? s_r[hh][lane % 16] : 0.0f;
+        sinks[hh] = s_sink[hh];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            qreg[hh][e] = s_q[hh][4*lane + e];
+            acc[hh][e]  = 0.0f;
+        }
+    }
+    // one step of U cells with the raw words in registers; the scores and the softmax update
+    auto step = [&](const int tile, const int u0, const int n_tile, const bool skip_cur) {
+        float sc[G][U];
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            float kv4[4];
+            kraw[u].get(kv4);
+            float v[G];
+#pragma unroll
+            for (int hh = 0; hh < G; ++hh) {
+                v[hh] = args.kq_scale*(qreg[hh][0]*kv4[0] + qreg[hh][1]*kv4[1] + qreg[hh][2]*kv4[2] + qreg[hh][3]*kv4[3]) + trow[u]*rreg[hh];
+            }
+            // transposed butterfly over 4 (padded) heads: lanes 8*hh..8*hh+7 hold the score of head hh
+            const bool hi16 = lane >= 16;
+            const float v2 = G > 2 ? v[2] : 0.0f, v3 = G > 3 ? v[3] : 0.0f;
+            float a0 = hi16 ? v2 : v[0], a1 = hi16 ? v3 : (G > 1 ? v[1] : 0.0f);
+            const float b0 = hi16 ? v[0] : v2, b1 = hi16 ? (G > 1 ? v[1] : 0.0f) : v3;
+            a0 += __shfl_xor_sync(0xffffffff, b0, 16);
+            a1 += __shfl_xor_sync(0xffffffff, b1, 16);
+            const bool hi8 = (lane & 8) != 0;
+            float c = hi8 ? a1 : a0;
+            c += __shfl_xor_sync(0xffffffff, hi8 ? a0 : a1, 8);
+            c += __shfl_xor_sync(0xffffffff, c, 4);
+            c += __shfl_xor_sync(0xffffffff, c, 2);
+            c += __shfl_xor_sync(0xffffffff, c, 1);
+#pragma unroll
+            for (int hh = 0; hh < G; ++hh) {
+                sc[hh][u] = __shfl_sync(0xffffffff, c, 8*hh);
+            }
+        }
+        float mv[U];
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            const int kv = tile + u0 + u;
+            mv[u] = u0 + u < n_tile && !(skip_cur && kv == kv_idx) ? __shfl_sync(0xffffffff, mv_l, u0 + u) : -INFINITY;
+        }
+#pragma unroll
+        for (int hh = 0; hh < G; ++hh) {
+            float m_new = m[hh];
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                sc[hh][u] = mv[u] == -INFINITY ? -INFINITY : sc[hh][u] - sinks[hh] + mv[u];
+                m_new = fmaxf(m_new, sc[hh][u]);
+            }
+            if (m_new == -INFINITY) {
+                continue;
+            }
+            const float corr = expf(m[hh] - m_new);
+            l[hh] *= corr;
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                acc[hh][e] *= corr;
+            }
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                const float pk = sc[hh][u] == -INFINITY ? 0.0f : expf(sc[hh][u] - m_new);
+                l[hh] += pk;
+                float vv[4];
+                vraw[u].get(vv);
+#pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    acc[hh][e] += pk*vv[e];
+                }
+            }
+            m[hh] = m_new;
+        }
+    };
+    if (has_cells && !(args.dbg_skip & 2)) {
+        int n_tile = min(WARP_SIZE, w1 - w0);
+        int tile = w0, u0 = 0;
+        while (true) {
+            // the next step's loads are issued after this step consumed the registers
+            const int tile_c = tile, u0_c = u0, n_tile_c = n_tile;
+            u0 += U;
+            bool more = true;
+            if (u0 >= n_tile) {
+                tile += WARP_SIZE;
+                u0 = 0;
+                if (tile < w1) {
+                    n_tile = min(WARP_SIZE, w1 - tile);
+                } else {
+                    more = false;
+                }
+            }
+            step(tile_c, u0_c, n_tile_c, true);
+            if (!more) {
+                break;
+            }
+            if (u0 == 0) {
+                load_tile(tile, mv_l, d_l);
+            }
+            load_step(tile, u0);
+        }
+    }
+    IK_DBG_T(4);
+
+    // ===== the K/V convolution of the token, the post-normalization, the cache store (split 0), the new state =====
+    float x_new[7];
+    {
+        const float scale = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
+        float out = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            if (j < n_conv) {
+                out += x[j]*w_c[j];
+            }
+        }
+        if (args.has_taps) {
+#pragma unroll
+            for (int lag = 0; lag < 8; ++lag) {
+                if (lag < n_conv) {
+                    out += x[n_conv - 1 - lag]*taps[lag];
+                }
+            }
+        }
+        float y = (x[n_conv - 1] + out)*scale;
+#pragma unroll
+        for (int j = 0; j < 7; ++j) {
+            x_new[j] = j < n_conv - 1 ? x[j + 1] : 0.0f;
+        }
+        const float ss = warp_reduce_sum(y*y);
+        if (lane == 0) {
+            s_red[which][warp % 4] = ss;
+        }
+        __syncthreads();
+        const float sst = s_red[which][0] + s_red[which][1] + s_red[which][2] + s_red[which][3];
+        float factor;
+        if (which == 0) {
+            const float norm = sqrtf(sst) + args.clip_eps;
+            factor = fminf(fmaxf(args.qk_clip/norm, 0.0f), 1.0f);
+        } else {
+            factor = rsqrtf(sst/HD + args.norm_eps);
+        }
+        y *= factor;
+        char * row = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
+        float yq;
+        if constexpr (std::is_same<cache_t, half>::value) {
+            const half hv = __float2half(y);
+            if (split == 0) {
+                ((half *) row)[ci] = hv;
+            }
+            yq = __half2float(hv);
+        } else {
+            const float amax = warp_reduce_max(fabsf(y));
+            const float d    = amax/127.0f;
+            const float id   = d != 0.0f ? 1.0f/d : 0.0f;
+            const int   q    = (int) roundf(y*id);
+            const half  dh   = __float2half(d);
+            if (split == 0) {
+                block_q8_0 * b = (block_q8_0 *) row + (warp % 4);
+                b->qs[lane] = (int8_t) q;
+                if (lane == 0) {
+                    b->d = dh;
+                }
+            }
+            yq = __half2float(dh)*q;
+        }
+        (which ? s_v : s_k)[ci] = yq;
+    }
+    __syncthreads();
+
+    // ===== the current token's cell, by the warp whose range holds it =====
+    if (kv_idx >= w0 && kv_idx < w1 && !(args.dbg_skip & 2)) {
+        float kv4[4];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            kv4[e] = s_k[4*lane + e];
+        }
+        // the table row of distance 0 is folded like in the loop (both half-warps, factor 1/2)
+        const float t0 = args.n_extent > 0 ? 0.5f*table[min(lane % 16, args.n_rel - 1)] : 0.0f;
+        float v[G];
+#pragma unroll
+        for (int hh = 0; hh < G; ++hh) {
+            v[hh] = args.kq_scale*(qreg[hh][0]*kv4[0] + qreg[hh][1]*kv4[1] + qreg[hh][2]*kv4[2] + qreg[hh][3]*kv4[3]) + t0*rreg[hh];
+        }
+        const bool hi16 = lane >= 16;
+        const float v2 = G > 2 ? v[2] : 0.0f, v3 = G > 3 ? v[3] : 0.0f;
+        float a0 = hi16 ? v2 : v[0], a1 = hi16 ? v3 : (G > 1 ? v[1] : 0.0f);
+        const float b0 = hi16 ? v[0] : v2, b1 = hi16 ? (G > 1 ? v[1] : 0.0f) : v3;
+        a0 += __shfl_xor_sync(0xffffffff, b0, 16);
+        a1 += __shfl_xor_sync(0xffffffff, b1, 16);
+        const bool hi8 = (lane & 8) != 0;
+        float c = hi8 ? a1 : a0;
+        c += __shfl_xor_sync(0xffffffff, hi8 ? a0 : a1, 8);
+        c += __shfl_xor_sync(0xffffffff, c, 4);
+        c += __shfl_xor_sync(0xffffffff, c, 2);
+        c += __shfl_xor_sync(0xffffffff, c, 1);
+        const float mvc = args.mask_f16 ? __half2float(((const half *) args.mask)[kv_idx]) : ((const float *) args.mask)[kv_idx];
+#pragma unroll
+        for (int hh = 0; hh < G; ++hh) {
+            const float s = __shfl_sync(0xffffffff, c, 8*hh) - sinks[hh] + mvc;
+            if (mvc != -INFINITY) {
+                const float m_new = fmaxf(m[hh], s);
+                const float corr  = expf(m[hh] - m_new);
+                const float pk    = expf(s - m_new);
+                l[hh] = l[hh]*corr + pk;
+#pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    acc[hh][e] = acc[hh][e]*corr + pk*s_v[4*lane + e];
+                }
+                m[hh] = m_new;
+            }
+        }
+    }
+
+    // ===== combine the warps =====
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
+        if (lane == 0) {
+            s_m[hh][warp] = m[hh];
+            s_l[hh][warp] = l[hh];
+        }
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            s_acc[hh][warp][4*lane + e] = acc[hh][e];
+        }
+    }
+    __syncthreads();
+    IK_DBG_T(5);
+
+    float M[G], L[G], A[G];
+#pragma unroll
+    for (int hh = 0; hh < G; ++hh) {
+        M[hh] = -INFINITY; L[hh] = 0.0f; A[hh] = 0.0f;
+        if (tid < HD) {
+#pragma unroll
+            for (int w = 0; w < IK_A2_WARPS; ++w) {
+                M[hh] = fmaxf(M[hh], s_m[hh][w]);
+            }
+#pragma unroll
+            for (int w = 0; w < IK_A2_WARPS; ++w) {
+                if (s_m[hh][w] != -INFINITY) {
+                    const float c = expf(s_m[hh][w] - M[hh]);
+                    L[hh] += s_l[hh][w]*c;
+                    A[hh] += s_acc[hh][w][tid]*c;
+                }
+            }
+        }
+    }
+
+    if (args.n_split > 1) {
+        // publish the partial result; the last block of the head to arrive combines
+        if (tid < HD) {
+#pragma unroll
+            for (int hh = 0; hh < G; ++hh) {
+                float * part = args.part + (((int64_t) g*args.n_split + split)*G + hh)*(HD + 2);
+                part[tid] = A[hh];
+                if (tid == 0) {
+                    part[HD]     = M[hh];
+                    part[HD + 1] = L[hh];
+                }
+            }
+        }
+        __syncthreads();
+        if (tid == 0) {
+            s_last = ik_atomic_add_acq_rel(&args.counters[g], 1) == args.n_split - 1;
+        }
+        __syncthreads();
+        IK_DBG_T(6);
+        if (!s_last) {
+            return;
+        }
+        if (tid < HD) {
+#pragma unroll
+            for (int hh = 0; hh < G; ++hh) {
+                const float * part0 = args.part + ((int64_t) g*args.n_split*G + hh)*(HD + 2);
+                const int64_t ps = (int64_t) G*(HD + 2); // stride between splits
+                float Mt = -INFINITY, Lt = 0.0f, At = 0.0f;
+                for (int sp0 = 0; sp0 < args.n_split; sp0 += 8) {
+                    float ms[8], ls[8], as[8];
+#pragma unroll
+                    for (int k = 0; k < 8; ++k) {
+                        const int sp = min(sp0 + k, args.n_split - 1);
+                        ms[k] = sp0 + k < args.n_split ? part0[sp*ps + HD] : -INFINITY;
+                        ls[k] = part0[sp*ps + HD + 1];
+                        as[k] = part0[sp*ps + tid];
+                    }
+                    float Mc = Mt;
+#pragma unroll
+                    for (int k = 0; k < 8; ++k) {
+                        Mc = fmaxf(Mc, ms[k]);
+                    }
+                    if (Mc != -INFINITY) {
+                        const float c0 = Mt != -INFINITY ? expf(Mt - Mc) : 0.0f;
+                        Lt *= c0;
+                        At *= c0;
+#pragma unroll
+                        for (int k = 0; k < 8; ++k) {
+                            if (ms[k] != -INFINITY) {
+                                const float c = expf(ms[k] - Mc);
+                                Lt += ls[k]*c;
+                                At += as[k]*c;
+                            }
+                        }
+                        Mt = Mc;
+                    }
+                }
+                M[hh] = Mt; L[hh] = Lt; A[hh] = At;
+            }
+        }
+        if (tid == 0) {
+            args.counters[g] = 0;
+        }
+    }
+
+    // ===== the new recurrent state of the K and V channels (every block has read the old state by now) =====
+    {
+        float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*(n_conv - 1);
+#pragma unroll
+        for (int j = 0; j < 7; ++j) {
+            if (j < n_conv - 1) {
+                st[j] = x_new[j];
+            }
+        }
+    }
+
+    // ===== the zero sink logit, the normalization and the sigmoid gate; threads 0..127 write the heads =====
+    if (tid < HD) {
+#pragma unroll
+        for (int hh = 0; hh < G; ++hh) {
+            const int   h     = g*G + hh;
+            const float m_new = fmaxf(M[hh], 0.0f);
+            const float corr  = expf(M[hh] - m_new);
+            const float Lf    = L[hh]*corr + expf(0.0f - m_new);
+            const float o     = A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate_v[hh])));
+            if constexpr (q8_out) {
+                ik_warp_store_q8_1(o, (block_q8_1 *) args.dst + ((int64_t) h*HD)/QK8_1 + warp, lane, true);
+            } else {
+                ((float *) args.dst)[(int64_t) h*HD + tid] = o;
+            }
+        }
+    }
+    IK_DBG_T(7);
+}
+
+template <typename cache_t, bool q8_out>
+static void inkling_attn2_launch(const ik_attn_args & a, const dim3 grid, cudaStream_t stream) {
+    switch (a.n_head/a.n_head_kv) {
+        case 1: inkling_attn2_kernel<cache_t, q8_out, 1><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        case 2: inkling_attn2_kernel<cache_t, q8_out, 2><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        case 3: inkling_attn2_kernel<cache_t, q8_out, 3><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        default: inkling_attn2_kernel<cache_t, q8_out, 4><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+    }
+}
+
 void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * proj    = dst->src[0];
     const ggml_tensor * consts  = dst->src[1];
@@ -1657,7 +2208,8 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     a.n_kv       = k_cache->ne[2];
 
     // the cells split over blocks: about 64 cells per block, at most 64 splits
-    static const int cells_per_split = getenv("IK_ATTN_CELLS_PER_SPLIT") ? atoi(getenv("IK_ATTN_CELLS_PER_SPLIT")) : 32;
+    static const bool v1 = getenv("IK_ATTN_V1") && atoi(getenv("IK_ATTN_V1")) != 0;
+    static const int cells_per_split = getenv("IK_ATTN_CELLS_PER_SPLIT") ? atoi(getenv("IK_ATTN_CELLS_PER_SPLIT")) : (v1 ? 32 : 64);
     static const int dbg_skip        = getenv("IK_ATTN_SKIP") ? atoi(getenv("IK_ATTN_SKIP")) : 0;
     a.dbg_skip     = dbg_skip;
     static long long * dbg_times = [] () -> long long * {
@@ -1695,6 +2247,14 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     GGML_ASSERT(k_cache->type == v_cache->type && (k_cache->type == GGML_TYPE_F16 || k_cache->type == GGML_TYPE_Q8_0));
 
     const dim3 grid(a.n_head_kv, a.n_split, 1);
+    if (!v1) {
+        if (k_cache->type == GGML_TYPE_F16) {
+            if (q8) { inkling_attn2_launch<half, true>(a, grid, stream); } else { inkling_attn2_launch<half, false>(a, grid, stream); }
+        } else {
+            if (q8) { inkling_attn2_launch<block_q8_0, true>(a, grid, stream); } else { inkling_attn2_launch<block_q8_0, false>(a, grid, stream); }
+        }
+        return;
+    }
     if (k_cache->type == GGML_TYPE_F16) {
         if (q8) {
             inkling_attn_kernel<half, true><<<grid, IK_ATTN_BLOCK, 0, stream>>>(a);
