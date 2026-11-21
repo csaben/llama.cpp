@@ -125,6 +125,7 @@ void ggml_compute_forward_rel_bias(const struct ggml_compute_params * params, st
 void ggml_compute_forward_loop_ctrl_down(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_loop_ctrl_apply(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_moe_sum(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_inkling_attn(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 #ifdef __cplusplus
 }
 #endif

@@ -4950,27 +4950,102 @@ struct test_res_mix : public test_case {
     const int64_t n_tok;
     const int64_t n_q;
     const int     n_states;
+    const int     norm;     // 0: none, 1: shared weight, 2: a weight per query
+    const ggml_type out_type;
+    const bool    no_query; // the norm of the single state alone
 
     std::string vars() override {
-        return VARS_TO_STR4(n_embd, n_tok, n_q, n_states);
+        return VARS_TO_STR7(n_embd, n_tok, n_q, n_states, norm, out_type, no_query);
     }
 
-    test_res_mix(int64_t n_embd = 2304, int64_t n_tok = 1, int64_t n_q = 3, int n_states = 4)
-        : n_embd(n_embd), n_tok(n_tok), n_q(n_q), n_states(n_states) {}
+    double max_nmse_err() override {
+        return out_type == GGML_TYPE_Q8_1 ? 5e-4 : test_case::max_nmse_err();
+    }
+
+    test_res_mix(int64_t n_embd = 2304, int64_t n_tok = 1, int64_t n_q = 3, int n_states = 4, int norm = 0,
+            ggml_type out_type = GGML_TYPE_F32, bool no_query = false)
+        : n_embd(n_embd), n_tok(n_tok), n_q(n_q), n_states(n_states), norm(norm), out_type(out_type), no_query(no_query) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * q = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_q);
-        ggml_set_name(q, "q");
+        ggml_tensor * q = nullptr;
+        if (!no_query) {
+            q = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_q);
+            ggml_set_name(q, "q");
+        }
         std::vector<ggml_tensor *> states(n_states);
         for (int i = 0; i < n_states; ++i) {
             states[i] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tok);
             ggml_set_name(states[i], ("s" + std::to_string(i)).c_str());
         }
 
-        ggml_tensor * out = ggml_res_mix(ctx, q, states.data(), n_states, 1e-6f, 1.0f/sqrtf(n_embd));
+        ggml_tensor * out = nullptr;
+        if (norm) {
+            ggml_tensor * nw = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, norm == 2 ? n_q : 1);
+            ggml_set_name(nw, "nw");
+            out = ggml_res_mix_norm(ctx, q, states.data(), n_states, 1e-6f, 1.0f/sqrtf(n_embd), nw, 1e-6f, out_type);
+        } else {
+            out = ggml_res_mix(ctx, q, states.data(), n_states, 1e-6f, 1.0f/sqrtf(n_embd));
+        }
         ggml_set_name(out, "out");
 
         return out;
+    }
+};
+
+static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats, bool skip);
+
+// MUL_MAT / MUL_MAT_ID with a Q8_1 activation quantized by its producer (ggml_res_mix_norm)
+struct test_mul_mat_q8_1_act : public test_case {
+    const ggml_type type_a;
+    const int64_t m;
+    const int64_t n;
+    const int64_t k;
+    const int n_mats; // > 0: MUL_MAT_ID with n_used of n_mats experts
+    const int n_used;
+
+    std::string vars() override {
+        return VARS_TO_STR6(type_a, m, n, k, n_mats, n_used);
+    }
+
+    double max_nmse_err() override {
+        return 5e-4;
+    }
+
+    test_mul_mat_q8_1_act(ggml_type type_a = GGML_TYPE_Q8_0, int64_t m = 64, int64_t n = 1, int64_t k = 256, int n_mats = 0, int n_used = 0)
+        : type_a(type_a), m(m), n(n), k(k), n_mats(n_mats), n_used(n_used) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n);
+        ggml_set_name(x, "x");
+        ggml_tensor * nw = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, k);
+        ggml_set_name(nw, "nw");
+        ggml_tensor * xq = ggml_res_mix_norm(ctx, nullptr, &x, 1, 1e-6f, 1.0f, nw, 1e-6f, GGML_TYPE_Q8_1); // [k, n] Q8_1
+        ggml_set_name(xq, "xq");
+
+        ggml_tensor * out = nullptr;
+        if (n_mats == 0) {
+            ggml_tensor * a = ggml_new_tensor_2d(ctx, type_a, k, m);
+            ggml_set_name(a, "a");
+            out = ggml_mul_mat(ctx, a, xq);
+        } else {
+            ggml_tensor * as = ggml_new_tensor_3d(ctx, type_a, k, m, n_mats);
+            ggml_set_name(as, "as");
+            ggml_tensor * ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_mats, n);
+            ggml_set_name(ids, "ids");
+            ids = ggml_view_2d(ctx, ids, n_used, n, ids->nb[1], 0);
+            out = ggml_mul_mat_id(ctx, as, ggml_reshape_3d(ctx, xq, k, 1, n), ids);
+        }
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        if (n_mats > 0) {
+            init_mul_mat_id_tensors(ctx, n_mats, false);
+        } else {
+            test_case::initialize_tensors(ctx);
+        }
     }
 };
 
@@ -5173,13 +5248,18 @@ struct test_loop_ctrl_apply : public test_case {
     const int64_t B;
     const bool    cur_shared;
     const bool    norm_per_batch;
+    const ggml_type out_type;
 
     std::string vars() override {
-        return VARS_TO_STR7(n, rank, n_tok, with_norm, B, cur_shared, norm_per_batch);
+        return VARS_TO_STR8(n, rank, n_tok, with_norm, B, cur_shared, norm_per_batch, out_type);
     }
 
-    test_loop_ctrl_apply(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, bool with_norm = false, int64_t B = 1, bool cur_shared = false, bool norm_per_batch = false)
-        : n(n), rank(rank), n_tok(n_tok), with_norm(with_norm), B(B), cur_shared(cur_shared), norm_per_batch(norm_per_batch) {}
+    double max_nmse_err() override {
+        return out_type == GGML_TYPE_Q8_1 ? 5e-4 : test_case::max_nmse_err();
+    }
+
+    test_loop_ctrl_apply(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, bool with_norm = false, int64_t B = 1, bool cur_shared = false, bool norm_per_batch = false, ggml_type out_type = GGML_TYPE_F32)
+        : n(n), rank(rank), n_tok(n_tok), with_norm(with_norm), B(B), cur_shared(cur_shared), norm_per_batch(norm_per_batch), out_type(out_type) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, n_tok, cur_shared ? 1 : B);
@@ -5198,7 +5278,7 @@ struct test_loop_ctrl_apply : public test_case {
             ggml_set_name(nw, "nw");
         }
 
-        ggml_tensor * out = ggml_loop_ctrl_apply(ctx, cur, msg, d, wg, wf, nw, 1e-6f);
+        ggml_tensor * out = ggml_loop_ctrl_apply_ext(ctx, cur, msg, d, wg, wf, nw, 1e-6f, out_type);
         ggml_set_name(out, "out");
 
         return out;
@@ -12190,6 +12270,30 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_res_mix(2304, 1, 3, n_states));
         test_cases.emplace_back(new test_res_mix(2304, 7, 1, n_states));
         test_cases.emplace_back(new test_res_mix(100, 3, 4, n_states));
+        for (int norm : {1, 2}) {
+            if (n_states > GGML_MAX_SRC - 2) {
+                break; // query + states + norm weight
+            }
+            test_cases.emplace_back(new test_res_mix(2304, 1, 3, n_states, norm, GGML_TYPE_F32));
+            test_cases.emplace_back(new test_res_mix(2304, 1, 3, n_states, norm, GGML_TYPE_Q8_1));
+            test_cases.emplace_back(new test_res_mix(2304, 2, 1, n_states, norm, GGML_TYPE_Q8_1));
+            test_cases.emplace_back(new test_res_mix(96,   3, 2, n_states, norm, GGML_TYPE_Q8_1));
+            test_cases.emplace_back(new test_res_mix(4160, 1, 1, n_states, norm, GGML_TYPE_Q8_1)); // the non-vec4 path
+            test_cases.emplace_back(new test_res_mix(100,  3, 4, n_states, norm, GGML_TYPE_F32));
+        }
+    }
+    for (ggml_type out_type : {GGML_TYPE_F32, GGML_TYPE_Q8_1}) {
+        test_cases.emplace_back(new test_res_mix(2304, 1, 1, 1, 1, out_type, true));
+        test_cases.emplace_back(new test_res_mix(2304, 3, 1, 1, 1, out_type, true));
+        test_cases.emplace_back(new test_res_mix(4160, 1, 1, 1, 1, out_type, true));
+    }
+    for (ggml_type type_a : {GGML_TYPE_Q8_0, GGML_TYPE_IQ4_NL}) {
+        test_cases.emplace_back(new test_mul_mat_q8_1_act(type_a, 64, 1, 256));
+        test_cases.emplace_back(new test_mul_mat_q8_1_act(type_a, 64, 3, 2304));
+        test_cases.emplace_back(new test_mul_mat_q8_1_act(type_a, 32, 1, 2304, 16, 4));
+        test_cases.emplace_back(new test_mul_mat_q8_1_act(type_a, 32, 2, 1152, 16, 8));
+    }
+    {
     }
     for (int64_t n_heads : {0, 8}) {
         for (bool with_res : {false, true}) {
@@ -12229,6 +12333,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, with_norm, 3, true, false));
         test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 4, with_norm, 3, false, true));
         test_cases.emplace_back(new test_loop_ctrl_apply(100, 7, 3, with_norm, 2, true, true));
+    }
+    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, true, 1, false, false, GGML_TYPE_Q8_1));
+    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 2, true, 3, true, true, GGML_TYPE_Q8_1));
+    test_cases.emplace_back(new test_loop_ctrl_apply(96, 7, 3, true, 2, true, false, GGML_TYPE_Q8_1));
+    {
     }
     test_cases.emplace_back(new test_moe_sum(2304, 8, 1));
     test_cases.emplace_back(new test_moe_sum(2304, 8, 7));

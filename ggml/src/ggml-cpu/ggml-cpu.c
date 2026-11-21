@@ -1261,6 +1261,16 @@ static void ggml_compute_forward_mul_mat_one_chunk(
     }
 }
 
+// a Q8_1 activation as the Q8_0 vec_dot operand of the Q8_0-family types (same scale and quants, the block sum is dropped)
+static void ggml_cpu_repack_q8_1_to_q8_0(const block_q8_1 * GGML_RESTRICT x, block_q8_0 * GGML_RESTRICT y, int64_t k) {
+    GGML_ASSERT(k % QK8_0 == 0);
+    const int64_t nb = k / QK8_0;
+    for (int64_t i = 0; i < nb; ++i) {
+        y[i].d = x[i].d;
+        memcpy(y[i].qs, x[i].qs, QK8_0);
+    }
+}
+
 void ggml_compute_forward_mul_mat(
         const struct ggml_compute_params * params,
               struct ggml_tensor * dst) {
@@ -1346,8 +1356,10 @@ UseGgmlGemm1:;
         const size_t nbw3 = nbw2*ne12;
 
         assert(params->wsize >= ne13*nbw3);
-        // src1 is either packed from F32 into vec_dot_type, or widened from F16 or BF16 into the F32 work buffer
-        const bool widen = src1->type != GGML_TYPE_F32;
+        // src1 is either packed from F32 into vec_dot_type, widened from F16 or BF16 into the F32 work buffer,
+        // or a Q8_1 activation (quantized by its producer) repacked as Q8_0
+        const bool repack_q8 = src1->type == GGML_TYPE_Q8_1 && vec_dot_type == GGML_TYPE_Q8_0;
+        const bool widen = src1->type != GGML_TYPE_F32 && !repack_q8;
 
         GGML_ASSERT(!widen || vec_dot_type == GGML_TYPE_F32);
         GGML_ASSERT(!widen || src1->type == GGML_TYPE_F16 || src1->type == GGML_TYPE_BF16);
@@ -1370,12 +1382,15 @@ UseGgmlGemm1:;
                 for (int64_t i11 = 0; i11 < ne11; ++i11) {
                     int64_t ne10_block_start = (ith * ne10/bs) / nth;
                     int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
-                    const void * src1_row  = (const char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10;
+                    // a repacked Q8_1 row advances by blocks of nb10 bytes, a float row by bs floats
+                    const void * src1_row  = (const char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*(repack_q8 ? nb10 : bs*nb10);
                     void       * wdata_row =                    wdata  + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0;
 
                     const int64_t ne10_block_size = (ne10_block_end - ne10_block_start) * bs;
 
-                    if (src1->type == GGML_TYPE_F16) {
+                    if (repack_q8) {
+                        ggml_cpu_repack_q8_1_to_q8_0((const block_q8_1 *) src1_row, (block_q8_0 *) wdata_row, ne10_block_size);
+                    } else if (src1->type == GGML_TYPE_F16) {
                         ggml_cpu_fp16_to_fp32((const ggml_fp16_t *) src1_row, (float *) wdata_row, ne10_block_size);
                     } else if (src1->type == GGML_TYPE_BF16) {
                         ggml_cpu_bf16_to_fp32((const ggml_bf16_t *) src1_row, (float *) wdata_row, ne10_block_size);
@@ -1630,7 +1645,8 @@ static void ggml_compute_forward_mul_mat_id(
         const size_t nbw3 = nbw2*ne12;
 
         assert(params->wsize >= ne13*nbw3);
-        GGML_ASSERT(src1->type == GGML_TYPE_F32);
+        const bool repack_q8 = src1->type == GGML_TYPE_Q8_1 && vec_dot_type == GGML_TYPE_Q8_0;
+        GGML_ASSERT(src1->type == GGML_TYPE_F32 || repack_q8);
 
 #if 0
         for (int64_t i13 = 0; i13 < ne13; ++i13) {
@@ -1649,9 +1665,15 @@ static void ggml_compute_forward_mul_mat_id(
                     size_t bs = ggml_blck_size(vec_dot_type);
                     int64_t ne10_block_start = (ith * ne10/bs) / nth;
                     int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
-                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                    if (repack_q8) {
+                        ggml_cpu_repack_q8_1_to_q8_0((const block_q8_1 *) ((const char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*nb10),
+                               (block_q8_0 *)         (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                               (ne10_block_end - ne10_block_start) * bs);
+                    } else {
+                        from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
                                (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
                                (ne10_block_end - ne10_block_start) * bs);
+                    }
                 }
             }
         }
@@ -2081,6 +2103,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_moe_sum(params, tensor);
             } break;
+        case GGML_OP_INKLING_ATTN:
+            {
+                ggml_compute_forward_inkling_attn(params, tensor);
+            } break;
         case GGML_OP_SSM_SCAN:
             {
                 ggml_compute_forward_ssm_scan(params, tensor);
@@ -2480,6 +2506,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_LOOP_CTRL_DOWN:
         case GGML_OP_LOOP_CTRL_APPLY:
         case GGML_OP_MOE_SUM:
+        case GGML_OP_INKLING_ATTN:
             {
                 n_tasks = n_threads;
             } break;

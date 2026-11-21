@@ -2,6 +2,7 @@
 
 #include "ggml-cpu.h"
 #include "ggml-impl.h"
+#include "ggml-quants.h"
 #include "binary-ops.h"
 #include "simd-gemm.h"
 #include "ggml.h"
@@ -12655,24 +12656,41 @@ void ggml_compute_forward_l2_clip(const ggml_compute_params * params, ggml_tenso
 
 // ggml_compute_forward_res_mix
 
+// the row of n floats written as F32 or as Q8_1 blocks
+static void ggml_cpu_write_row_f32_or_q8_1(ggml_tensor * dst, const float * y, int64_t n, char * out) {
+    if (dst->type == GGML_TYPE_F32) {
+        memcpy(out, y, n*sizeof(float));
+    } else {
+        GGML_ASSERT(dst->type == GGML_TYPE_Q8_1);
+        quantize_row_q8_1_ref(y, (block_q8_1 *) out, n);
+    }
+}
+
 void ggml_compute_forward_res_mix(const ggml_compute_params * params, ggml_tensor * dst) {
     const ggml_tensor * query = dst->src[0];
+
+    const bool has_norm = ggml_get_op_params_i32(dst, 3) != 0;
 
     int n_states = 0;
     while (n_states + 1 < GGML_MAX_SRC && dst->src[1 + n_states]) {
         n_states++;
     }
+    if (has_norm) {
+        n_states--; // the last source is the norm weight
+    }
+    const ggml_tensor * norm_w = has_norm ? dst->src[1 + n_states] : nullptr;
 
-    float eps, scale;
-    memcpy(&eps,   (const float *) dst->op_params + 0, sizeof(float));
-    memcpy(&scale, (const float *) dst->op_params + 1, sizeof(float));
+    float eps, scale, norm_eps;
+    memcpy(&eps,      (const float *) dst->op_params + 0, sizeof(float));
+    memcpy(&scale,    (const float *) dst->op_params + 1, sizeof(float));
+    memcpy(&norm_eps, (const float *) dst->op_params + 2, sizeof(float));
 
     const int64_t n_embd = dst->ne[0];
     const int64_t n_tok  = dst->ne[1];
     const int64_t n_q    = dst->ne[2];
 
     GGML_ASSERT(n_states >= 1 && n_states <= GGML_MAX_SRC - 1);
-    GGML_ASSERT(query->ne[0] == n_embd && query->ne[1] == n_q);
+    GGML_ASSERT(query == nullptr || (query->ne[0] == n_embd && query->ne[1] == n_q));
 
     const int ith = params->ith;
     const int nth = params->nth;
@@ -12680,53 +12698,76 @@ void ggml_compute_forward_res_mix(const ggml_compute_params * params, ggml_tenso
     float rms[GGML_MAX_SRC];
     float sc[GGML_MAX_SRC];
 
+    std::vector<float> y(n_embd);
+
     for (int64_t it = ith; it < n_tok*n_q; it += nth) {
         const int64_t iq = it/n_tok;
         const int64_t t  = it - iq*n_tok;
 
-        const float * q = (const float *) ((const char *) query->data + iq*query->nb[1]);
+        if (query) {
+            const float * q = (const float *) ((const char *) query->data + iq*query->nb[1]);
 
-        for (int i = 0; i < n_states; ++i) {
-            const ggml_tensor * st = dst->src[1 + i];
+            for (int i = 0; i < n_states; ++i) {
+                const ggml_tensor * st = dst->src[1 + i];
+                const float * x = (const float *) ((const char *) st->data + t*st->nb[1]);
+                ggml_float sum = 0.0;
+                for (int64_t k = 0; k < n_embd; ++k) {
+                    sum += (ggml_float) (x[k]*x[k]);
+                }
+                const float mean = sum/n_embd;
+                rms[i] = 1.0f/sqrtf(mean + eps);
+
+                float dot = 0.0f;
+                for (int64_t k = 0; k < n_embd; ++k) {
+                    dot += (x[k]*rms[i])*q[k];
+                }
+                sc[i] = dot*scale;
+            }
+
+            float mx = -INFINITY;
+            for (int i = 0; i < n_states; ++i) {
+                mx = MAX(mx, sc[i]);
+            }
+            float sum = 0.0f;
+            for (int i = 0; i < n_states; ++i) {
+                sc[i] = expf(sc[i] - mx);
+                sum += sc[i];
+            }
+            for (int i = 0; i < n_states; ++i) {
+                sc[i] /= sum;
+            }
+
+            for (int64_t k = 0; k < n_embd; ++k) {
+                y[k] = 0.0f;
+            }
+            for (int i = 0; i < n_states; ++i) {
+                const ggml_tensor * st = dst->src[1 + i];
+                const float * x = (const float *) ((const char *) st->data + t*st->nb[1]);
+                for (int64_t k = 0; k < n_embd; ++k) {
+                    y[k] += (x[k]*rms[i])*sc[i];
+                }
+            }
+        } else {
+            const ggml_tensor * st = dst->src[1];
             const float * x = (const float *) ((const char *) st->data + t*st->nb[1]);
-            ggml_float sum = 0.0;
             for (int64_t k = 0; k < n_embd; ++k) {
-                sum += (ggml_float) (x[k]*x[k]);
-            }
-            const float mean = sum/n_embd;
-            rms[i] = 1.0f/sqrtf(mean + eps);
-
-            float dot = 0.0f;
-            for (int64_t k = 0; k < n_embd; ++k) {
-                dot += (x[k]*rms[i])*q[k];
-            }
-            sc[i] = dot*scale;
-        }
-
-        float mx = -INFINITY;
-        for (int i = 0; i < n_states; ++i) {
-            mx = MAX(mx, sc[i]);
-        }
-        float sum = 0.0f;
-        for (int i = 0; i < n_states; ++i) {
-            sc[i] = expf(sc[i] - mx);
-            sum += sc[i];
-        }
-        for (int i = 0; i < n_states; ++i) {
-            sc[i] /= sum;
-        }
-
-        float * y = (float *) ((char *) dst->data + t*dst->nb[1] + iq*dst->nb[2]);
-        for (int64_t k = 0; k < n_embd; ++k) {
-            y[k] = 0.0f;
-        }
-        for (int i = 0; i < n_states; ++i) {
-            const ggml_tensor * st = dst->src[1 + i];
-            const float * x = (const float *) ((const char *) st->data + t*st->nb[1]);
-            for (int64_t k = 0; k < n_embd; ++k) {
-                y[k] += (x[k]*rms[i])*sc[i];
+                y[k] = x[k];
             }
         }
+
+        if (norm_w) {
+            const float * nw = (const float *) ((const char *) norm_w->data + (ggml_nrows(norm_w) == 1 ? 0 : iq)*norm_w->nb[1]);
+            ggml_float ss = 0.0;
+            for (int64_t k = 0; k < n_embd; ++k) {
+                ss += (ggml_float) (y[k]*y[k]);
+            }
+            const float r = 1.0f/sqrtf((float) (ss/n_embd) + norm_eps);
+            for (int64_t k = 0; k < n_embd; ++k) {
+                y[k] = y[k]*r*nw[k];
+            }
+        }
+
+        ggml_cpu_write_row_f32_or_q8_1(dst, y.data(), n_embd, (char *) dst->data + t*dst->nb[1] + iq*dst->nb[2]);
     }
 }
 
@@ -12958,6 +12999,10 @@ void ggml_compute_forward_loop_ctrl_apply(const ggml_compute_params * params, gg
     const int ith = params->ith;
     const int nth = params->nth;
 
+    const bool q8 = dst->type == GGML_TYPE_Q8_1;
+    GGML_ASSERT(!q8 || norm);
+    std::vector<float> yq(q8 ? n : 0);
+
     // with the norm a (token, batch) is one unit of work (the rows are reduced), else the elements are split
     for (int64_t ib = 0; ib < B; ++ib) {
         for (int64_t t = 0; t < n_tok; ++t) {
@@ -12967,7 +13012,8 @@ void ggml_compute_forward_loop_ctrl_apply(const ggml_compute_params * params, gg
             const float * dv = (const float *) ((const char *) d->data + t*d->nb[1] + ib*d->nb[2]);
             const float * cv = (const float *) ((const char *) cur->data + t*cur->nb[1] + (cur->ne[2] == 1 ? 0 : ib)*cur->nb[2]);
             const float * mv = (const float *) ((const char *) msg->data + t*msg->nb[1] + ib*msg->nb[2]);
-            float       * y  = (float *) ((char *) dst->data + t*dst->nb[1] + ib*dst->nb[2]);
+            char        * out = (char *) dst->data + t*dst->nb[1] + ib*dst->nb[2];
+            float       * y   = q8 ? yq.data() : (float *) out;
             const char  * wgb = (const char *) wg->data + ib*wg->nb[2];
             const char  * wfb = (const char *) wf->data + ib*wf->nb[2];
 
@@ -12994,8 +13040,257 @@ void ggml_compute_forward_loop_ctrl_apply(const ggml_compute_params * params, gg
                 for (int64_t i = 0; i < n; ++i) {
                     y[i] = y[i]*scale*nw[i];
                 }
+                if (q8) {
+                    quantize_row_q8_1_ref(y, (block_q8_1 *) out, n);
+                }
             }
         }
+    }
+}
+
+// ggml_compute_forward_inkling_attn
+
+struct ik_attn_params {
+    int n_head, n_head_kv, hd, n_rel, n_conv, has_taps, write_cell;
+    float qk_clip, rel_clip, norm_eps, tau_alpha, tau_floor, kq_scale, clip_eps;
+    // row offsets of the projection groups
+    int64_t off_rel, off_sink, off_gate, off_k, off_ktaps, off_v, off_vtaps;
+    // float offsets of the constants
+    int64_t c_qclip, c_relclip, c_kconv, c_vconv, c_table;
+    int64_t n_extent;
+};
+
+static ik_attn_params ik_attn_get_params(const ggml_tensor * dst) {
+    ik_attn_params p;
+    p.n_head     = ggml_get_op_params_i32(dst, 0);
+    p.n_head_kv  = ggml_get_op_params_i32(dst, 1);
+    p.hd         = ggml_get_op_params_i32(dst, 2);
+    p.n_rel      = ggml_get_op_params_i32(dst, 3);
+    p.n_conv     = ggml_get_op_params_i32(dst, 4);
+    p.has_taps   = ggml_get_op_params_i32(dst, 5);
+    p.write_cell = ggml_get_op_params_i32(dst, 6);
+    p.qk_clip    = ggml_get_op_params_f32(dst, 7);
+    p.rel_clip   = ggml_get_op_params_f32(dst, 8);
+    p.norm_eps   = ggml_get_op_params_f32(dst, 9);
+    p.tau_alpha  = ggml_get_op_params_f32(dst, 10);
+    p.tau_floor  = ggml_get_op_params_f32(dst, 11);
+    p.kq_scale   = ggml_get_op_params_f32(dst, 12);
+    p.clip_eps   = ggml_get_op_params_f32(dst, 13);
+
+    const int64_t n_kv_ch = (int64_t) p.hd*p.n_head_kv;
+    const int64_t n_taps  = p.has_taps ? (int64_t) p.n_conv*p.n_head_kv : 0;
+    p.off_rel   = (int64_t) p.hd*p.n_head;
+    p.off_sink  = p.off_rel + (int64_t) p.n_rel*p.n_head;
+    p.off_gate  = p.off_sink + p.n_head;
+    p.off_k     = p.off_gate + (int64_t) p.hd*p.n_head;
+    p.off_ktaps = p.off_k + n_kv_ch;
+    p.off_v     = p.off_ktaps + n_taps;
+    p.off_vtaps = p.off_v + n_kv_ch;
+
+    p.c_qclip   = 0;
+    p.c_relclip = p.c_qclip + (int64_t) p.hd*p.n_head;
+    p.c_kconv   = p.c_relclip + (int64_t) p.n_rel*p.n_head;
+    p.c_vconv   = p.c_kconv + (int64_t) p.n_conv*n_kv_ch;
+    p.c_table   = p.c_vconv + (int64_t) p.n_conv*n_kv_ch;
+    p.n_extent  = (ggml_nelements(dst->src[1]) - p.c_table)/p.n_rel;
+    return p;
+}
+
+// the K (which == 0) or V (which == 1) channels of kv head g: convolution, state update, per-head post-normalization
+static void ik_attn_conv_head(const ik_attn_params & p, const ggml_tensor * proj, const int64_t col, const float * consts,
+        ggml_tensor * state, const int32_t read_cell, const int which, const int g, float * y) {
+    const int64_t hd     = p.hd;
+    const int64_t n_conv = p.n_conv;
+    const int64_t ch0    = (int64_t) which*hd*p.n_head_kv + (int64_t) g*hd; // channel offset in the state
+    const int64_t off    = which == 0 ? p.off_k : p.off_v;
+    const int64_t offt   = which == 0 ? p.off_ktaps : p.off_vtaps;
+    const float * w      = consts + (which == 0 ? p.c_kconv : p.c_vconv);
+    const float * pr     = (const float *) ((const char *) proj->data + col*proj->nb[1]);
+    const float   scale  = 1.0f/sqrtf((p.has_taps ? 2 : 1)*n_conv + 1);
+
+    float x[16];
+    float ss = 0.0f;
+    for (int64_t i = 0; i < hd; ++i) {
+        const int64_t c = ch0 + i;
+        const float * past = (const float *) ((const char *) state->data + read_cell*state->nb[1]) + c*(n_conv - 1);
+        for (int64_t j = 0; j < n_conv - 1; ++j) {
+            x[j] = past[j];
+        }
+        x[n_conv - 1] = pr[off + (int64_t) g*hd + i];
+
+        float out = 0.0f;
+        for (int64_t j = 0; j < n_conv; ++j) {
+            out += x[j]*w[c*n_conv + j];
+        }
+        if (p.has_taps) {
+            for (int64_t lag = 0; lag < n_conv; ++lag) {
+                out += x[n_conv - 1 - lag]*pr[offt + (int64_t) g*n_conv + lag];
+            }
+        }
+        y[i] = (x[n_conv - 1] + out)*scale;
+        ss += y[i]*y[i];
+
+        float * st = (float *) ((char *) state->data + (int64_t) p.write_cell*state->nb[1]) + c*(n_conv - 1);
+        for (int64_t j = 0; j < n_conv - 1; ++j) {
+            st[j] = x[j + 1];
+        }
+    }
+    float factor;
+    if (which == 0) {
+        const float norm = sqrtf(ss) + p.clip_eps;
+        factor = p.qk_clip/norm;
+        factor = factor < 0.0f ? 0.0f : (factor > 1.0f ? 1.0f : factor);
+    } else {
+        factor = 1.0f/sqrtf(ss/hd + p.norm_eps);
+    }
+    for (int64_t i = 0; i < hd; ++i) {
+        y[i] *= factor;
+    }
+}
+
+static void ik_attn_store_row(const ggml_tensor * cache, const int64_t kv, const int g, const float * y, const int64_t hd) {
+    char * row = (char *) cache->data + kv*cache->nb[2] + g*cache->nb[1];
+    if (cache->type == GGML_TYPE_F16) {
+        ggml_fp32_to_fp16_row(y, (ggml_fp16_t *) row, hd);
+    } else {
+        quantize_row_q8_0_ref(y, (block_q8_0 *) row, hd);
+    }
+}
+
+static void ik_attn_load_row(const ggml_tensor * cache, const int64_t kv, const int g, float * y, const int64_t hd) {
+    const char * row = (const char *) cache->data + kv*cache->nb[2] + g*cache->nb[1];
+    if (cache->type == GGML_TYPE_F16) {
+        ggml_fp16_to_fp32_row((const ggml_fp16_t *) row, y, hd);
+    } else {
+        dequantize_row_q8_0((const block_q8_0 *) row, y, hd);
+    }
+}
+
+void ggml_compute_forward_inkling_attn(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * proj    = dst->src[0];
+    const ggml_tensor * consts_t = dst->src[1];
+    ggml_tensor       * state   = dst->src[2];
+    const ggml_tensor * rs_ids  = dst->src[3];
+    ggml_tensor       * k_cache = dst->src[4];
+    ggml_tensor       * v_cache = dst->src[5];
+    const ggml_tensor * kv_idxs = dst->src[6];
+    const ggml_tensor * rel_pos = dst->src[7];
+    const ggml_tensor * mask    = dst->src[8];
+    const ggml_tensor * pos     = dst->src[9];
+
+    const ik_attn_params p = ik_attn_get_params(dst);
+    const float * consts = (const float *) consts_t->data;
+
+    const int64_t hd     = p.hd;
+    const int64_t n_kv   = k_cache->ne[2];
+    const int     gqa    = p.n_head/p.n_head_kv;
+    const int64_t col_k  = proj->ne[1] == 3 ? 1 : 0;
+    const int64_t col_v  = proj->ne[1] == 3 ? 2 : 0;
+
+    const int32_t read_cell = ((const int32_t *) rs_ids->data)[0];
+    const int64_t kv_idx    = ((const int64_t *) kv_idxs->data)[0];
+    GGML_ASSERT(read_cell >= 0 && read_cell < state->ne[1]);
+    GGML_ASSERT(kv_idx >= 0 && kv_idx < n_kv);
+
+    float tau = 1.0f;
+    if (pos) {
+        const float t = ((const int32_t *) pos->data)[0] + 1.0f;
+        tau = 1.0f + p.tau_alpha*logf(MAX(1.0f, t/p.tau_floor));
+    }
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    // the K and V of the token: convolved, normalized, stored (one thread, the attention reads them back from the caches)
+    if (ith == 0) {
+        std::vector<float> y(hd);
+        for (int g = 0; g < p.n_head_kv; ++g) {
+            ik_attn_conv_head(p, proj, col_k, consts, state, read_cell, 0, g, y.data());
+            ik_attn_store_row(k_cache, kv_idx, g, y.data(), hd);
+            ik_attn_conv_head(p, proj, col_v, consts, state, read_cell, 1, g, y.data());
+            ik_attn_store_row(v_cache, kv_idx, g, y.data(), hd);
+        }
+    }
+    ggml_barrier(params->threadpool);
+
+    const float * pr = (const float *) proj->data; // column 0: Q, R, sink, gate
+    std::vector<float> q(hd), r(p.n_rel), bias(p.n_extent), k(hd), v(hd), acc(hd), out(hd);
+
+    for (int h = ith; h < p.n_head; h += nth) {
+        const int g = h/gqa;
+
+        // the clipped Q and R of the head, scaled by tau
+        float ss = 0.0f;
+        for (int64_t i = 0; i < hd; ++i) {
+            q[i] = pr[(int64_t) h*hd + i]*consts[p.c_qclip + (int64_t) h*hd + i];
+            ss += q[i]*q[i];
+        }
+        float factor = p.qk_clip/(sqrtf(ss) + p.clip_eps);
+        factor = factor < 0.0f ? 0.0f : (factor > 1.0f ? 1.0f : factor);
+        for (int64_t i = 0; i < hd; ++i) {
+            q[i] = q[i]*factor*tau;
+        }
+        ss = 0.0f;
+        for (int64_t j = 0; j < p.n_rel; ++j) {
+            r[j] = pr[p.off_rel + (int64_t) h*p.n_rel + j]*consts[p.c_relclip + (int64_t) h*p.n_rel + j];
+            ss += r[j]*r[j];
+        }
+        factor = p.rel_clip/(sqrtf(ss) + p.clip_eps);
+        factor = factor < 0.0f ? 0.0f : (factor > 1.0f ? 1.0f : factor);
+        for (int64_t j = 0; j < p.n_rel; ++j) {
+            r[j] = r[j]*factor*tau;
+        }
+        // the bias of every distance
+        for (int64_t d = 0; d < p.n_extent; ++d) {
+            float b = 0.0f;
+            for (int64_t j = 0; j < p.n_rel; ++j) {
+                b += consts[p.c_table + d*p.n_rel + j]*r[j];
+            }
+            bias[d] = b;
+        }
+        const float sink = pr[p.off_sink + h];
+
+        // online softmax over the cells, with a zero sink logit
+        float m = -INFINITY, l = 0.0f;
+        for (int64_t i = 0; i < hd; ++i) {
+            acc[i] = 0.0f;
+        }
+        for (int64_t kv = 0; kv < n_kv; ++kv) {
+            const float mv = mask->type == GGML_TYPE_F16 ? GGML_CPU_FP16_TO_FP32(((const ggml_fp16_t *) mask->data)[kv]) : ((const float *) mask->data)[kv];
+            if (mv == -INFINITY) {
+                continue;
+            }
+            ik_attn_load_row(k_cache, kv, g, k.data(), hd);
+            float dot = 0.0f;
+            for (int64_t i = 0; i < hd; ++i) {
+                dot += q[i]*k[i];
+            }
+            const int32_t d = ((const int32_t *) rel_pos->data)[kv];
+            const float s = p.kq_scale*dot + (d >= 0 && d < p.n_extent ? bias[d] : 0.0f) - sink + mv;
+
+            const float m_new = MAX(m, s);
+            const float corr  = expf(m - m_new);
+            const float pk    = expf(s - m_new);
+            ik_attn_load_row(v_cache, kv, g, v.data(), hd);
+            l = l*corr + pk;
+            for (int64_t i = 0; i < hd; ++i) {
+                acc[i] = acc[i]*corr + pk*v[i];
+            }
+            m = m_new;
+        }
+        {
+            const float m_new = MAX(m, 0.0f);
+            const float corr  = expf(m - m_new);
+            l = l*corr + expf(0.0f - m_new);
+            for (int64_t i = 0; i < hd; ++i) {
+                acc[i] *= corr;
+            }
+        }
+        for (int64_t i = 0; i < hd; ++i) {
+            const float gate = pr[p.off_gate + (int64_t) h*hd + i];
+            out[i] = acc[i]/l * (1.0f/(1.0f + expf(-gate)));
+        }
+        ggml_cpu_write_row_f32_or_q8_1(dst, out.data(), hd, (char *) dst->data + ggml_row_size(dst->type, (int64_t) h*hd));
     }
 }
 

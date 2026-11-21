@@ -756,6 +756,7 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .blck_size                = QK8_1,
         .type_size                = sizeof(block_q8_1),
         .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_q8_1,
         .from_float_ref           = (ggml_from_float_t) quantize_row_q8_1_ref,
     },
     [GGML_TYPE_MXFP4] = {
@@ -1124,9 +1125,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "LOOP_CTRL_DOWN",
     "LOOP_CTRL_APPLY",
     "MOE_SUM",
+    "INKLING_ATTN",
 };
 
-static_assert(GGML_OP_COUNT == 107, "GGML_OP_COUNT != 107");
+static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1247,9 +1249,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "loop_ctrl_down(w,a,b)",
     "loop_ctrl_apply(x,m,d)",
     "moe_sum(x,w)",
+    "inkling_attn(p,k,v)",
 };
 
-static_assert(GGML_OP_COUNT == 107, "GGML_OP_COUNT != 107");
+static_assert(GGML_OP_COUNT == 108, "GGML_OP_COUNT != 108");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5691,20 +5694,30 @@ struct ggml_tensor * ggml_l2_clip(
 
 // ggml_res_mix
 
-struct ggml_tensor * ggml_res_mix(
+// op_params: [0] eps, [1] scale, [2] norm_eps, [3] has_norm (int32); with a norm the weight is src[1 + n_states]
+// query == NULL: no mix (n_q = 1), the norm of states[0] alone
+static struct ggml_tensor * ggml_res_mix_impl(
         struct ggml_context * ctx,
         struct ggml_tensor  * query,
         struct ggml_tensor ** states,
         int                   n_states,
         float                 eps,
-        float                 scale) {
-    GGML_ASSERT(n_states >= 1 && n_states <= GGML_MAX_SRC - 1);
-    GGML_ASSERT(query->type == GGML_TYPE_F32);
-    GGML_ASSERT(ggml_is_matrix(query) && ggml_is_contiguous(query));
+        float                 scale,
+        struct ggml_tensor  * norm_w,
+        float                 norm_eps,
+        enum ggml_type        out_type) {
+    GGML_ASSERT(n_states >= 1 && n_states <= GGML_MAX_SRC - 1 - (norm_w ? 1 : 0));
+    GGML_ASSERT(query != NULL || (norm_w != NULL && n_states == 1));
 
-    const int64_t n_embd = query->ne[0];
-    const int64_t n_q    = query->ne[1];
+    const int64_t n_embd = states[0]->ne[0];
     const int64_t n_tok  = states[0]->ne[1];
+    const int64_t n_q    = query ? query->ne[1] : 1;
+
+    if (query) {
+        GGML_ASSERT(query->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_is_matrix(query) && ggml_is_contiguous(query));
+        GGML_ASSERT(query->ne[0] == n_embd);
+    }
 
     for (int i = 0; i < n_states; ++i) {
         GGML_ASSERT(states[i]->type == GGML_TYPE_F32);
@@ -5713,18 +5726,53 @@ struct ggml_tensor * ggml_res_mix(
         GGML_ASSERT(states[i]->nb[0] == sizeof(float));
     }
 
-    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, n_tok, n_q);
+    if (norm_w) {
+        GGML_ASSERT(norm_w->type == GGML_TYPE_F32 && ggml_is_contiguous(norm_w));
+        GGML_ASSERT(norm_w->ne[0] == n_embd && (ggml_nrows(norm_w) == 1 || ggml_nrows(norm_w) == n_q));
+    }
 
-    float params[2] = { eps, scale };
+    GGML_ASSERT(out_type == GGML_TYPE_F32 || (out_type == GGML_TYPE_Q8_1 && norm_w != NULL && n_embd % QK8_1 == 0));
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, out_type, n_embd, n_tok, n_q);
+
+    float params[4] = { eps, scale, norm_eps, 0.0f };
     ggml_set_op_params(result, params, sizeof(params));
+    ggml_set_op_params_i32(result, 3, norm_w ? 1 : 0);
 
     result->op     = GGML_OP_RES_MIX;
     result->src[0] = query;
     for (int i = 0; i < n_states; ++i) {
         result->src[1 + i] = states[i];
     }
+    if (norm_w) {
+        result->src[1 + n_states] = norm_w;
+    }
 
     return result;
+}
+
+struct ggml_tensor * ggml_res_mix(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * query,
+        struct ggml_tensor ** states,
+        int                   n_states,
+        float                 eps,
+        float                 scale) {
+    return ggml_res_mix_impl(ctx, query, states, n_states, eps, scale, NULL, 0.0f, GGML_TYPE_F32);
+}
+
+struct ggml_tensor * ggml_res_mix_norm(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * query,
+        struct ggml_tensor ** states,
+        int                   n_states,
+        float                 eps,
+        float                 scale,
+        struct ggml_tensor  * norm_w,
+        float                 norm_eps,
+        enum ggml_type        out_type) {
+    GGML_ASSERT(norm_w != NULL);
+    return ggml_res_mix_impl(ctx, query, states, n_states, eps, scale, norm_w, norm_eps, out_type);
 }
 
 // ggml_shortconv_res
@@ -5887,7 +5935,7 @@ struct ggml_tensor * ggml_loop_ctrl_down(
 
 // ggml_loop_ctrl_apply
 
-struct ggml_tensor * ggml_loop_ctrl_apply(
+struct ggml_tensor * ggml_loop_ctrl_apply_ext(
         struct ggml_context * ctx,
         struct ggml_tensor  * cur,
         struct ggml_tensor  * msg,
@@ -5895,7 +5943,8 @@ struct ggml_tensor * ggml_loop_ctrl_apply(
         struct ggml_tensor  * w_gain,
         struct ggml_tensor  * w_forget,
         struct ggml_tensor  * norm_w,
-        float                 eps) {
+        float                 eps,
+        enum ggml_type        out_type) {
     GGML_ASSERT(cur->type == GGML_TYPE_F32 && msg->type == GGML_TYPE_F32 && d->type == GGML_TYPE_F32);
     GGML_ASSERT(w_gain->type == GGML_TYPE_F32 && w_forget->type == GGML_TYPE_F32);
     GGML_ASSERT(cur->ne[3] == 1 && msg->ne[3] == 1 && d->ne[3] == 1);
@@ -5913,7 +5962,9 @@ struct ggml_tensor * ggml_loop_ctrl_apply(
         GGML_ASSERT(norm_w->ne[0] == cur->ne[0] && (ggml_nrows(norm_w) == 1 || ggml_nrows(norm_w) == B));
     }
 
-    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, cur->ne[0], cur->ne[1], B);
+    GGML_ASSERT(out_type == GGML_TYPE_F32 || (out_type == GGML_TYPE_Q8_1 && norm_w != NULL && cur->ne[0] % QK8_1 == 0));
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, out_type, cur->ne[0], cur->ne[1], B);
 
     ggml_set_op_params_f32(result, 0, eps);
 
@@ -5927,6 +5978,19 @@ struct ggml_tensor * ggml_loop_ctrl_apply(
 
     return result;
 }
+
+struct ggml_tensor * ggml_loop_ctrl_apply(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * msg,
+        struct ggml_tensor  * d,
+        struct ggml_tensor  * w_gain,
+        struct ggml_tensor  * w_forget,
+        struct ggml_tensor  * norm_w,
+        float                 eps) {
+    return ggml_loop_ctrl_apply_ext(ctx, cur, msg, d, w_gain, w_forget, norm_w, eps, GGML_TYPE_F32);
+}
+
 
 // ggml_moe_sum
 
@@ -5944,6 +6008,97 @@ struct ggml_tensor * ggml_moe_sum(
     result->op     = GGML_OP_MOE_SUM;
     result->src[0] = a;
     result->src[1] = w;
+
+    return result;
+}
+
+// ggml_inkling_attn
+// op_params: [0] n_head, [1] n_head_kv, [2] n_embd_head, [3] n_rel, [4] n_conv, [5] has_taps, [6] write_cell,
+//            [7] qk_clip, [8] rel_clip, [9] norm_eps, [10] tau_alpha, [11] tau_floor, [12] kq_scale, [13] clip_eps (floats)
+
+struct ggml_tensor * ggml_inkling_attn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * proj,
+        struct ggml_tensor  * consts,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * rs_ids,
+        struct ggml_tensor  * k_cache,
+        struct ggml_tensor  * v_cache,
+        struct ggml_tensor  * kv_idxs,
+        struct ggml_tensor  * rel_pos,
+        struct ggml_tensor  * mask,
+        struct ggml_tensor  * pos,
+        int                   n_head,
+        int                   n_head_kv,
+        int                   n_embd_head,
+        int                   n_rel,
+        int                   n_conv,
+        bool                  has_taps,
+        int                   write_cell,
+        float                 qk_clip,
+        float                 rel_clip,
+        float                 norm_eps,
+        float                 tau_alpha,
+        float                 tau_floor,
+        float                 kq_scale,
+        enum ggml_type        out_type) {
+    GGML_ASSERT(n_head > 0 && n_head_kv > 0 && n_head % n_head_kv == 0 && n_head/n_head_kv <= 4);
+    GGML_ASSERT(n_embd_head == 128 && n_rel > 0 && n_rel <= 32 && n_conv >= 2 && n_conv <= 8);
+
+    const int64_t hd      = n_embd_head;
+    const int64_t n_kv_ch = hd*n_head_kv;
+    const int64_t n_taps  = has_taps ? n_conv*n_head_kv : 0;
+    const int64_t n_proj  = hd*n_head + n_rel*n_head + n_head + hd*n_head + 2*(n_kv_ch + n_taps);
+
+    GGML_ASSERT(proj->type == GGML_TYPE_F32 && proj->ne[0] == n_proj && (proj->ne[1] == 1 || proj->ne[1] == 3) && proj->ne[2] == 1 && proj->ne[3] == 1);
+    GGML_ASSERT(proj->nb[0] == sizeof(float));
+
+    const int64_t n_fixed = hd*n_head + n_rel*n_head + 2*n_conv*n_kv_ch;
+    GGML_ASSERT(consts->type == GGML_TYPE_F32 && ggml_is_contiguous(consts) && ggml_nelements(consts) > n_fixed);
+    GGML_ASSERT((ggml_nelements(consts) - n_fixed) % n_rel == 0);
+
+    GGML_ASSERT(state->type == GGML_TYPE_F32 && state->nb[0] == sizeof(float) && state->ne[0] >= (n_conv - 1)*2*n_kv_ch);
+    GGML_ASSERT(rs_ids->type == GGML_TYPE_I32 && rs_ids->ne[0] >= 1);
+    GGML_ASSERT(write_cell >= 0 && write_cell < state->ne[1]);
+
+    GGML_ASSERT(k_cache->type == v_cache->type && (k_cache->type == GGML_TYPE_F16 || k_cache->type == GGML_TYPE_Q8_0));
+    GGML_ASSERT(k_cache->ne[0] == hd && k_cache->ne[1] == n_head_kv && v_cache->ne[0] == hd && v_cache->ne[1] == n_head_kv);
+    GGML_ASSERT(k_cache->ne[2] == v_cache->ne[2]);
+    GGML_ASSERT(k_cache->nb[1] == ggml_row_size(k_cache->type, hd) && v_cache->nb[1] == ggml_row_size(v_cache->type, hd));
+
+    const int64_t n_kv = k_cache->ne[2];
+    GGML_ASSERT(kv_idxs->type == GGML_TYPE_I64 && kv_idxs->ne[0] >= 1);
+    GGML_ASSERT(rel_pos->type == GGML_TYPE_I32 && rel_pos->ne[0] == n_kv);
+    GGML_ASSERT((mask->type == GGML_TYPE_F16 || mask->type == GGML_TYPE_F32) && mask->ne[0] == n_kv && ggml_is_contiguous(mask));
+    GGML_ASSERT(pos == NULL || (pos->type == GGML_TYPE_I32 && pos->ne[0] >= 1));
+
+    GGML_ASSERT(out_type == GGML_TYPE_F32 || (out_type == GGML_TYPE_Q8_1 && (hd*n_head) % QK8_1 == 0));
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, out_type, hd*n_head, 1);
+
+    int32_t params[14];
+    params[0] = n_head;
+    params[1] = n_head_kv;
+    params[2] = n_embd_head;
+    params[3] = n_rel;
+    params[4] = n_conv;
+    params[5] = has_taps ? 1 : 0;
+    params[6] = write_cell;
+    const float fparams[7] = { qk_clip, rel_clip, norm_eps, tau_alpha, tau_floor, kq_scale, 1e-6f };
+    memcpy(params + 7, fparams, sizeof(fparams));
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_INKLING_ATTN;
+    result->src[0] = proj;
+    result->src[1] = consts;
+    result->src[2] = state;
+    result->src[3] = rs_ids;
+    result->src[4] = k_cache;
+    result->src[5] = v_cache;
+    result->src[6] = kv_idxs;
+    result->src[7] = rel_pos;
+    result->src[8] = mask;
+    result->src[9] = pos;
 
     return result;
 }
@@ -8383,6 +8538,12 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_Q5_0:    result = quantize_q5_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q5_1:    result = quantize_q5_1   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q8_0:    result = quantize_q8_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q8_1:
+            {
+                // an activation type: the reference row quantizer (no imatrix)
+                quantize_row_q8_1_ref(src + start, (block_q8_1 *) ((char *) dst + start_row * row_size), n);
+                result = nrows * row_size;
+            } break;
         case GGML_TYPE_MXFP4:   result = quantize_mxfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_F8_E4M3: result = quantize_f8_e4m3(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;

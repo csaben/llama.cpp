@@ -1,5 +1,6 @@
 #include "models.h"
 #include "../llama-memory-hybrid-iswa.h"
+#include <cstring>
 
 void llama_model_inkling2::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -415,6 +416,23 @@ void llama_model_inkling2::graph::init_fused() {
     // the fused ops bypass the LoRA hooks of the controller projections
     fused = enabled && (loras == nullptr || loras->empty());
     moe_sum_mul_mat = fused;
+
+    static const bool q8_enabled = [] {
+        const char * env = getenv("LLAMA_INKLING_Q8_ACT");
+        return env == nullptr || atoi(env) != 0;
+    }();
+    q8_act = fused && q8_enabled;
+}
+
+// Q8_1 activations go to the quantized matvec kernels of the CUDA and CPU backends
+ggml_type llama_model_inkling2::graph::act_type(int il) const {
+    if (!q8_act) {
+        return GGML_TYPE_F32;
+    }
+    ggml_backend_dev_t dev = model.dev_layer(il);
+    const char * name = dev ? ggml_backend_dev_name(dev) : "";
+    const bool ok = strncmp(name, "CUDA", 4) == 0 || (dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU);
+    return ok ? GGML_TYPE_Q8_1 : GGML_TYPE_F32;
 }
 
 // the mixed output of query j as [n_embd, n_tokens]; the fused mix is laid out [n_embd, n_tokens, n_q], the plain one [n_embd, n_q, n_tokens]
@@ -480,6 +498,22 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *> 
     scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f/sqrtf(n_embd), 0.0f);
 
     return ggml_mul_mat(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, states)), scores);
+}
+
+// the fused mix, RMS-normalized and scaled by norm_w: [n_embd, n_tokens, n_q] in out_type; query == nullptr: the norm of cur alone
+ggml_tensor * llama_model_inkling2::graph::mix_norm(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query,
+        ggml_tensor * norm_w, ggml_type out_type) {
+    GGML_ASSERT(fused);
+    std::vector<ggml_tensor *> states;
+    states.reserve(blocks.size() + 1);
+    if (query) {
+        for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
+            states.push_back(ggml_reshape_2d(ctx0, *it, n_embd, n_tokens));
+        }
+    }
+    states.push_back(ggml_reshape_2d(ctx0, cur, n_embd, n_tokens));
+
+    return ggml_res_mix_norm(ctx0, query, states.data(), (int) states.size(), 1e-6f, 1.0f/sqrtf(n_embd), norm_w, hparams.f_norm_rms_eps, out_type);
 }
 
 // causal short convolution with a residual; dynamic adds input-dependent taps per head
@@ -643,17 +677,36 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
 
     ggml_tensor * inpSA = cur;
 
+    const auto & fa = static_cast<const llama_model_inkling2 &>(model).fused_attn[ip];
+    const bool use_fused = fused && fa.w != nullptr;
+    const ggml_type a_type = act_type(il);
+
     // attention inputs: SWA layers mix one, full-attention layers one each for Q, K and V
     ggml_tensor * inputs[3] = {cur, cur, cur};
+    ggml_tensor * inputs3   = nullptr; // the three inputs as the slabs of one [n_embd, n_tokens, 3] tensor
     ggml_tensor * mixed = nullptr;
-    if (layer.attn_res_query) {
+    bool inputs_normed = false;
+    ggml_tensor * norm3 = is_swa ? layer.attn_norm : static_cast<const llama_model_inkling2 &>(model).attn_inp_norm_qkv[ip];
+    if (use_fused && !messages && norm3 != nullptr) {
+        // the mix and the input norm in one op, written as the activation of the projection
+        ggml_tensor * x = mix_norm(blocks, cur, layer.attn_res_query, norm3, a_type);
+        cb(x, "attn_inp", il);
+        if (is_swa) {
+            inputs[0] = inputs[1] = inputs[2] = ggml_view_2d(ctx0, x, n_embd, n_tokens, x->nb[1], 0);
+        } else {
+            inputs3 = x;
+            for (int j = 0; j < 3; ++j) {
+                inputs[j] = ggml_view_2d(ctx0, x, n_embd, n_tokens, x->nb[1], j*x->nb[2]);
+            }
+        }
+        inputs_normed = true;
+    } else if (layer.attn_res_query) {
         mixed = mix(blocks, cur, layer.attn_res_query);
         for (int j = 0; j < 3; ++j) {
             inputs[j] = mixed_view(mixed, is_swa ? 0 : j);
         }
     }
 
-    bool inputs_normed = false;
     if (messages && fused && loop->ctrl_down_qkv) {
         // the q, k and v controllers in one batched op each, the input norm fused into the second
         ggml_tensor * msgs3 = ggml_view_3d(ctx0, messages, n_embd, n_tokens, 3, messages->nb[1], messages->nb[2], 0);
@@ -667,8 +720,10 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
         }
         if (norm3 != nullptr) {
             ggml_tensor * d    = ggml_loop_ctrl_down(ctx0, loop->ctrl_down_qkv, cur3, msgs3, 1e-6f);
-            ggml_tensor * out3 = ggml_loop_ctrl_apply(ctx0, cur3, msgs3, d, loop->ctrl_gain_qkv, loop->ctrl_forget_qkv, norm3, hparams.f_norm_rms_eps);
+            ggml_tensor * out3 = ggml_loop_ctrl_apply_ext(ctx0, cur3, msgs3, d, loop->ctrl_gain_qkv, loop->ctrl_forget_qkv, norm3, hparams.f_norm_rms_eps,
+                    use_fused ? a_type : GGML_TYPE_F32);
             cb(out3, "attn_ctrl", il);
+            inputs3 = out3;
             for (int j = 0; j < 3; ++j) {
                 inputs[j] = ggml_view_2d(ctx0, out3, n_embd, n_tokens, out3->nb[1], j*out3->nb[2]);
             }
@@ -701,9 +756,6 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
     // self-attention
     ggml_tensor * attn_proj = nullptr; // the fused projection output, [n_q, n_tokens]
     {
-        const auto & fa = static_cast<const llama_model_inkling2 &>(model).fused_attn[ip];
-        const bool use_fused = fused && fa.w != nullptr;
-
         ggml_tensor * Qcur = nullptr;
         ggml_tensor * Kcur = nullptr;
         ggml_tensor * Vcur = nullptr;
@@ -719,6 +771,13 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                 out_q = ggml_mul_mat(ctx0, fa.w, inputs[0]);
                 out_k = ggml_view_2d(ctx0, out_q, fa.n_k, n_tokens, out_q->nb[1], fa.n_q*sizeof(float));
                 out_v = ggml_view_2d(ctx0, out_q, fa.n_v, n_tokens, out_q->nb[1], (fa.n_q + fa.n_k)*sizeof(float));
+            } else if (inputs3 != nullptr && n_tokens <= 4) {
+                // few tokens: one matmul over the three inputs reads the weights once; the groups take their own columns
+                ggml_tensor * x3  = ggml_reshape_2d(ctx0, inputs3, n_embd, 3*n_tokens);
+                ggml_tensor * out = ggml_mul_mat(ctx0, fa.w, x3); // [n_q + n_k + n_v, 3*n_tokens]
+                out_q = ggml_view_2d(ctx0, out, fa.n_q, n_tokens, out->nb[1], 0);
+                out_k = ggml_view_2d(ctx0, out, fa.n_k, n_tokens, out->nb[1], 1*n_tokens*out->nb[1] + fa.n_q*sizeof(float));
+                out_v = ggml_view_2d(ctx0, out, fa.n_v, n_tokens, out->nb[1], 2*n_tokens*out->nb[1] + (fa.n_q + fa.n_k)*sizeof(float));
             } else {
                 out_q = ggml_mul_mat(ctx0, fa.q, inputs[0]);
                 out_k = ggml_mul_mat(ctx0, fa.k, inputs[1]);
@@ -830,11 +889,17 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
     cb(ffn_inp, "ffn_inp", il);
 
     // MoE
-    cur = ggml_reshape_2d(ctx0, mix(blocks, cur, layer.ffn_res_query), n_embd, n_tokens);
-    if (messages) {
-        cur = control(cur, message(LOOP_CTRL_FFN), *loop, LOOP_CTRL_FFN);
+    if (fused && !messages) {
+        // the mix and the FFN norm in one op (F32: the router reads it too)
+        cur = ggml_reshape_2d(ctx0, mix_norm(blocks, cur, layer.ffn_res_query, layer.ffn_norm, GGML_TYPE_F32), n_embd, n_tokens);
+        cb(cur, "ffn_norm", il);
+    } else {
+        cur = ggml_reshape_2d(ctx0, mix(blocks, cur, layer.ffn_res_query), n_embd, n_tokens);
+        if (messages) {
+            cur = control(cur, message(LOOP_CTRL_FFN), *loop, LOOP_CTRL_FFN);
+        }
+        cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
     }
-    cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
 
     cur = build_moe_ffn(cur,
             layer.ffn_gate_inp,
@@ -861,8 +926,12 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
 }
 
 void llama_model_inkling2::graph::build_output(ggml_tensor * cur, const std::vector<ggml_tensor *> & blocks) {
-    cur = ggml_reshape_2d(ctx0, mix(blocks, cur, model.output_res_query), n_embd, n_tokens);
-    cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+    if (fused) {
+        cur = ggml_reshape_2d(ctx0, mix_norm(blocks, cur, model.output_res_query, model.output_norm, GGML_TYPE_F32), n_embd, n_tokens);
+    } else {
+        cur = ggml_reshape_2d(ctx0, mix(blocks, cur, model.output_res_query), n_embd, n_tokens);
+        cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+    }
     res->t_layer_inp[n_layer] = cur;
 
     if (inp_out_ids) {

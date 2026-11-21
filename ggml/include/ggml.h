@@ -440,6 +440,7 @@ extern "C" {
         GGML_OP_LOOP_CTRL_DOWN,
         GGML_OP_LOOP_CTRL_APPLY,
         GGML_OP_MOE_SUM,
+        GGML_OP_INKLING_ATTN,
 
         GGML_OP_COUNT,
     };
@@ -2341,6 +2342,19 @@ extern "C" {
             float                 eps,
             float                 scale);
 
+    // the mix followed by an RMS norm (norm_eps) scaled by norm_w [n_embd, 1 or n_q], written as F32 or Q8_1
+    // (Q8_1: the quantized activation of a following mul_mat, n_embd % 32 == 0); query == NULL: no mix, the norm of states[0]
+    GGML_API struct ggml_tensor * ggml_res_mix_norm(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * query,
+            struct ggml_tensor ** states,
+            int                   n_states,
+            float                 eps,
+            float                 scale,
+            struct ggml_tensor  * norm_w,
+            float                 norm_eps,
+            enum ggml_type        out_type);
+
     // causal short convolution with a residual: y = res + (cur + conv([past, cur], w) + dynamic taps) * scale
     //   past  [d_conv - 1, n_channels, n_seqs]  (the inputs before the current ones, per sequence)
     //   w     [d_conv, n_channels]
@@ -2418,6 +2432,57 @@ extern "C" {
             struct ggml_tensor  * w_forget,
             struct ggml_tensor  * norm_w,
             float                 eps);
+
+    // the same with the output type: F32, or Q8_1 (the quantized activation of a following mul_mat; needs norm_w, n % 32 == 0)
+    GGML_API struct ggml_tensor * ggml_loop_ctrl_apply_ext(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * msg,
+            struct ggml_tensor  * d,
+            struct ggml_tensor  * w_gain,
+            struct ggml_tensor  * w_forget,
+            struct ggml_tensor  * norm_w,
+            float                 eps,
+            enum ggml_type        out_type);
+
+    // the single-token attention block of inkling2 (decode), from the fused projection output to the gated attention output:
+    //   proj   [n_proj, n_cols] F32, rows Q[hd*n_head] | R[n_rel*n_head] | sink[n_head] | gate[hd*n_head] | K[hd*n_head_kv]
+    //          (| k_taps[n_conv*n_head_kv]) | V[hd*n_head_kv] (| v_taps[n_conv*n_head_kv]); n_cols 1, or 3 when the Q, K and V
+    //          groups come from the columns 0, 1, 2 (different inputs)
+    //   consts [n_consts] F32: q_clip[hd*n_head] | rel_clip[n_rel*n_head] | k_conv[n_conv*hd*n_head_kv] | v_conv[same] | table[n_rel*n_extent]
+    //   state  [(n_conv - 1)*n_channels, n_cells] F32: the recurrent state, K channels at 0, V channels at hd*n_head_kv;
+    //          the past inputs are read from cell rs_ids[0], the new ones written to cell write_cell
+    //   k_cache, v_cache [hd, n_head_kv, n_kv] (strided views of the caches, F16 or Q8_0): row kv_idxs[0] is written, then read
+    //   rel_pos [n_kv] I32 (distance, >= n_extent: no bias), mask [n_kv] F16/F32, pos [1] I32 (optional: the log-scaled tau of Q and R)
+    // K and V are convolved (+ dynamic taps), K L2-clipped and V RMS-normalized per head, Q and R clipped per head, the relative
+    // bias, the sink logit and the mask added to the scores, the attention output gated by sigmoid(gate); result [hd*n_head, 1]
+    // in F32 or Q8_1
+    GGML_API struct ggml_tensor * ggml_inkling_attn(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * proj,
+            struct ggml_tensor  * consts,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rs_ids,
+            struct ggml_tensor  * k_cache,
+            struct ggml_tensor  * v_cache,
+            struct ggml_tensor  * kv_idxs,
+            struct ggml_tensor  * rel_pos,
+            struct ggml_tensor  * mask,
+            struct ggml_tensor  * pos,
+            int                   n_head,
+            int                   n_head_kv,
+            int                   n_embd_head,
+            int                   n_rel,
+            int                   n_conv,
+            bool                  has_taps,
+            int                   write_cell,
+            float                 qk_clip,
+            float                 rel_clip,
+            float                 norm_eps,
+            float                 tau_alpha,
+            float                 tau_floor,
+            float                 kq_scale,
+            enum ggml_type        out_type);
 
     // weighted sum over the second dimension: a [n0, n1, n2], w [1, n1, n2] -> [n0, n2] = sum_k a[:, k, t]*w[0, k, t]
     GGML_API struct ggml_tensor * ggml_moe_sum(

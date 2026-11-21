@@ -2548,6 +2548,8 @@ struct llama_model_inkling2 : public llama_model_base {
     struct graph : public llm_graph_context {
         graph(const llm_graph_params & params);
         ggml_tensor * mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query);
+        // the fused mix with the RMS norm (norm_w [n_embd, 1 or n_q]) of the result, as F32 or Q8_1 (the next matmul's activation)
+        ggml_tensor * mix_norm(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query, ggml_tensor * norm_w, ggml_type out_type);
         ggml_tensor * clip(ggml_tensor * cur, ggml_tensor * scale, float threshold);
         ggml_tensor * convolve(
                 ggml_tensor * cur,
@@ -2572,6 +2574,9 @@ struct llama_model_inkling2 : public llama_model_base {
         // use the fused ggml ops (res_mix, l2_clip, shortconv_res, rel_bias, loop_ctrl_*), LLAMA_INKLING_FUSED=0 disables
         void init_fused();
         bool fused = false;
+        // the matmul activations are quantized to Q8_1 by the producing op (CUDA/CPU mmvq path); LLAMA_INKLING_Q8_ACT=0 disables
+        ggml_type act_type(int il) const;
+        bool q8_act = false;
 
         // the mixed output of query j: [n_embd, n_tokens]
         ggml_tensor * mixed_view(ggml_tensor * mixed, int j);

@@ -1532,7 +1532,9 @@ static void mul_mat_vec_q_switch_type(
 void ggml_cuda_mul_mat_vec_q(
         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
         const ggml_cuda_mm_fusion_args_host * fusion) {
-    GGML_ASSERT(        src1->type == GGML_TYPE_F32);
+    // src1 is F32 (quantized here) or Q8_1 (quantized by its producer, rows of whole blocks)
+    const bool src1_q8 = src1->type == GGML_TYPE_Q8_1;
+    GGML_ASSERT(        src1->type == GGML_TYPE_F32 || src1_q8);
     GGML_ASSERT(        dst->type  == GGML_TYPE_F32);
     GGML_ASSERT(!ids || ids->type  == GGML_TYPE_I32); // Optional, used for batched GGML_MUL_MAT_ID.
 
@@ -1546,6 +1548,7 @@ void ggml_cuda_mul_mat_vec_q(
 
     GGML_ASSERT(        nb00       == ts_src0);
     GGML_ASSERT(        nb10       == ts_src1);
+    GGML_ASSERT(!src1_q8 || (ne10 % QK8_1 == 0 && nb11 % sizeof(block_q8_1) == 0 && nb12 % sizeof(block_q8_1) == 0 && nb13 % sizeof(block_q8_1) == 0));
     GGML_ASSERT(        nb0        == ts_dst);
     GGML_ASSERT(!ids || ids->nb[0] == ggml_type_size(ids->type));
 
@@ -1626,8 +1629,13 @@ void ggml_cuda_mul_mat_vec_q(
     }
 
     const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
-    ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool(), ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1);
-    {
+    ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool());
+    const char * src1_q8_1_d = nullptr;
+    if (src1_q8) {
+        src1_q8_1_d = (const char *) src1->data;
+    } else {
+        src1_q8_1.alloc(ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1);
+        src1_q8_1_d = src1_q8_1.get();
         const int64_t s11 = src1->nb[1] / ts_src1;
         const int64_t s12 = src1->nb[2] / ts_src1;
         const int64_t s13 = src1->nb[3] / ts_src1;
@@ -1635,15 +1643,15 @@ void ggml_cuda_mul_mat_vec_q(
     }
 
     const int64_t s01 = src0->nb[1] / ts_src0;
-    const int64_t s11 = ne10_padded / QK8_1;
+    const int64_t s11 = src1_q8 ? nb11 / sizeof(block_q8_1) : ne10_padded / QK8_1;
     const int64_t s1  =  dst->nb[1] / ts_dst;
     const int64_t s02 = src0->nb[2] / ts_src0;
     const int64_t s2  =  dst->nb[2] / ts_dst;
     const int64_t s03 = src0->nb[3] / ts_src0;
     const int64_t s3  =  dst->nb[3] / ts_dst;
 
-    const int64_t s12 = ne11*s11;
-    const int64_t s13 = ne12*s12;
+    const int64_t s12 = src1_q8 ? nb12 / sizeof(block_q8_1) : ne11*s11;
+    const int64_t s13 = src1_q8 ? nb13 / sizeof(block_q8_1) : ne12*s12;
 
     // For MUL_MAT_ID the memory layout is different than for MUL_MAT:
     const int64_t ncols_dst          = ids ? ne2  : ne1;
@@ -1657,7 +1665,7 @@ void ggml_cuda_mul_mat_vec_q(
     const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
 
     mul_mat_vec_q_switch_type(
-        src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
+        src0->data, src0->type, src1_q8_1_d, ids_d, fusion_local, dst_d, ne00,
         ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
         ne02, nchannels_y, nchannels_dst, s02, stride_channel_y, stride_channel_dst,
         ne03,              ne3,           s03, s13,              s3,               ids_stride, stream);

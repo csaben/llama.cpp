@@ -2545,6 +2545,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     // Therefore, in such cases use cuBLAS.
     const bool bad_padding_clear = ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE
         && ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) && src0->view_src;
+
+    // a Q8_1 src1 is an activation quantized by its producer: only the quantized matvec kernel reads it
+    if (!bad_padding_clear && src1->type == GGML_TYPE_Q8_1 && dst->type == GGML_TYPE_F32 && ggml_is_quantized(src0->type)) {
+        ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
+        return;
+    }
     if (bad_padding_clear || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
         ggml_cuda_mul_mat_cublas(ctx, src0, src1, dst);
         return;
@@ -2641,13 +2647,20 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const ggml_tensor * src1 = dst->src[1];
     const ggml_tensor * ids  = dst->src[2];
 
-    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_Q8_1);
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const int cc        = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
     const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
+
+    // a Q8_1 src1 is an activation quantized by its producer: only the quantized matvec kernel reads it
+    if (src1->type == GGML_TYPE_Q8_1) {
+        GGML_ASSERT(ggml_is_quantized(src0->type) && ne2 <= get_mmvq_mmid_max_batch(src0->type, cc));
+        ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
+        return;
+    }
 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
@@ -3126,6 +3139,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_MOE_SUM:
             ggml_cuda_op_moe_sum(ctx, dst);
+            break;
+        case GGML_OP_INKLING_ATTN:
+            ggml_cuda_op_inkling_attn(ctx, dst);
             break;
         case GGML_OP_SSM_SCAN:
             ggml_cuda_op_ssm_scan(ctx, dst);
@@ -6447,6 +6463,13 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return false;
                 }
                 const int cc_dev = ggml_cuda_info().devices[dev_ctx->device].cc;
+                if (b->type == GGML_TYPE_Q8_1) {
+                    // an activation quantized by its producer, for the quantized matvec kernel (few columns, whole blocks per row)
+                    const int64_t ncols = op->op == GGML_OP_MUL_MAT_ID ? op->ne[2] : b->ne[1];
+                    return ggml_is_quantized(a->type) && op->type == GGML_TYPE_F32 && b->ne[0] % QK8_1 == 0 &&
+                        a->type != GGML_TYPE_NVFP4 && ggml_cuda_should_use_mmvq(a->type, cc_dev, ncols) &&
+                        (op->op == GGML_OP_MUL_MAT || ncols <= get_mmvq_mmid_max_batch(a->type, cc_dev));
+                }
                 const bool f32_src1_ok = GGML_CUDA_CC_IS_NVIDIA(cc_dev) && cc_dev < GGML_CUDA_CC_AMPERE;
                 const enum ggml_prec prec_src1 = ggml_prec_get_src(op, 1);
                 const bool fp8_id_mmvf = op->op == GGML_OP_MUL_MAT_ID &&
@@ -6766,6 +6789,15 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_LOOP_CTRL_APPLY:
         case GGML_OP_MOE_SUM:
             return true;
+        case GGML_OP_INKLING_ATTN:
+            {
+                const int n_head = ggml_get_op_params_i32(op, 0), n_head_kv = ggml_get_op_params_i32(op, 1);
+                const int hd = ggml_get_op_params_i32(op, 2), n_rel = ggml_get_op_params_i32(op, 3), n_conv = ggml_get_op_params_i32(op, 4);
+                const int64_t n_fixed = (int64_t) hd*n_head + (int64_t) n_rel*n_head + 2*(int64_t) n_conv*hd*n_head_kv;
+                const int64_t n_extent = (ggml_nelements(op->src[1]) - n_fixed)/n_rel;
+                return hd == 128 && n_head/n_head_kv <= 4 && n_rel <= 32 && n_conv <= 8 && n_extent <= 1024 &&
+                    op->src[4]->type == op->src[5]->type && (op->src[4]->type == GGML_TYPE_F16 || op->src[4]->type == GGML_TYPE_Q8_0);
+            }
         case GGML_OP_REL_BIAS:
             return op->src[0]->ne[0] <= 16;
         case GGML_OP_CONT:
