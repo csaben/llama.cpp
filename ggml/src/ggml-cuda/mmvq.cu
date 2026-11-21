@@ -642,6 +642,11 @@ static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int
                 }
                 // two rows per block also for Q8_0 / IQ4_NL on the generic (Ampere-class) table: fewer, longer blocks
                 // measured on RTX 3090: 4-11% faster for 1k-9k row matvecs and the 128x8 expert matvecs, 2.5% for a 201k row one
+                // Q6_K: 4 rows per block (9 blocks per 2304-row: a block's two iterations are half empty; measured on the RTX 3090:
+                // the 8600-row Q6_K projection 23.7 -> 21.1 us); 4 rows for Q8_0 measured slightly slower
+                if (table_id == MMVQ_PARAMETERS_GENERIC && type == GGML_TYPE_Q6_K) {
+                    return 4;
+                }
                 if (table_id == MMVQ_PARAMETERS_GENERIC && (type == GGML_TYPE_Q8_0 || type == GGML_TYPE_IQ4_NL)) {
                     return 2;
                 }

@@ -823,7 +823,7 @@ static __global__ void loop_ctrl_down_f32(const wt * __restrict__ w, const float
 
     // the sums of squares and the raw dot products in one pass: w^T rmsnorm(a) = rsqrt(mean(a^2) + eps) * w^T a
     // (the loads of the thread's elements are issued together)
-    constexpr int PER = 10; // elements per thread per round (n <= PER*block_size for one round)
+    constexpr int PER = block_size >= 1024 ? 5 : 10; // elements per thread per round (n <= PER*block_size for one round)
     float sa = 0.0f, sb = 0.0f, da = 0.0f, db = 0.0f;
     for (int i0 = 0; i0 < n; i0 += PER*block_size) {
         float x[PER], y[PER], wa[PER], wb[PER];
@@ -885,54 +885,100 @@ void ggml_cuda_op_loop_ctrl_down(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int B     = w->ne[2];
 
     const dim3 grid(rank, n_tok, B);
+    // 1024 threads: the whole dot of a block in one round of loads (n <= 10240)
+    static const bool big = getenv("IK_CTRL_DOWN_1024") && atoi(getenv("IK_CTRL_DOWN_1024")) != 0; // measured slower (8.7 vs 5.7 us)
     if (w->type == GGML_TYPE_F16) {
-        loop_ctrl_down_f32<256, half><<<grid, 256, 0, ctx.stream()>>>((const half *) w->data, (const float *) a->data, (const float *) b->data,
-                (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+        if (big) {
+            loop_ctrl_down_f32<1024, half><<<grid, 1024, 0, ctx.stream()>>>((const half *) w->data, (const float *) a->data, (const float *) b->data,
+                    (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+        } else {
+            loop_ctrl_down_f32<256, half><<<grid, 256, 0, ctx.stream()>>>((const half *) w->data, (const float *) a->data, (const float *) b->data,
+                    (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+        }
     } else {
-        loop_ctrl_down_f32<256, float><<<grid, 256, 0, ctx.stream()>>>((const float *) w->data, (const float *) a->data, (const float *) b->data,
-                (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+        if (big) {
+            loop_ctrl_down_f32<1024, float><<<grid, 1024, 0, ctx.stream()>>>((const float *) w->data, (const float *) a->data, (const float *) b->data,
+                    (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+        } else {
+            loop_ctrl_down_f32<256, float><<<grid, 256, 0, ctx.stream()>>>((const float *) w->data, (const float *) a->data, (const float *) b->data,
+                    (float *) dst->data, n, rank, a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+        }
     }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // loop_ctrl_apply: y = cur - tanh(wf^T d)*cur + tanh(wg^T d)*msg, one warp per output element
 
-template <typename wt>
-static __global__ void loop_ctrl_apply_f32(const float * __restrict__ cur, const float * __restrict__ msg, const float * __restrict__ d,
+// NORM: n_tok == 1 only; the last block of a batch row to finish re-reads the row, RMS-normalizes it and scales it by the
+// norm weight, in place (F32) or into the Q8_1 output (dst_v; the F32 result is the row buffer)
+template <typename wt, int NORM, bool q8>
+static __global__ void __launch_bounds__(256) loop_ctrl_apply_f32(const float * __restrict__ cur, const float * __restrict__ msg, const float * __restrict__ d,
         const wt * __restrict__ wg, const wt * __restrict__ wf, float * __restrict__ dst,
-        const int n, const int n_tok, const int rank, const int64_t cur_nb1, const int64_t cur_nb2, const int64_t msg_nb1, const int64_t msg_nb2) {
+        const int n, const int n_tok, const int rank, const int64_t cur_nb1, const int64_t cur_nb2, const int64_t msg_nb1, const int64_t msg_nb2,
+        const float * __restrict__ nw, const int64_t nw_nb1, void * __restrict__ dst_v, const float eps, int * __restrict__ counters) {
     const int64_t gw   = (int64_t) blockIdx.x*(blockDim.x/WARP_SIZE) + threadIdx.x/WARP_SIZE;
     const int     lane = threadIdx.x % WARP_SIZE;
     const int64_t n_out = (int64_t) n*n_tok;
-    if (gw >= n_out*gridDim.y) {
-        return;
-    }
     const int ib = blockIdx.y;
     const int t  = gw / n;
     const int i  = gw - (int64_t) t*n;
-    if (t >= n_tok) {
-        return;
+    if (gw < n_out && t < n_tok) {
+        const float * dv = d + ((int64_t) ib*n_tok + t)*rank;
+        const wt    * g  = wg + ((int64_t) ib*n + i)*rank;
+        const wt    * f  = wf + ((int64_t) ib*n + i)*rank;
+
+        float sg = 0.0f, sf = 0.0f;
+        for (int k = lane; k < rank; k += WARP_SIZE) {
+            const float dk = dv[k];
+            sg += ik_w(g, k)*dk;
+            sf += ik_w(f, k)*dk;
+        }
+        sg = warp_reduce_sum(sg);
+        sf = warp_reduce_sum(sf);
+
+        if (lane == 0) {
+            const float gain   = tanhf(sg);
+            const float forget = tanhf(sf);
+            const float c = *(const float *) ((const char *) cur + t*cur_nb1 + ib*cur_nb2 + i*sizeof(float));
+            const float m = *(const float *) ((const char *) msg + t*msg_nb1 + ib*msg_nb2 + i*sizeof(float));
+            dst[((int64_t) ib*n_tok + t)*n + i] = (c - forget*c) + gain*m;
+        }
     }
-
-    const float * dv = d + ((int64_t) ib*n_tok + t)*rank;
-    const wt    * g  = wg + ((int64_t) ib*n + i)*rank;
-    const wt    * f  = wf + ((int64_t) ib*n + i)*rank;
-
-    float sg = 0.0f, sf = 0.0f;
-    for (int k = lane; k < rank; k += WARP_SIZE) {
-        const float dk = dv[k];
-        sg += ik_w(g, k)*dk;
-        sf += ik_w(f, k)*dk;
-    }
-    sg = warp_reduce_sum(sg);
-    sf = warp_reduce_sum(sf);
-
-    if (lane == 0) {
-        const float gain   = tanhf(sg);
-        const float forget = tanhf(sf);
-        const float c = *(const float *) ((const char *) cur + t*cur_nb1 + ib*cur_nb2 + i*sizeof(float));
-        const float m = *(const float *) ((const char *) msg + t*msg_nb1 + ib*msg_nb2 + i*sizeof(float));
-        dst[((int64_t) ib*n_tok + t)*n + i] = (c - forget*c) + gain*m;
+    if constexpr (NORM) {
+        __shared__ float s_red[256/WARP_SIZE];
+        __shared__ int   s_last;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            s_last = ik_atomic_add_acq_rel(counters + ib, 1) == (int) gridDim.x - 1;
+        }
+        __syncthreads();
+        if (!s_last) {
+            return;
+        }
+        float       * yt  = dst + (int64_t) ib*n;
+        const float * nwb = (const float *) ((const char *) nw + ib*nw_nb1);
+        float ss = 0.0f;
+        for (int k = threadIdx.x; k < n; k += 256) {
+            ss += yt[k]*yt[k];
+        }
+        ss = ik_block_sum<256>(ss, s_red);
+        const float scale = rsqrtf(ss/n + eps);
+        if constexpr (q8) {
+            const int wid = threadIdx.x / WARP_SIZE;
+            block_q8_1 * out = (block_q8_1 *) dst_v + (int64_t) ib*(n/QK8_1);
+            for (int i0 = wid*WARP_SIZE; i0 < n; i0 += 256) {
+                const int k = i0 + lane;
+                const float v = k < n ? yt[k]*scale*nwb[k] : 0.0f;
+                ik_warp_store_q8_1(v, out + i0/QK8_1, lane, k < n);
+            }
+        } else {
+            for (int k = threadIdx.x; k < n; k += 256) {
+                yt[k] = yt[k]*scale*nwb[k];
+            }
+        }
+        if (threadIdx.x == 0) {
+            counters[ib] = 0;
+        }
     }
 }
 
@@ -970,6 +1016,132 @@ static __global__ void rms_norm_mul_inplace_f32(float * __restrict__ y, const fl
     }
 }
 
+// v2: one thread per output element (its two weight rows of `rank` values as float4 loads, all in flight), d in shared
+// memory; with the norm, the last block of a row to finish re-reads the row, RMS-normalizes it and scales it by the norm
+// weight, in place (F32) or into the Q8_1 output (the F32 scratch is the row buffer). rank <= 64.
+#define IK_CA2_BLOCK 256
+#define IK_CA2_RANK  64
+
+template <typename wt, bool q8, bool norm>
+static __global__ void __launch_bounds__(IK_CA2_BLOCK) loop_ctrl_apply2_f32(const float * __restrict__ cur, const float * __restrict__ msg, const float * __restrict__ d,
+        const wt * __restrict__ wg, const wt * __restrict__ wf, float * __restrict__ y, const float * __restrict__ nw, void * __restrict__ dst_v,
+        const int n, const int n_tok, const int rank, const int64_t cur_nb1, const int64_t cur_nb2, const int64_t msg_nb1, const int64_t msg_nb2,
+        const int64_t nw_nb1, const float eps, int * __restrict__ counters) {
+    __shared__ float s_d[IK_CA2_RANK];
+    __shared__ float s_red[IK_CA2_BLOCK/WARP_SIZE];
+    __shared__ int   s_last;
+    const int tid = threadIdx.x;
+    const int t   = blockIdx.y;
+    const int ib  = blockIdx.z;
+    const int i   = blockIdx.x*IK_CA2_BLOCK + tid;
+    const int64_t row = (int64_t) ib*n_tok + t;
+
+    if (tid < rank) {
+        s_d[tid] = d[row*rank + tid];
+    }
+    // the two weight rows of this output (issued before the barrier)
+    float sg = 0.0f, sf = 0.0f;
+    if (i < n) {
+        const wt * g = wg + ((int64_t) ib*n + i)*rank;
+        const wt * f = wf + ((int64_t) ib*n + i)*rank;
+        if constexpr (std::is_same<wt, half>::value) {
+            // 64 halves = 8 x 16 bytes per row
+            uint4 gv[IK_CA2_RANK/8], fv[IK_CA2_RANK/8];
+#pragma unroll
+            for (int k = 0; k < IK_CA2_RANK/8; ++k) {
+                gv[k] = k*8 < rank ? ((const uint4 *) g)[k] : make_uint4(0, 0, 0, 0);
+                fv[k] = k*8 < rank ? ((const uint4 *) f)[k] : make_uint4(0, 0, 0, 0);
+            }
+            __syncthreads();
+#pragma unroll
+            for (int k = 0; k < IK_CA2_RANK/8; ++k) {
+                const half2 * gh = (const half2 *) &gv[k];
+                const half2 * fh = (const half2 *) &fv[k];
+#pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    const float2 g2 = __half22float2(gh[e]);
+                    const float2 f2 = __half22float2(fh[e]);
+                    const float d0 = s_d[8*k + 2*e], d1 = s_d[8*k + 2*e + 1];
+                    sg += g2.x*d0 + g2.y*d1;
+                    sf += f2.x*d0 + f2.y*d1;
+                }
+            }
+        } else {
+            float4 gv[IK_CA2_RANK/4], fv[IK_CA2_RANK/4];
+#pragma unroll
+            for (int k = 0; k < IK_CA2_RANK/4; ++k) {
+                gv[k] = k*4 < rank ? ((const float4 *) g)[k] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                fv[k] = k*4 < rank ? ((const float4 *) f)[k] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+            __syncthreads();
+#pragma unroll
+            for (int k = 0; k < IK_CA2_RANK/4; ++k) {
+                sg += gv[k].x*s_d[4*k] + gv[k].y*s_d[4*k + 1] + gv[k].z*s_d[4*k + 2] + gv[k].w*s_d[4*k + 3];
+                sf += fv[k].x*s_d[4*k] + fv[k].y*s_d[4*k + 1] + fv[k].z*s_d[4*k + 2] + fv[k].w*s_d[4*k + 3];
+            }
+        }
+        const float gain   = tanhf(sg);
+        const float forget = tanhf(sf);
+        const float c = *(const float *) ((const char *) cur + t*cur_nb1 + ib*cur_nb2 + i*sizeof(float));
+        const float m = *(const float *) ((const char *) msg + t*msg_nb1 + ib*msg_nb2 + i*sizeof(float));
+        y[row*n + i] = (c - forget*c) + gain*m;
+    } else {
+        __syncthreads();
+    }
+    if constexpr (!norm) {
+        return;
+    }
+    // the last block of the row normalizes it
+    __syncthreads();
+    if (tid == 0) {
+        s_last = ik_atomic_add_acq_rel(counters + row, 1) == (int) gridDim.x - 1;
+    }
+    __syncthreads();
+    if (!s_last) {
+        return;
+    }
+    float * yt = y + row*n;
+    const float * nwb = (const float *) ((const char *) nw + ib*nw_nb1);
+    float ss = 0.0f;
+    for (int k = tid; k < n; k += IK_CA2_BLOCK) {
+        ss += yt[k]*yt[k];
+    }
+    ss = ik_block_sum<IK_CA2_BLOCK>(ss, s_red);
+    const float scale = rsqrtf(ss/n + eps);
+    if constexpr (q8) {
+        const int lane = tid % WARP_SIZE;
+        const int wid  = tid / WARP_SIZE;
+        block_q8_1 * out = (block_q8_1 *) dst_v + row*(n/QK8_1);
+        for (int i0 = wid*WARP_SIZE; i0 < n; i0 += IK_CA2_BLOCK) {
+            const int k = i0 + lane;
+            const float v = k < n ? yt[k]*scale*nwb[k] : 0.0f;
+            ik_warp_store_q8_1(v, out + i0/QK8_1, lane, k < n);
+        }
+    } else {
+        for (int k = tid; k < n; k += IK_CA2_BLOCK) {
+            yt[k] = yt[k]*scale*nwb[k];
+        }
+    }
+    if (tid == 0) {
+        counters[row] = 0;
+    }
+}
+
+template <typename wt>
+static void loop_ctrl_apply2_launch(ggml_backend_cuda_context & ctx, const float * cur, const float * msg, const float * d, const wt * wg, const wt * wf,
+        float * y, const float * nw, void * dst, const int n, const int n_tok, const int rank, const int64_t cur_nb1, const int64_t cur_nb2,
+        const int64_t msg_nb1, const int64_t msg_nb2, const int64_t nw_nb1, const float eps, const bool q8, const int B) {
+    const dim3 grid((n + IK_CA2_BLOCK - 1)/IK_CA2_BLOCK, n_tok, B);
+    int * counters = nw ? ik_counters(ctx, 32, B*n_tok) : nullptr;
+    if (nw == nullptr) {
+        loop_ctrl_apply2_f32<wt, false, false><<<grid, IK_CA2_BLOCK, 0, ctx.stream()>>>(cur, msg, d, wg, wf, y, nw, dst, n, n_tok, rank, cur_nb1, cur_nb2, msg_nb1, msg_nb2, nw_nb1, eps, counters);
+    } else if (q8) {
+        loop_ctrl_apply2_f32<wt, true, true><<<grid, IK_CA2_BLOCK, 0, ctx.stream()>>>(cur, msg, d, wg, wf, y, nw, dst, n, n_tok, rank, cur_nb1, cur_nb2, msg_nb1, msg_nb2, nw_nb1, eps, counters);
+    } else {
+        loop_ctrl_apply2_f32<wt, false, true><<<grid, IK_CA2_BLOCK, 0, ctx.stream()>>>(cur, msg, d, wg, wf, y, nw, dst, n, n_tok, rank, cur_nb1, cur_nb2, msg_nb1, msg_nb2, nw_nb1, eps, counters);
+    }
+}
+
 void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * cur = dst->src[0];
     const ggml_tensor * msg = dst->src[1];
@@ -996,18 +1168,47 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
         y = scratch.get();
     }
 
+    static const bool v2 = getenv("IK_CTRL_APPLY_V2") && atoi(getenv("IK_CTRL_APPLY_V2")) != 0; // measured slower (thread per output: 27 blocks)
+    if (v2 && rank <= IK_CA2_RANK && rank % 8 == 0 && B*n_tok <= 32 && (nw == nullptr || ggml_nrows(nw) == 1 || nw->nb[1] % 16 == 0)) {
+        float eps = 0.0f;
+        if (nw) {
+            memcpy(&eps, (const float *) dst->op_params + 0, sizeof(float));
+        }
+        const int64_t nw_nb1 = nw && ggml_nrows(nw) != 1 ? nw->nb[1] : 0;
+        if (wg->type == GGML_TYPE_F16) {
+            loop_ctrl_apply2_launch<half>(ctx, (const float *) cur->data, (const float *) msg->data, (const float *) d->data, (const half *) wg->data, (const half *) wf->data,
+                    y, nw ? (const float *) nw->data : nullptr, dst->data, n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2], nw_nb1, eps, q8, B);
+        } else {
+            loop_ctrl_apply2_launch<float>(ctx, (const float *) cur->data, (const float *) msg->data, (const float *) d->data, (const float *) wg->data, (const float *) wf->data,
+                    y, nw ? (const float *) nw->data : nullptr, dst->data, n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2], nw_nb1, eps, q8, B);
+        }
+        return;
+    }
+
     const int block_size = 256;
     const int64_t nblocks = ((int64_t) n*n_tok*WARP_SIZE + block_size - 1)/block_size;
     const dim3 grid(nblocks, B, 1);
 
+    float eps = 0.0f;
+    if (nw) {
+        memcpy(&eps, (const float *) dst->op_params + 0, sizeof(float));
+    }
+    const int64_t nw_nb1 = nw && ggml_nrows(nw) != 1 ? nw->nb[1] : 0;
+    // the fused norm (last block of 288 arriving on one counter) measured slower than the separate norm kernel: opt-in
+    static const bool fuse_norm = getenv("IK_CTRL_NORM_FUSED") && atoi(getenv("IK_CTRL_NORM_FUSED")) != 0;
+    const bool fused = nw != nullptr && n_tok == 1 && B <= 32 && fuse_norm;
+    int * counters = fused ? ik_counters(ctx, 32, B) : nullptr;
+#define IK_CA_LAUNCH(wt_t, NORM, Q8) loop_ctrl_apply_f32<wt_t, NORM, Q8><<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data, \
+            (const float *) d->data, (const wt_t *) wg->data, (const wt_t *) wf->data, y, n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2], \
+            nw ? (const float *) nw->data : nullptr, nw_nb1, dst->data, eps, counters)
     if (wg->type == GGML_TYPE_F16) {
-        loop_ctrl_apply_f32<half><<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
-                (const float *) d->data, (const half *) wg->data, (const half *) wf->data, y,
-                n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2]);
+        if (!fused) { IK_CA_LAUNCH(half, 0, false); } else if (q8) { IK_CA_LAUNCH(half, 1, true); } else { IK_CA_LAUNCH(half, 1, false); }
     } else {
-        loop_ctrl_apply_f32<float><<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
-                (const float *) d->data, (const float *) wg->data, (const float *) wf->data, y,
-                n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2]);
+        if (!fused) { IK_CA_LAUNCH(float, 0, false); } else if (q8) { IK_CA_LAUNCH(float, 1, true); } else { IK_CA_LAUNCH(float, 1, false); }
+    }
+#undef IK_CA_LAUNCH
+    if (fused) {
+        return;
     }
 
     if (nw) {
