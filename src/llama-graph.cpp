@@ -2670,12 +2670,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                     const float beta = hparams.situ_beta;
                     const float lb   = hparams.situ_linear_beta;
 
-                    ggml_tensor * act = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, cur, 1.0f/beta)), beta);
-                    act = ggml_mul(ctx0, act, ggml_sigmoid(ctx0, cur));
-                    if (lb > 0.0f) {
-                        up = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, up, 1.0f/lb)), lb);
-                    }
-                    cur = ggml_mul(ctx0, act, up);
+                    cur = ggml_situ_split(ctx0, cur, up, beta, lb);
                     cb(cur, "ffn_moe_situ", il);
                 } break;
             case LLM_FFN_GELU:
@@ -2758,6 +2753,18 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         experts = ggml_mul(ctx0, experts, post_exp_norm);
         experts = ggml_rms_norm(ctx0, experts, post_exp_norm_eps);
         cb(experts, "ffn_moe_post_exp_norm", il);
+    }
+
+    if (moe_sum_mul_mat && !weight_before_ffn) {
+        // sum_k experts[:, k, t]*weights[k, t] as one matrix product over the experts
+        const int64_t n_used = experts->ne[1];
+        ggml_tensor * experts_t = ggml_cont(ctx0, ggml_permute(ctx0, experts, 1, 0, 2, 3)); // [n_used, n_embd, n_tokens]
+        ggml_tensor * w         = ggml_reshape_3d(ctx0, weights, n_used, 1, n_tokens);
+        ggml_tensor * moe_out   = ggml_mul_mat(ctx0, experts_t, w); // [n_embd, 1, n_tokens]
+        moe_out = ggml_reshape_2d(ctx0, moe_out, n_embd, n_tokens);
+        cb(moe_out, "ffn_moe_out", il);
+
+        return moe_out;
     }
 
     if (!weight_before_ffn) {
@@ -4509,6 +4516,26 @@ ggml_tensor * llm_graph_context::build_attn(
     if (cparams.flash_attn) {
         kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16);
     }
+    cb(kq_mask, "kq_mask_rel_pos", il);
+
+    return build_attn_iswa_impl(*this, inp_attn, wo, wo_b, wo_s, q_cur, k_cur, v_cur, nullptr, kq_mask, nullptr, sinks, nullptr, kq_scale, il);
+}
+
+ggml_tensor * llm_graph_context::build_attn_masked(
+        llm_graph_input_mem_hybrid_iswa_rel * inp,
+        ggml_tensor * wo,
+        ggml_tensor * wo_b,
+        ggml_tensor * wo_s,
+        ggml_tensor * q_cur,
+        ggml_tensor * k_cur,
+        ggml_tensor * v_cur,
+        ggml_tensor * kq_mask,
+        ggml_tensor * sinks,
+            float     kq_scale,
+            int       il) const {
+    auto * inp_attn = inp->get_attn();
+
+    GGML_ASSERT(kq_mask->type == (cparams.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32));
     cb(kq_mask, "kq_mask_rel_pos", il);
 
     return build_attn_iswa_impl(*this, inp_attn, wo, wo_b, wo_s, q_cur, k_cur, v_cur, nullptr, kq_mask, nullptr, sinks, nullptr, kq_scale, il);

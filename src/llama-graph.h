@@ -1130,6 +1130,9 @@ struct llm_graph_context {
     ggml_backend_t backend_cpu; // TODO: needed by build_attn_mha, figure out a way to remove?
 
     const llama_adapter_cvec     * cvec;
+    // sum the weighted expert outputs with a matrix product instead of a chain of adds (see build_moe_ffn)
+    bool moe_sum_mul_mat = false;
+
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
@@ -1552,6 +1555,20 @@ struct llm_graph_context {
             ggml_tensor * v_cur, // [n_embd_head_v, n_head_v, n_tokens]
             ggml_tensor * kq_b,  // [n_kv, n_tokens/n_stream, n_head_q, n_stream]
             ggml_tensor * sinks, // [n_head_q]
+                  float   kq_scale,
+                    int   il) const;
+
+    // the per-head KQ mask already holds the bias and the input mask (F16 with flash attention, F32 otherwise)
+    ggml_tensor * build_attn_masked(
+            llm_graph_input_mem_hybrid_iswa_rel * inp,
+            ggml_tensor * wo,
+            ggml_tensor * wo_b,
+            ggml_tensor * wo_s,
+            ggml_tensor * q_cur,   // [n_embd_head_q, n_head_q, n_tokens]
+            ggml_tensor * k_cur,   // [n_embd_head_k, n_head_k, n_tokens]
+            ggml_tensor * v_cur,   // [n_embd_head_v, n_head_v, n_tokens]
+            ggml_tensor * kq_mask, // [n_kv, n_tokens, n_head_q]
+            ggml_tensor * sinks,   // [n_head_q]
                   float   kq_scale,
                     int   il) const;
 

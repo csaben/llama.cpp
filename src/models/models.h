@@ -2518,13 +2518,25 @@ struct llama_model_inkling2 : public llama_model_base {
                 ggml_tensor * state,
                 ggml_tensor * history,
                 llm_graph_input_rs * inp,
-                int64_t offset);
+                int64_t offset,
+                ggml_tensor * residual = nullptr);
         ggml_tensor * control(ggml_tensor * cur, ggml_tensor * message, const loop_layer & loop, int ctrl);
 
     protected:
         // the helpers alone, a derived graph builds its own body
         struct no_build {};
-        graph(const llm_graph_params & params, no_build) : llm_graph_context(params) {}
+        graph(const llm_graph_params & params, no_build) : llm_graph_context(params) { init_fused(); }
+
+        // use the fused ggml ops (res_mix, l2_clip, shortconv_res, rel_bias, loop_ctrl_*), LLAMA_INKLING_FUSED=0 disables
+        void init_fused();
+        bool fused = false;
+
+        // the mixed output of query j: [n_embd, n_tokens]
+        ggml_tensor * mixed_view(ggml_tensor * mixed, int j);
+        // a zero sink logit per head, shared by the layers
+        ggml_tensor * zero_sinks(int64_t n_head);
+        ggml_tensor * sinks_zero   = nullptr;
+        int64_t       sinks_n_head = 0;
 
         // the inputs and the token embeddings
         ggml_tensor * build_inputs();
