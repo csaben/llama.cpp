@@ -25,12 +25,28 @@ Raw outputs go to `perf/p5/`. Reference checkout (MIT): `git clone https://githu
   diverge at near-ties (top-2 margins 0.068 and 0.040, `perf/margin_probe.py`).
   16K->32K now costs 0.53 ms for 285 MB = 535 GB/s (was 313).
 
+- **Scan diet + experiments** (commit "inkling_attn: scan as init/step/finish, branchless limbs..."):
+  depth 0 / 1024 / 4096 / 16384 / 32768 = 210.90 / 200.67 / 194.72 / 182.10 / 168.58 tok/s (2-bit, Q8_0 KV, -r 3).
+  What did NOT help (all measured, see RESULTS "what didn't work"): next-step load prefetch (250 regs, no gain);
+  forcing 2 blocks/SM (spills, -1.5%); a stand-alone scan kernel with 4-warp blocks (150-165 at 32K); the same with
+  a block per cell range covering all kv heads (162); a shared-memory tile fed by 16-byte loads (158). The stand-alone
+  kernel is kept opt-in (`IK_ATTN_SCAN_MIN=2048`). Knock-out runs (IK_ATTN_SKIP bits, removed again): without the
+  scan the 16K->32K step costs 0.05 ms (CPU mask/rel_pos build + upload), K/V loads alone 0.53 ms, loads replaced by
+  16-byte sequential loads 0.39 ms, no loads 0.31 ms. The loop is ~680 executed instructions per 16 cells x 1 head.
+  ncu is not usable here (ERR_NVGPUCTRPERM: perf counters need admin); nsys works (needs QdstrmImporter step).
+- **Prefill: loop controllers as GEMMs for batches** (tag `p5-prefill-ctrl-gemm-3062tok`): nsys showed
+  loop_ctrl_apply/down = 35% of a 4096-token prefill (one warp per output element). `IK_CTRL_GEMM_MIN` (8 tokens;
+  0 = off). pp512 / pp4096 / pp16384: 2294 / 2184 / 2040 -> 3254 / 3062 / 2812 tok/s; with `-ub 2048`: 3247 / 3563 /
+  3260. Prefill PPL 3.0530 (was 3.0516). LOOP_CTRL_DOWN 14/14, LOOP_CTRL_APPLY 23/23 (new batch cases F32 + F16).
+  Remaining prefill profile (1325 ms / 4096 tok): mul_mat_q 57%, flash_attn 8.7%, rel_bias 6.5%.
+
 ### In flight
-- Scan tuning: issue the next step's loads before computing the current one (registers are free up to 255), fewer
-  redundant scale-word loads. Then opt-in lower-bit KV.
+- Served long-context script (`perf/longctx.py`), DSpark acceptance per prompt type, quality tables, RESULTS.md.
 
 ### Next
-1. Opt-in lower-bit KV (Q4_0 / FP8) with its own PPL rows.
-2. Workstream 2 (grouped-expert DSpark verify), workstream 3 (prefill).
-3. Final tables in RESULTS.md (decode d0/4K/16K/32K, prefill 512/4096/16384, served short + long, PPL, spec), then
-   `bash perf/live/restore-live.sh`.
+1. Final tables in RESULTS.md (decode d0/4K/16K/32K for Q2 and IQ4_NL, prefill 512/4096/16384, served short + long,
+   PPL prefill + decode, greedy probes, 827-token probe, spec acceptance), then `bash perf/live/restore-live.sh`.
+2. Not started: grouped-expert DSpark verify (workstream 2). It needs multi-token versions of every fused decode op
+   (attention with in-window keys + state rollback, router, grouped expert matvec); estimate in RESULTS.
+3. Ideas left: CPU-side mask/rel_pos build is O(n_kv) per token (0.12 ms at 32K, 2%); fewer instructions per scan
+   step (source-lane P*scale, 32-bit row offsets); Q4_0 KV as an opt-in variant (needs a nibble row reader).
