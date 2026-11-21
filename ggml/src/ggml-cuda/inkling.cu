@@ -23,6 +23,7 @@ static __device__ __forceinline__ float ik_block_sum(float v, float * smem) {
 // ---------------------------------------------------------------------------------------------------------------------
 // l2_clip: y = x*b * min(1, threshold/(|x*b| + eps)), one warp per row
 
+template <int n_per_lane>
 static __global__ void l2_clip_f32(const float * __restrict__ x, const float * __restrict__ b, float * __restrict__ y,
         const int ne00, const int ne01, const int ne02, const int ne03,
         const int64_t nb01, const int64_t nb02, const int64_t nb03,
@@ -50,19 +51,40 @@ static __global__ void l2_clip_f32(const float * __restrict__ x, const float * _
         br = (const float *) ((const char *) b + (i1 % bne1)*bnb1 + (i2 % bne2)*bnb2 + (i3 % bne3)*bnb3);
     }
 
+    // the row in registers when it fits, else two passes
+    float v[n_per_lane > 0 ? n_per_lane : 1];
     float ss = 0.0f;
-    for (int i0 = lane; i0 < ne00; i0 += WARP_SIZE) {
-        const float v = br ? xr[i0]*br[i0 % bne0] : xr[i0];
-        ss += v*v;
+    if constexpr (n_per_lane > 0) {
+#pragma unroll
+        for (int j = 0; j < n_per_lane; ++j) {
+            const int i0 = lane + j*WARP_SIZE;
+            v[j] = i0 < ne00 ? (br ? xr[i0]*br[i0 % bne0] : xr[i0]) : 0.0f;
+            ss += v[j]*v[j];
+        }
+    } else {
+        for (int i0 = lane; i0 < ne00; i0 += WARP_SIZE) {
+            const float t = br ? xr[i0]*br[i0 % bne0] : xr[i0];
+            ss += t*t;
+        }
     }
     ss = warp_reduce_sum(ss);
 
     const float norm = sqrtf(ss)*1.0f + eps;
     const float factor = fminf(fmaxf(threshold/norm, 0.0f), 1.0f);
 
-    for (int i0 = lane; i0 < ne00; i0 += WARP_SIZE) {
-        const float v = br ? xr[i0]*br[i0 % bne0] : xr[i0];
-        yr[i0] = v*factor;
+    if constexpr (n_per_lane > 0) {
+#pragma unroll
+        for (int j = 0; j < n_per_lane; ++j) {
+            const int i0 = lane + j*WARP_SIZE;
+            if (i0 < ne00) {
+                yr[i0] = v[j]*factor;
+            }
+        }
+    } else {
+        for (int i0 = lane; i0 < ne00; i0 += WARP_SIZE) {
+            const float t = br ? xr[i0]*br[i0 % bne0] : xr[i0];
+            yr[i0] = t*factor;
+        }
     }
 }
 
@@ -81,12 +103,27 @@ void ggml_cuda_op_l2_clip(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int block_size = 256;
     const int64_t nblocks = (nrows*WARP_SIZE + block_size - 1)/block_size;
 
-    l2_clip_f32<<<nblocks, block_size, 0, ctx.stream()>>>(
-            (const float *) src0->data, src1 ? (const float *) src1->data : nullptr, (float *) dst->data,
-            src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], src0->nb[1], src0->nb[2], src0->nb[3],
-            src1 ? (int) src1->ne[0] : 1, src1 ? (int) src1->ne[1] : 1, src1 ? (int) src1->ne[2] : 1, src1 ? (int) src1->ne[3] : 1,
-            src1 ? src1->nb[1] : 0, src1 ? src1->nb[2] : 0, src1 ? src1->nb[3] : 0,
-            dst->nb[1], dst->nb[2], dst->nb[3], threshold, eps);
+    auto launch = [&](auto NPL) {
+        constexpr int kNPL = decltype(NPL)::value;
+        l2_clip_f32<kNPL><<<nblocks, block_size, 0, ctx.stream()>>>(
+                (const float *) src0->data, src1 ? (const float *) src1->data : nullptr, (float *) dst->data,
+                src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3], src0->nb[1], src0->nb[2], src0->nb[3],
+                src1 ? (int) src1->ne[0] : 1, src1 ? (int) src1->ne[1] : 1, src1 ? (int) src1->ne[2] : 1, src1 ? (int) src1->ne[3] : 1,
+                src1 ? src1->nb[1] : 0, src1 ? src1->nb[2] : 0, src1 ? src1->nb[3] : 0,
+                dst->nb[1], dst->nb[2], dst->nb[3], threshold, eps);
+    };
+    const int64_t ne00 = src0->ne[0];
+    if (ne00 <= 32) {
+        launch(std::integral_constant<int, 1>{});
+    } else if (ne00 <= 64) {
+        launch(std::integral_constant<int, 2>{});
+    } else if (ne00 <= 128) {
+        launch(std::integral_constant<int, 4>{});
+    } else if (ne00 <= 256) {
+        launch(std::integral_constant<int, 8>{});
+    } else {
+        launch(std::integral_constant<int, 0>{});
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -190,6 +227,102 @@ static __global__ void res_mix_f32(const float * __restrict__ query, const ik_st
     }
 }
 
+// n_embd % 4 == 0 and n_embd/4 <= block_size: one float4 of every state per thread, a single pass of loads
+template <int block_size>
+static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, float4 * __restrict__ dst,
+        const int n_embd4, const int n_tok, const int n_states, const int64_t q_nb1, const float eps, const float scale) {
+    constexpr int n_warps = block_size/WARP_SIZE;
+
+    const int t  = blockIdx.x;
+    const int iq = blockIdx.y;
+
+    const int lane = threadIdx.x % WARP_SIZE;
+    const int wid  = threadIdx.x / WARP_SIZE;
+    const int k    = threadIdx.x;
+
+    __shared__ float red[n_warps][2*IK_MAX_STATES];
+    __shared__ float s_rms[IK_MAX_STATES];
+    __shared__ float s_p[IK_MAX_STATES];
+
+    const float4 * q = (const float4 *) ((const char *) query + iq*q_nb1);
+
+    float4 x[IK_MAX_STATES];
+    float  acc[2*IK_MAX_STATES];
+#pragma unroll
+    for (int i = 0; i < IK_MAX_STATES; ++i) {
+        x[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        acc[2*i + 0] = 0.0f;
+        acc[2*i + 1] = 0.0f;
+    }
+
+    if (k < n_embd4) {
+        const float4 qk = q[k];
+#pragma unroll
+        for (int i = 0; i < IK_MAX_STATES; ++i) {
+            if (i < n_states) {
+                x[i] = ((const float4 *) ((const char *) st.p[i] + t*st.nb1[i]))[k];
+                acc[2*i + 0] = x[i].x*x[i].x + x[i].y*x[i].y + x[i].z*x[i].z + x[i].w*x[i].w;
+                acc[2*i + 1] = x[i].x*qk.x + x[i].y*qk.y + x[i].z*qk.z + x[i].w*qk.w;
+            }
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+        if (i < 2*n_states) {
+            acc[i] = warp_reduce_sum(acc[i]);
+        }
+    }
+    if (lane < 2*n_states) {
+        float v = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+            if (i == lane) {
+                v = acc[i];
+            }
+        }
+        red[wid][lane] = v;
+    }
+    __syncthreads();
+
+    if (threadIdx.x < WARP_SIZE) {
+        float ss = 0.0f, dt = 0.0f;
+        if (lane < n_states) {
+#pragma unroll
+            for (int w = 0; w < n_warps; ++w) {
+                ss += red[w][2*lane + 0];
+                dt += red[w][2*lane + 1];
+            }
+        }
+        const float r  = rsqrtf(ss/(4*n_embd4) + eps);
+        float       sc = lane < n_states ? dt*r*scale : -INFINITY;
+        const float mx = warp_reduce_max(sc);
+        sc = lane < n_states ? expf(sc - mx) : 0.0f;
+        const float sum = warp_reduce_sum(sc);
+        if (lane < n_states) {
+            s_rms[lane] = r;
+            s_p[lane]   = sc/sum;
+        }
+    }
+    __syncthreads();
+
+    if (k < n_embd4) {
+        float4 y = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+#pragma unroll
+        for (int i = 0; i < IK_MAX_STATES; ++i) {
+            if (i < n_states) {
+                const float f = s_rms[i]*s_p[i];
+                y.x += (x[i].x*s_rms[i])*s_p[i];
+                y.y += (x[i].y*s_rms[i])*s_p[i];
+                y.z += (x[i].z*s_rms[i])*s_p[i];
+                y.w += (x[i].w*s_rms[i])*s_p[i];
+                GGML_UNUSED(f);
+            }
+        }
+        dst[((int64_t) iq*n_tok + t)*n_embd4 + k] = y;
+    }
+}
+
 void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * query = dst->src[0];
 
@@ -211,7 +344,27 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int n_q    = dst->ne[2];
 
     const dim3 grid(n_tok, n_q, 1);
-    if (n_embd >= 2048) {
+
+    bool aligned = n_embd % 4 == 0 && query->nb[1] % 16 == 0;
+    for (int i = 0; i < n_states; ++i) {
+        aligned = aligned && st.nb1[i] % 16 == 0 && ((uintptr_t) st.p[i]) % 16 == 0;
+    }
+    if (aligned && n_embd/4 <= 1024) {
+        const int n_embd4 = n_embd/4;
+        if (n_embd4 <= 256) {
+            res_mix_f32_vec4<256><<<grid, 256, 0, ctx.stream()>>>((const float4 *) query->data, st, (float4 *) dst->data,
+                    n_embd4, n_tok, n_states, query->nb[1], eps, scale);
+        } else if (n_embd4 <= 512) {
+            res_mix_f32_vec4<512><<<grid, 512, 0, ctx.stream()>>>((const float4 *) query->data, st, (float4 *) dst->data,
+                    n_embd4, n_tok, n_states, query->nb[1], eps, scale);
+        } else if (n_embd4 <= 640) {
+            res_mix_f32_vec4<640><<<grid, 640, 0, ctx.stream()>>>((const float4 *) query->data, st, (float4 *) dst->data,
+                    n_embd4, n_tok, n_states, query->nb[1], eps, scale);
+        } else {
+            res_mix_f32_vec4<1024><<<grid, 1024, 0, ctx.stream()>>>((const float4 *) query->data, st, (float4 *) dst->data,
+                    n_embd4, n_tok, n_states, query->nb[1], eps, scale);
+        }
+    } else if (n_embd >= 2048) {
         res_mix_f32<1024><<<grid, 1024, 0, ctx.stream()>>>((const float *) query->data, st, (float *) dst->data,
                 n_embd, n_tok, n_states, query->nb[1], eps, scale);
     } else {
@@ -346,7 +499,7 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
 // ---------------------------------------------------------------------------------------------------------------------
 // rel_bias: out[kv, t, h] = sum_r table[r, pos[kv, t]]*r[r, h, t] - sinks[h, t] + mask[kv, t], one block per (head, token)
 
-#define IK_REL_BIAS_BLOCK 1024
+#define IK_REL_BIAS_BLOCK 256
 #define IK_REL_MAX_SMEM_EXTENT 12288
 
 template <typename dst_t, typename mask_t, bool use_smem>
@@ -358,22 +511,40 @@ static __global__ void rel_bias_kernel(const float * __restrict__ r, const float
     const int t = blockIdx.y;
 
     extern __shared__ float tbl[];
-    __shared__ float rv[64];
 
+    // r of this head in registers (n_rel <= 16 on the fast path, else shared memory)
     const float * rr = r + ((int64_t) t*n_head + h)*n_rel;
-    for (int i = threadIdx.x; i < n_rel; i += IK_REL_BIAS_BLOCK) {
-        rv[i] = rr[i];
+    float rv[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        rv[i] = i < n_rel ? rr[i] : 0.0f;
     }
-    __syncthreads();
 
     if constexpr (use_smem) {
-        for (int p = threadIdx.x; p < n_extent; p += IK_REL_BIAS_BLOCK) {
-            const float * tb = table + (int64_t) p*n_rel;
-            float bias = 0.0f;
-            for (int ir = 0; ir < n_rel; ++ir) {
-                bias += tb[ir]*rv[ir];
+        if (n_rel == 16 && ((uintptr_t) table) % 16 == 0) {
+            // a table entry is 64 bytes: four float4 loads per thread
+            for (int p = threadIdx.x; p < n_extent; p += IK_REL_BIAS_BLOCK) {
+                const float4 * tb = (const float4 *) (table + (int64_t) p*16);
+                const float4 t0 = tb[0], t1 = tb[1], t2 = tb[2], t3 = tb[3];
+                float bias = 0.0f;
+                bias += t0.x*rv[0]  + t0.y*rv[1]  + t0.z*rv[2]  + t0.w*rv[3];
+                bias += t1.x*rv[4]  + t1.y*rv[5]  + t1.z*rv[6]  + t1.w*rv[7];
+                bias += t2.x*rv[8]  + t2.y*rv[9]  + t2.z*rv[10] + t2.w*rv[11];
+                bias += t3.x*rv[12] + t3.y*rv[13] + t3.z*rv[14] + t3.w*rv[15];
+                tbl[p] = bias;
             }
-            tbl[p] = bias;
+        } else {
+            for (int p = threadIdx.x; p < n_extent; p += IK_REL_BIAS_BLOCK) {
+                const float * tb = table + (int64_t) p*n_rel;
+                float bias = 0.0f;
+#pragma unroll
+                for (int ir = 0; ir < 16; ++ir) {
+                    if (ir < n_rel) {
+                        bias += tb[ir]*rv[ir];
+                    }
+                }
+                tbl[p] = bias;
+            }
         }
         __syncthreads();
     }
@@ -391,8 +562,11 @@ static __global__ void rel_bias_kernel(const float * __restrict__ r, const float
                 bias = tbl[p];
             } else {
                 const float * tb = table + (int64_t) p*n_rel;
-                for (int ir = 0; ir < n_rel; ++ir) {
-                    bias += tb[ir]*rv[ir];
+#pragma unroll
+                for (int ir = 0; ir < 16; ++ir) {
+                    if (ir < n_rel) {
+                        bias += tb[ir]*rv[ir];
+                    }
                 }
             }
         }
@@ -431,7 +605,7 @@ void ggml_cuda_op_rel_bias(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int n_kv     = pos->ne[0];
     const int n_extent = table->ne[1];
 
-    GGML_ASSERT(n_rel <= 64);
+    GGML_ASSERT(n_rel <= 16);
     GGML_ASSERT(ggml_is_contiguous(dst));
 
     const float   * r_d     = (const float *) r->data;

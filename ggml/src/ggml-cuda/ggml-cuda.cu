@@ -6763,7 +6763,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_LOOP_CTRL_APPLY:
             return true;
         case GGML_OP_REL_BIAS:
-            return op->src[0]->ne[0] <= 64;
+            return op->src[0]->ne[0] <= 16;
         case GGML_OP_CONT:
             return true;
         case GGML_OP_SOFT_MAX:

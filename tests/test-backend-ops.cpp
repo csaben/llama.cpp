@@ -14066,6 +14066,20 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
 
+    // inkling2 decode shapes
+    test_cases.emplace_back(new test_res_mix(2304, 1, 1, 2));
+    test_cases.emplace_back(new test_res_mix(2304, 1, 1, 5));
+    test_cases.emplace_back(new test_res_mix(2304, 1, 3, 2));
+    test_cases.emplace_back(new test_l2_clip({128, 24, 1, 1}, true));
+    test_cases.emplace_back(new test_l2_clip({128, 8, 1, 1}, false));
+    test_cases.emplace_back(new test_l2_clip({16, 24, 1, 1}, true));
+    test_cases.emplace_back(new test_rel_bias(16, 24, 1, 256, 1024, GGML_TYPE_F16, GGML_TYPE_F16));
+    test_cases.emplace_back(new test_rel_bias(16, 24, 1, 4096, 1024, GGML_TYPE_F16, GGML_TYPE_F16));
+    test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1));
+    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1));
+    test_cases.emplace_back(new test_shortconv_res(4, 2304, 1, 1, 0, true, 1));
+    test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, 8, false, 1));
+
     test_cases.emplace_back(new test_timestep_embedding());
     test_cases.emplace_back(new test_timestep_embedding(GGML_TYPE_F32, {32769, 1, 1, 1}, 4096, 10000));
     test_cases.emplace_back(new test_timestep_embedding(GGML_TYPE_F32, {65, 1, 1, 1}, 1, 10000));
