@@ -125,3 +125,20 @@ measured acceptance (phase 1) is 45-57% on chat prompts. The batched mul_mat_vec
 effective (148 us for 4 tokens of gate_up) and the fused decode ops fall back to the unfused graph for n_tokens > 1.
 Conclusion: speculative decoding is at best a few percent for this architecture on one GPU; the single-token path is
 where the time is.
+
+## Phase 2 variants (byte reduction, quality-gated)
+| variant | how | tg128 tok/s | PPL (c=2048, 8 chunks) | decode-path PPL | notes |
+|---|---|---|---|---|---|
+| exact (default) | Inkling-2-Mini-IQ4_NL.gguf as published | 140.7 | 2.9412 | 4.0674 | the reference; unfused 2.9401 / 4.0660 |
+| F16 loop controllers | `LLAMA_INKLING_CTRL_F16=1` (the F32 controller weights, 340 MB/token, are converted to F16 at load) | 141.9 | 2.9380 | 4.0532 | opt-in at run time, no model change |
+| Q6_K dense | `Inkling-2-Mini-IQ4_NL-dense-q6k.gguf`: attention projections and the output head requantized Q8_0 -> Q6_K (llama-quantize --allow-requantize with per-tensor overrides, experts and embeddings untouched) | 145.6 | 2.9402 | 4.0704 | 16.16 GiB; dense bytes 1373 -> 1030 MB, head 492 -> 362 MB |
+| Q6_K dense + F16 controllers | both | 149.3 | 2.9407 | - | |
+All PPL values are within the 0.064 standard error of each other.
+
+Variant GGUF:
+  build/bin/llama-quantize --allow-requantize --output-tensor-type q6_k --token-embedding-type q8_0 \
+    --tensor-type 'attn_q=q6_k' --tensor-type 'attn_k=q6_k' --tensor-type 'attn_v=q6_k' --tensor-type 'attn_output=q6_k' \
+    --tensor-type 'attn_gate=q6_k' --tensor-type 'attn_rel=q6_k' --tensor-type 'attn_sink_proj=q6_k' \
+    --tensor-type 'attn_k_conv_proj=q6_k' --tensor-type 'attn_v_conv_proj=q6_k' \
+    --tensor-type 'blk\.(1[0-9]|[0-9])\.ffn_.*_exps=iq4_nl' --tensor-type 'blk\.2[0-3]\.ffn_.*_exps=q8_0' \
+    ~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL.gguf ~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL-dense-q6k.gguf iq4_nl
