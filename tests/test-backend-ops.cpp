@@ -4983,13 +4983,14 @@ struct test_shortconv_res : public test_case {
     const int64_t n_heads; // 0: no dynamic taps
     const bool    with_res;
     const int64_t n_slots; // 0: no state store
+    const int     post;    // ggml_shortconv_post
 
     std::string vars() override {
-        return VARS_TO_STR7(d_conv, n_chan, n_t, n_s, n_heads, with_res, n_slots);
+        return VARS_TO_STR8(d_conv, n_chan, n_t, n_s, n_heads, with_res, n_slots, post);
     }
 
-    test_shortconv_res(int64_t d_conv = 4, int64_t n_chan = 1024, int64_t n_t = 1, int64_t n_s = 1, int64_t n_heads = 8, bool with_res = false, int64_t n_slots = 0)
-        : d_conv(d_conv), n_chan(n_chan), n_t(n_t), n_s(n_s), n_heads(n_heads), with_res(with_res), n_slots(n_slots) {}
+    test_shortconv_res(int64_t d_conv = 4, int64_t n_chan = 1024, int64_t n_t = 1, int64_t n_s = 1, int64_t n_heads = 8, bool with_res = false, int64_t n_slots = 0, int post = 0)
+        : d_conv(d_conv), n_chan(n_chan), n_t(n_t), n_s(n_s), n_heads(n_heads), with_res(with_res), n_slots(n_slots), post(post) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         // the past inputs come from a larger strided buffer, like a recurrent state gather
@@ -5019,7 +5020,7 @@ struct test_shortconv_res : public test_case {
             state = ggml_view_4d(ctx, cells, d_conv - 1, n_slots, n_chan, n_s, cells->nb[2], (d_conv - 1)*sizeof(float), cells->nb[1], 0);
         }
 
-        ggml_tensor * out = ggml_shortconv_res(ctx, past, w, cur, taps, res, state, 1.0f/3.0f);
+        ggml_tensor * out = ggml_shortconv_res_post(ctx, past, w, cur, taps, res, state, 1.0f/3.0f, (ggml_shortconv_post) post, n_chan/128 > 0 ? n_chan/128 : 1, 1e-6f, 2.0f);
         ggml_set_name(out, "out");
 
         if (n_slots > 0) {
@@ -5086,6 +5087,31 @@ struct test_rel_bias : public test_case {
     }
 };
 
+// GGML_OP_MOE_SUM
+struct test_moe_sum : public test_case {
+    const int64_t n0;
+    const int64_t n1;
+    const int64_t n2;
+
+    std::string vars() override {
+        return VARS_TO_STR3(n0, n1, n2);
+    }
+
+    test_moe_sum(int64_t n0 = 2304, int64_t n1 = 8, int64_t n2 = 1) : n0(n0), n1(n1), n2(n2) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n0, n1, n2);
+        ggml_set_name(a, "a");
+        ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, n1, n2);
+        ggml_set_name(w, "w");
+
+        ggml_tensor * out = ggml_moe_sum(ctx, a, w);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+};
+
 // GGML_OP_LOOP_CTRL_DOWN
 struct test_loop_ctrl_down : public test_case {
     const int64_t n;
@@ -5118,12 +5144,13 @@ struct test_loop_ctrl_apply : public test_case {
     const int64_t n;
     const int64_t rank;
     const int64_t n_tok;
+    const bool    with_norm;
 
     std::string vars() override {
-        return VARS_TO_STR3(n, rank, n_tok);
+        return VARS_TO_STR4(n, rank, n_tok, with_norm);
     }
 
-    test_loop_ctrl_apply(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1) : n(n), rank(rank), n_tok(n_tok) {}
+    test_loop_ctrl_apply(int64_t n = 2304, int64_t rank = 64, int64_t n_tok = 1, bool with_norm = false) : n(n), rank(rank), n_tok(n_tok), with_norm(with_norm) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * cur = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n, n_tok);
@@ -5136,8 +5163,13 @@ struct test_loop_ctrl_apply : public test_case {
         ggml_set_name(wg, "wg");
         ggml_tensor * wf = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rank, n);
         ggml_set_name(wf, "wf");
+        ggml_tensor * nw = nullptr;
+        if (with_norm) {
+            nw = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
+            ggml_set_name(nw, "nw");
+        }
 
-        ggml_tensor * out = ggml_loop_ctrl_apply(ctx, cur, msg, d, wg, wf);
+        ggml_tensor * out = ggml_loop_ctrl_apply(ctx, cur, msg, d, wg, wf, nw, 1e-6f);
         ggml_set_name(out, "out");
 
         return out;
@@ -12138,6 +12170,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_shortconv_res(4, 2304, 5, 2, n_heads, with_res, 4));
             test_cases.emplace_back(new test_shortconv_res(3, 96, 33, 1, n_heads, with_res, 1));
             test_cases.emplace_back(new test_shortconv_res(3, 96, 7, 3, n_heads, with_res, 7));
+            for (int post : {1, 2}) {
+                test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, n_heads, with_res, 1, post));
+                test_cases.emplace_back(new test_shortconv_res(4, 1024, 5, 2, n_heads, with_res, 0, post));
+                test_cases.emplace_back(new test_shortconv_res(3, 256, 3, 1, n_heads, with_res, 1, post));
+            }
         }
     }
     for (ggml_type type_mask : {GGML_TYPE_F16, GGML_TYPE_F32}) {
@@ -12150,9 +12187,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1));
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 5));
     test_cases.emplace_back(new test_loop_ctrl_down(100, 7, 3));
-    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1));
-    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 5));
-    test_cases.emplace_back(new test_loop_ctrl_apply(100, 7, 3));
+    for (bool with_norm : {false, true}) {
+        test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, with_norm));
+        test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 5, with_norm));
+        test_cases.emplace_back(new test_loop_ctrl_apply(100, 7, 3, with_norm));
+    }
+    test_cases.emplace_back(new test_moe_sum(2304, 8, 1));
+    test_cases.emplace_back(new test_moe_sum(2304, 8, 7));
+    test_cases.emplace_back(new test_moe_sum(100, 3, 5));
 
     for (int64_t d_conv : {2, 3, 4, 7, 9}) {
         for (int64_t d_inner: {1024, 1536, 2048}) {
@@ -14067,6 +14109,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
 
     // inkling2 decode shapes
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8600, 1, 2304, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 6552, 1, 2304, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2304, 1, 3072, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 1024, 1, 2304, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 201024, 1, 2304, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_IQ4_NL, GGML_TYPE_F32, 128, 8, false, 2304, 1, 2304));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_IQ4_NL, GGML_TYPE_F32, 128, 8, false, 2304, 1, 1152));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 8, false, 2304, 1, 2304));
     test_cases.emplace_back(new test_res_mix(2304, 1, 1, 2));
     test_cases.emplace_back(new test_res_mix(2304, 1, 1, 5));
     test_cases.emplace_back(new test_res_mix(2304, 1, 3, 2));
@@ -14077,8 +14127,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_rel_bias(16, 24, 1, 4096, 1024, GGML_TYPE_F16, GGML_TYPE_F16));
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1));
     test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1));
+    test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, true));
     test_cases.emplace_back(new test_shortconv_res(4, 2304, 1, 1, 0, true, 1));
     test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, 8, false, 1));
+    test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, 0, false, 1, 1));
+    test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, 8, false, 1, 2));
+    test_cases.emplace_back(new test_moe_sum(2304, 8, 1));
 
     test_cases.emplace_back(new test_timestep_embedding());
     test_cases.emplace_back(new test_timestep_embedding(GGML_TYPE_F32, {32769, 1, 1, 1}, 4096, 10000));

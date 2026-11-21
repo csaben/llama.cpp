@@ -457,7 +457,11 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
         ggml_tensor * history,
         llm_graph_input_rs * inp,
         int64_t offset,
-        ggml_tensor * residual) {
+        ggml_tensor * residual,
+        ggml_shortconv_post post,
+        int64_t n_heads_post,
+        float post_eps,
+        float post_threshold) {
     const int64_t n_conv       = hparams.n_shortconv_l_cache;
     const int64_t n_channels   = cur->ne[0];
     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
@@ -474,7 +478,7 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
         ggml_tensor * state_view = build_conv_state_view(inp, state, n_conv - 1, n_channels, n_seqs, n_seq_tokens,
                 offset*(n_conv - 1)*ggml_element_size(state));
 
-        return ggml_shortconv_res(ctx0, past, weight, cur, taps, residual, state_view, scale);
+        return ggml_shortconv_res_post(ctx0, past, weight, cur, taps, residual, state_view, scale, post, n_heads_post, post_eps, post_threshold);
     }
 
     ggml_tensor * x = ggml_transpose(ctx0, ggml_view_3d(ctx0, cur, n_channels, n_seq_tokens, n_seqs, cur->nb[1], n_seq_tokens*cur->nb[1], 0));
@@ -504,16 +508,30 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
     }
 
     out = ggml_scale(ctx0, ggml_add(ctx0, cur, out), scale);
+    out = residual ? ggml_add(ctx0, residual, out) : out;
 
-    return residual ? ggml_add(ctx0, residual, out) : out;
+    // the per-head post-normalization of the plain graph
+    if (post != GGML_SHORTCONV_POST_NONE) {
+        const int64_t hd = n_channels/n_heads_post;
+        ggml_tensor * heads = ggml_reshape_3d(ctx0, out, hd, n_heads_post, n_tokens);
+        if (post == GGML_SHORTCONV_POST_RMS_NORM) {
+            heads = ggml_rms_norm(ctx0, heads, post_eps);
+        } else {
+            heads = clip(heads, nullptr, post_threshold);
+        }
+        out = ggml_reshape_2d(ctx0, heads, n_channels, n_tokens);
+    }
+
+    return out;
 }
 
 // mix a cross-pass message into a looped layer input: (1 - forget)*cur + gain*message, both gated on cur and message
-ggml_tensor * llama_model_inkling2::graph::control(ggml_tensor * cur, ggml_tensor * message, const loop_layer & loop, int ctrl) {
+// the optional norm weight RMS-normalizes the result (fused into the op)
+ggml_tensor * llama_model_inkling2::graph::control(ggml_tensor * cur, ggml_tensor * message, const loop_layer & loop, int ctrl, ggml_tensor * norm_w, int il) {
     if (fused) {
         ggml_tensor * d = ggml_loop_ctrl_down(ctx0, loop.ctrl_down[ctrl], cur, message, 1e-6f);
 
-        return ggml_loop_ctrl_apply(ctx0, cur, message, d, loop.ctrl_gain[ctrl], loop.ctrl_forget[ctrl]);
+        return ggml_loop_ctrl_apply(ctx0, cur, message, d, loop.ctrl_gain[ctrl], loop.ctrl_forget[ctrl], norm_w, hparams.f_norm_rms_eps);
     }
 
     ggml_tensor * gate = ggml_concat(ctx0, ggml_rms_norm(ctx0, cur, 1e-6f), ggml_rms_norm(ctx0, message, 1e-6f), 0);
@@ -522,7 +540,9 @@ ggml_tensor * llama_model_inkling2::graph::control(ggml_tensor * cur, ggml_tenso
     ggml_tensor * gain   = ggml_tanh(ctx0, build_lora_mm(loop.ctrl_gain[ctrl],   gate));
     ggml_tensor * forget = ggml_tanh(ctx0, build_lora_mm(loop.ctrl_forget[ctrl], gate));
 
-    return ggml_add(ctx0, ggml_sub(ctx0, cur, ggml_mul(ctx0, forget, cur)), ggml_mul(ctx0, gain, message));
+    cur = ggml_add(ctx0, ggml_sub(ctx0, cur, ggml_mul(ctx0, forget, cur)), ggml_mul(ctx0, gain, message));
+
+    return norm_w ? build_norm(cur, norm_w, nullptr, LLM_NORM_RMS, il) : cur;
 }
 
 ggml_tensor * llama_model_inkling2::graph::build_inputs() {
@@ -649,12 +669,15 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
             }
         }
 
-        Kcur = convolve(Kcur, layer.attn_k_conv, k_taps, state, history, recr, 0);
-        Vcur = convolve(Vcur, layer.attn_v_conv, v_taps, state, history, recr, n_embd_k_gqa);
+        // the per-head clip of K and norm of V are fused into their convolutions
+        Kcur = convolve(Kcur, layer.attn_k_conv, k_taps, state, history, recr, 0, nullptr,
+                GGML_SHORTCONV_POST_L2_CLIP, n_head_kv, 1e-6f, hparams.f_qk_clip);
+        Vcur = convolve(Vcur, layer.attn_v_conv, v_taps, state, history, recr, n_embd_k_gqa, nullptr,
+                GGML_SHORTCONV_POST_RMS_NORM, n_head_kv, hparams.f_norm_rms_eps, 0.0f);
 
         Qcur = clip(Qcur, layer.attn_q_clip, hparams.f_qk_clip);
-        Kcur = clip(ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens), nullptr, hparams.f_qk_clip);
-        Vcur = ggml_rms_norm(ctx0, ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens), hparams.f_norm_rms_eps);
+        Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
+        Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
         Rcur = clip(Rcur, layer.attn_rel_clip, hparams.f_relative_clip);
 
         if (!is_swa) {

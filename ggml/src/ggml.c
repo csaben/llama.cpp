@@ -1123,9 +1123,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "REL_BIAS",
     "LOOP_CTRL_DOWN",
     "LOOP_CTRL_APPLY",
+    "MOE_SUM",
 };
 
-static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
+static_assert(GGML_OP_COUNT == 107, "GGML_OP_COUNT != 107");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1245,9 +1246,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "rel_bias(r,table)",
     "loop_ctrl_down(w,a,b)",
     "loop_ctrl_apply(x,m,d)",
+    "moe_sum(x,w)",
 };
 
-static_assert(GGML_OP_COUNT == 106, "GGML_OP_COUNT != 106");
+static_assert(GGML_OP_COUNT == 107, "GGML_OP_COUNT != 107");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5736,6 +5738,22 @@ struct ggml_tensor * ggml_shortconv_res(
         struct ggml_tensor  * res,
         struct ggml_tensor  * state,
         float                 scale) {
+    return ggml_shortconv_res_post(ctx, past, w, cur, taps, res, state, scale, GGML_SHORTCONV_POST_NONE, 1, 0.0f, 0.0f);
+}
+
+struct ggml_tensor * ggml_shortconv_res_post(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * past,
+        struct ggml_tensor  * w,
+        struct ggml_tensor  * cur,
+        struct ggml_tensor  * taps,
+        struct ggml_tensor  * res,
+        struct ggml_tensor  * state,
+        float                 scale,
+        enum ggml_shortconv_post post,
+        int                   n_heads_post,
+        float                 post_eps,
+        float                 post_threshold) {
     GGML_ASSERT(ggml_is_3d(past));
     GGML_ASSERT(ggml_is_matrix(w));
     GGML_ASSERT(past->type == GGML_TYPE_F32 && w->type == GGML_TYPE_F32 && cur->type == GGML_TYPE_F32);
@@ -5767,9 +5785,15 @@ struct ggml_tensor * ggml_shortconv_res(
         GGML_ASSERT(state->ne[0] == d_conv - 1 && state->ne[1] <= n_t && state->ne[2] == n_chan && state->ne[3] == n_s);
     }
 
+    GGML_ASSERT(post == GGML_SHORTCONV_POST_NONE || (n_heads_post > 0 && n_chan % n_heads_post == 0));
+
     struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_chan, n_t*n_s);
 
     ggml_set_op_params_f32(result, 0, scale);
+    ggml_set_op_params_i32(result, 1, (int32_t) post);
+    ggml_set_op_params_i32(result, 2, n_heads_post);
+    ggml_set_op_params_f32(result, 3, post_eps);
+    ggml_set_op_params_f32(result, 4, post_threshold);
 
     result->op     = GGML_OP_SHORTCONV_RES;
     result->src[0] = past;
@@ -5861,7 +5885,9 @@ struct ggml_tensor * ggml_loop_ctrl_apply(
         struct ggml_tensor  * msg,
         struct ggml_tensor  * d,
         struct ggml_tensor  * w_gain,
-        struct ggml_tensor  * w_forget) {
+        struct ggml_tensor  * w_forget,
+        struct ggml_tensor  * norm_w,
+        float                 eps) {
     GGML_ASSERT(cur->type == GGML_TYPE_F32 && msg->type == GGML_TYPE_F32 && d->type == GGML_TYPE_F32);
     GGML_ASSERT(w_gain->type == GGML_TYPE_F32 && w_forget->type == GGML_TYPE_F32);
     GGML_ASSERT(ggml_is_matrix(cur) && ggml_is_matrix(msg) && ggml_is_matrix(d));
@@ -5871,7 +5897,13 @@ struct ggml_tensor * ggml_loop_ctrl_apply(
     GGML_ASSERT(ggml_are_same_shape(w_gain, w_forget));
     GGML_ASSERT(w_gain->ne[0] == d->ne[0] && w_gain->ne[1] == cur->ne[0] && d->ne[1] == cur->ne[1]);
 
+    if (norm_w) {
+        GGML_ASSERT(norm_w->type == GGML_TYPE_F32 && ggml_is_contiguous(norm_w) && ggml_nelements(norm_w) == cur->ne[0]);
+    }
+
     struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cur->ne[0], cur->ne[1]);
+
+    ggml_set_op_params_f32(result, 0, eps);
 
     result->op     = GGML_OP_LOOP_CTRL_APPLY;
     result->src[0] = cur;
@@ -5879,6 +5911,27 @@ struct ggml_tensor * ggml_loop_ctrl_apply(
     result->src[2] = d;
     result->src[3] = w_gain;
     result->src[4] = w_forget;
+    result->src[5] = norm_w;
+
+    return result;
+}
+
+// ggml_moe_sum
+
+struct ggml_tensor * ggml_moe_sum(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * w) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32 && w->type == GGML_TYPE_F32);
+    GGML_ASSERT(a->ne[3] == 1 && w->ne[3] == 1);
+    GGML_ASSERT(a->nb[0] == sizeof(float));
+    GGML_ASSERT(w->ne[0] == 1 && w->ne[1] == a->ne[1] && w->ne[2] == a->ne[2]);
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, a->ne[0], a->ne[2]);
+
+    result->op     = GGML_OP_MOE_SUM;
+    result->src[0] = a;
+    result->src[1] = w;
 
     return result;
 }

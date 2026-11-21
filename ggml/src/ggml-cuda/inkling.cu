@@ -377,34 +377,31 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 // shortconv_res: y = res + (cur + conv([past, cur], w) + dynamic taps)*scale, one thread per (channel, token);
 // the thread of token n_t - 1 - k also stores the inputs it saw into state slot k
 
-template <int d_conv, bool has_taps>
-static __global__ void shortconv_res_f32(const float * __restrict__ past, const float * __restrict__ w,
-        const float * __restrict__ cur, const float * __restrict__ taps, const float * __restrict__ res, float * __restrict__ dst,
-        float * __restrict__ state,
-        const int n_chan, const int n_t, const int n_s, const int n_slots,
-        const int64_t past_nb1, const int64_t past_nb2, const int64_t w_nb1,
-        const int64_t cur_nb1, const int64_t taps_nb1, const int64_t taps_nb2, const int64_t res_nb1, const int64_t dst_nb1,
-        const int64_t st_nb1, const int64_t st_nb2, const int64_t st_nb3,
-        const int hd, const float scale) {
-    const int64_t idx = (int64_t) blockIdx.x*blockDim.x + threadIdx.x;
-    const int64_t n_tok = (int64_t) n_t*n_s;
-    if (idx >= n_tok*n_chan) {
-        return;
-    }
-    const int c   = idx % n_chan;
-    const int tok = idx / n_chan;
-    const int s   = tok / n_t;
-    const int t   = tok - s*n_t;
+struct ik_shortconv_args {
+    const float * past; const float * w; const float * cur; const float * taps; const float * res;
+    float * dst; float * state;
+    int n_chan, n_t, n_s, n_slots;
+    int64_t past_nb1, past_nb2, w_nb1, cur_nb1, taps_nb1, taps_nb2, res_nb1, dst_nb1, st_nb1, st_nb2, st_nb3;
+    int hd; float scale;
+    // post-normalization per head of hd_post channels
+    int post; int hd_post; float post_eps; float post_threshold;
+};
 
-    const float * ps = (const float *) ((const char *) past + c*past_nb1 + s*past_nb2);
-    const float * wc = (const float *) ((const char *) w + c*w_nb1);
+// the convolution of one (channel, token), the state store included; returns the unnormalized result
+template <int d_conv, bool has_taps>
+static __device__ __forceinline__ float shortconv_res_one(const ik_shortconv_args & args, const int c, const int tok) {
+    const int s = tok / args.n_t;
+    const int t = tok - s*args.n_t;
+
+    const float * ps = (const float *) ((const char *) args.past + c*args.past_nb1 + s*args.past_nb2);
+    const float * wc = (const float *) ((const char *) args.w + c*args.w_nb1);
 
     // the window [t, t + d_conv) of the inputs [past, cur] of this channel
     float x[d_conv];
 #pragma unroll
     for (int j = 0; j < d_conv; ++j) {
         const int i = t + j;
-        x[j] = i < d_conv - 1 ? ps[i] : *(const float *) ((const char *) cur + (int64_t) (s*n_t + i - (d_conv - 1))*cur_nb1 + c*sizeof(float));
+        x[j] = i < d_conv - 1 ? ps[i] : *(const float *) ((const char *) args.cur + (int64_t) (s*args.n_t + i - (d_conv - 1))*args.cur_nb1 + c*sizeof(float));
     }
 
     float out = 0.0f;
@@ -413,26 +410,68 @@ static __global__ void shortconv_res_f32(const float * __restrict__ past, const 
         out += x[j]*wc[j];
     }
     if constexpr (has_taps) {
-        const float * tp = (const float *) ((const char *) taps + (c/hd)*taps_nb1 + tok*taps_nb2);
+        const float * tp = (const float *) ((const char *) args.taps + (c/args.hd)*args.taps_nb1 + tok*args.taps_nb2);
 #pragma unroll
         for (int lag = 0; lag < d_conv; ++lag) {
             out += x[d_conv - 1 - lag]*tp[lag];
         }
     }
 
-    float y = (x[d_conv - 1] + out)*scale;
-    if (res) {
-        y += *(const float *) ((const char *) res + tok*res_nb1 + c*sizeof(float));
+    float y = (x[d_conv - 1] + out)*args.scale;
+    if (args.res) {
+        y += *(const float *) ((const char *) args.res + tok*args.res_nb1 + c*sizeof(float));
     }
-    *(float *) ((char *) dst + tok*dst_nb1 + c*sizeof(float)) = y;
 
-    const int k = n_t - 1 - t;
-    if (k < n_slots) {
-        float * st = (float *) ((char *) state + k*st_nb1 + c*st_nb2 + s*st_nb3);
+    const int k = args.n_t - 1 - t;
+    if (k < args.n_slots) {
+        float * st = (float *) ((char *) args.state + k*args.st_nb1 + c*args.st_nb2 + s*args.st_nb3);
 #pragma unroll
         for (int j = 0; j < d_conv - 1; ++j) {
             st[j] = x[j + 1];
         }
+    }
+    return y;
+}
+
+// one thread per (channel, token)
+template <int d_conv, bool has_taps>
+static __global__ void shortconv_res_f32(const ik_shortconv_args args) {
+    const int64_t idx = (int64_t) blockIdx.x*blockDim.x + threadIdx.x;
+    const int64_t n_tok = (int64_t) args.n_t*args.n_s;
+    if (idx >= n_tok*args.n_chan) {
+        return;
+    }
+    const int c   = idx % args.n_chan;
+    const int tok = idx / args.n_chan;
+
+    const float y = shortconv_res_one<d_conv, has_taps>(args, c, tok);
+    *(float *) ((char *) args.dst + tok*args.dst_nb1 + c*sizeof(float)) = y;
+}
+
+// one block per (head, token), the block normalizes the head
+template <int d_conv, bool has_taps, int block_size>
+static __global__ void shortconv_res_post_f32(const ik_shortconv_args args) {
+    const int head = blockIdx.x;
+    const int tok  = blockIdx.y;
+
+    __shared__ float red[block_size/WARP_SIZE];
+
+    const int c = head*args.hd_post + threadIdx.x;
+    float y = 0.0f;
+    if (threadIdx.x < args.hd_post) {
+        y = shortconv_res_one<d_conv, has_taps>(args, c, tok);
+    }
+    const float ss = ik_block_sum<block_size>(y*y, red);
+
+    float factor;
+    if (args.post == GGML_SHORTCONV_POST_RMS_NORM) {
+        factor = rsqrtf(ss/args.hd_post + args.post_eps);
+    } else {
+        const float norm = sqrtf(ss)*1.0f + args.post_eps;
+        factor = fminf(fmaxf(args.post_threshold/norm, 0.0f), 1.0f);
+    }
+    if (threadIdx.x < args.hd_post) {
+        *(float *) ((char *) args.dst + tok*args.dst_nb1 + c*sizeof(float)) = y*factor;
     }
 }
 
@@ -444,36 +483,61 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
     const ggml_tensor * res   = dst->src[4];
     ggml_tensor       * state = dst->src[5];
 
-    float scale;
-    memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
+    ik_shortconv_args args;
+    memcpy(&args.scale,          (const float *)   dst->op_params + 0, sizeof(float));
+    memcpy(&args.post,           (const int32_t *) dst->op_params + 1, sizeof(int32_t));
+    int32_t n_heads_post = 1;
+    memcpy(&n_heads_post,        (const int32_t *) dst->op_params + 2, sizeof(int32_t));
+    memcpy(&args.post_eps,       (const float *)   dst->op_params + 3, sizeof(float));
+    memcpy(&args.post_threshold, (const float *)   dst->op_params + 4, sizeof(float));
 
-    const int d_conv  = w->ne[0];
-    const int n_chan  = w->ne[1];
-    const int n_s     = past->ne[2];
-    const int n_t     = cur->ne[1]/n_s;
-    const int n_slots = state ? state->ne[1] : 0;
+    const int d_conv = w->ne[0];
+    args.n_chan  = w->ne[1];
+    args.n_s     = past->ne[2];
+    args.n_t     = cur->ne[1]/args.n_s;
+    args.n_slots = state ? state->ne[1] : 0;
+    args.hd      = taps ? args.n_chan/taps->ne[1] : args.n_chan;
+    args.hd_post = args.post ? args.n_chan/n_heads_post : args.n_chan;
 
     GGML_ASSERT(past->nb[0] == sizeof(float) && w->nb[0] == sizeof(float));
     GGML_ASSERT(!state || state->nb[0] == sizeof(float));
 
-    const int hd = taps ? n_chan/taps->ne[1] : n_chan;
+    args.past = (const float *) past->data; args.past_nb1 = past->nb[1]; args.past_nb2 = past->nb[2];
+    args.w    = (const float *) w->data;    args.w_nb1    = w->nb[1];
+    args.cur  = (const float *) cur->data;  args.cur_nb1  = cur->nb[1];
+    args.taps = taps ? (const float *) taps->data : nullptr; args.taps_nb1 = taps ? taps->nb[1] : 0; args.taps_nb2 = taps ? taps->nb[2] : 0;
+    args.res  = res ? (const float *) res->data : nullptr;   args.res_nb1  = res ? res->nb[1] : 0;
+    args.dst  = (float *) dst->data; args.dst_nb1 = dst->nb[1];
+    args.state = state ? (float *) state->data : nullptr;
+    args.st_nb1 = state ? state->nb[1] : 0; args.st_nb2 = state ? state->nb[2] : 0; args.st_nb3 = state ? state->nb[3] : 0;
 
-    const int64_t n = (int64_t) n_chan*n_t*n_s;
-    const int block_size = 256;
-    const int64_t nblocks = (n + block_size - 1)/block_size;
+    const int64_t n_tok = (int64_t) args.n_t*args.n_s;
+    cudaStream_t stream = ctx.stream();
 
     auto launch = [&](auto DC, auto TAPS) {
         constexpr int  kDC   = decltype(DC)::value;
         constexpr bool kTaps = decltype(TAPS)::value;
-        shortconv_res_f32<kDC, kTaps><<<nblocks, block_size, 0, ctx.stream()>>>(
-                (const float *) past->data, (const float *) w->data, (const float *) cur->data,
-                taps ? (const float *) taps->data : nullptr, res ? (const float *) res->data : nullptr, (float *) dst->data,
-                state ? (float *) state->data : nullptr,
-                n_chan, n_t, n_s, n_slots,
-                past->nb[1], past->nb[2], w->nb[1], cur->nb[1],
-                taps ? taps->nb[1] : 0, taps ? taps->nb[2] : 0, res ? res->nb[1] : 0, dst->nb[1],
-                state ? state->nb[1] : 0, state ? state->nb[2] : 0, state ? state->nb[3] : 0,
-                hd, scale);
+        if (args.post) {
+            const dim3 grid(args.n_chan/args.hd_post, n_tok, 1);
+            if (args.hd_post <= 32) {
+                shortconv_res_post_f32<kDC, kTaps, 32><<<grid, 32, 0, stream>>>(args);
+            } else if (args.hd_post <= 64) {
+                shortconv_res_post_f32<kDC, kTaps, 64><<<grid, 64, 0, stream>>>(args);
+            } else if (args.hd_post <= 128) {
+                shortconv_res_post_f32<kDC, kTaps, 128><<<grid, 128, 0, stream>>>(args);
+            } else if (args.hd_post <= 256) {
+                shortconv_res_post_f32<kDC, kTaps, 256><<<grid, 256, 0, stream>>>(args);
+            } else if (args.hd_post <= 512) {
+                shortconv_res_post_f32<kDC, kTaps, 512><<<grid, 512, 0, stream>>>(args);
+            } else {
+                GGML_ASSERT(args.hd_post <= 1024);
+                shortconv_res_post_f32<kDC, kTaps, 1024><<<grid, 1024, 0, stream>>>(args);
+            }
+        } else {
+            const int block_size = 256;
+            const int64_t nblocks = (n_tok*args.n_chan + block_size - 1)/block_size;
+            shortconv_res_f32<kDC, kTaps><<<nblocks, block_size, 0, stream>>>(args);
+        }
     };
 
     auto launch_dc = [&](auto DC) {
@@ -742,12 +806,32 @@ static __global__ void loop_ctrl_apply_f32(const float * __restrict__ cur, const
     }
 }
 
+// with the norm: a second launch RMS-normalizes the rows in place and scales them by the norm weight
+template <int block_size>
+static __global__ void rms_norm_mul_inplace_f32(float * __restrict__ y, const float * __restrict__ nw, const int n, const float eps) {
+    const int t = blockIdx.x;
+    __shared__ float red[block_size/WARP_SIZE];
+
+    float * yt = y + (int64_t) t*n;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < n; i += block_size) {
+        ss += yt[i]*yt[i];
+    }
+    ss = ik_block_sum<block_size>(ss, red);
+    const float scale = rsqrtf(ss/n + eps);
+    for (int i = threadIdx.x; i < n; i += block_size) {
+        yt[i] = yt[i]*scale*nw[i];
+    }
+}
+
 void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * cur = dst->src[0];
     const ggml_tensor * msg = dst->src[1];
     const ggml_tensor * d   = dst->src[2];
     const ggml_tensor * wg  = dst->src[3];
     const ggml_tensor * wf  = dst->src[4];
+
+    const ggml_tensor * nw  = dst->src[5];
 
     const int n     = cur->ne[0];
     const int n_tok = cur->ne[1];
@@ -759,4 +843,45 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
     loop_ctrl_apply_f32<<<nblocks, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
             (const float *) d->data, (const float *) wg->data, (const float *) wf->data, (float *) dst->data,
             n, n_tok, rank, cur->nb[1], msg->nb[1]);
+
+    if (nw) {
+        float eps;
+        memcpy(&eps, (const float *) dst->op_params + 0, sizeof(float));
+        rms_norm_mul_inplace_f32<1024><<<n_tok, 1024, 0, ctx.stream()>>>((float *) dst->data, (const float *) nw->data, n, eps);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// moe_sum: y[i, t] = sum_k a[i, k, t]*w[0, k, t], one thread per output
+
+static __global__ void moe_sum_f32(const float * __restrict__ a, const float * __restrict__ w, float * __restrict__ dst,
+        const int n0, const int n1, const int n2, const int64_t a_nb1, const int64_t a_nb2, const int64_t w_nb1, const int64_t w_nb2) {
+    const int64_t idx = (int64_t) blockIdx.x*blockDim.x + threadIdx.x;
+    if (idx >= (int64_t) n0*n2) {
+        return;
+    }
+    const int i = idx % n0;
+    const int t = idx / n0;
+
+    float sum = 0.0f;
+    for (int k = 0; k < n1; ++k) {
+        const float x  = *(const float *) ((const char *) a + i*sizeof(float) + k*a_nb1 + t*a_nb2);
+        const float wk = *(const float *) ((const char *) w + k*w_nb1 + t*w_nb2);
+        sum += x*wk;
+    }
+    dst[(int64_t) t*n0 + i] = sum;
+}
+
+void ggml_cuda_op_moe_sum(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * a = dst->src[0];
+    const ggml_tensor * w = dst->src[1];
+
+    const int n0 = a->ne[0];
+    const int n1 = a->ne[1];
+    const int n2 = a->ne[2];
+
+    const int block_size = 256;
+    const int64_t nblocks = ((int64_t) n0*n2 + block_size - 1)/block_size;
+    moe_sum_f32<<<nblocks, block_size, 0, ctx.stream()>>>((const float *) a->data, (const float *) w->data, (float *) dst->data,
+            n0, n1, n2, a->nb[1], a->nb[2], w->nb[1], w->nb[2]);
 }

@@ -12758,9 +12758,20 @@ void ggml_compute_forward_shortconv_res(const ggml_compute_params * params, ggml
     const int ith = params->ith;
     const int nth = params->nth;
 
-    const int64_t dr  = (n_chan + nth - 1)/nth;
-    const int64_t ic0 = dr*ith;
-    const int64_t ic1 = MIN(ic0 + dr, n_chan);
+    int32_t post         = 0;
+    int32_t n_heads_post = 1;
+    float   post_eps = 0.0f, post_threshold = 0.0f;
+    memcpy(&post,           (const int32_t *) dst->op_params + 1, sizeof(int32_t));
+    memcpy(&n_heads_post,   (const int32_t *) dst->op_params + 2, sizeof(int32_t));
+    memcpy(&post_eps,       (const float *)   dst->op_params + 3, sizeof(float));
+    memcpy(&post_threshold, (const float *)   dst->op_params + 4, sizeof(float));
+
+    // the post-normalization needs whole heads per thread
+    const int64_t hd_post = post ? n_chan/n_heads_post : 1;
+    const int64_t n_units = n_chan/hd_post;
+    const int64_t du  = (n_units + nth - 1)/nth;
+    const int64_t ic0 = MIN(du*ith, n_units)*hd_post;
+    const int64_t ic1 = MIN(du*ith + du, n_units)*hd_post;
 
     float x[GGML_MAX_DIMS*4]; // d_conv <= 16
     GGML_ASSERT(d_conv <= 16);
@@ -12800,6 +12811,27 @@ void ggml_compute_forward_shortconv_res(const ggml_compute_params * params, ggml
                 if (k < n_slots) {
                     for (int64_t j = 0; j < d_conv - 1; ++j) {
                         *(float *) ((char *) state->data + j*state->nb[0] + k*state->nb[1] + c*state->nb[2] + s*state->nb[3]) = x[j + 1];
+                    }
+                }
+            }
+
+            if (post) {
+                for (int64_t c0 = ic0; c0 < ic1; c0 += hd_post) {
+                    float * y = (float *) ((char *) dst->data + c0*dst->nb[0] + tok*dst->nb[1]);
+                    float ss = 0.0f;
+                    for (int64_t j = 0; j < hd_post; ++j) {
+                        ss += y[j]*y[j];
+                    }
+                    float factor;
+                    if (post == GGML_SHORTCONV_POST_RMS_NORM) {
+                        factor = 1.0f/sqrtf(ss/hd_post + post_eps);
+                    } else {
+                        const float norm = sqrtf(ss)*1.0f + post_eps;
+                        factor = post_threshold/norm;
+                        factor = factor < 0.0f ? 0.0f : (factor > 1.0f ? 1.0f : factor);
+                    }
+                    for (int64_t j = 0; j < hd_post; ++j) {
+                        y[j] *= factor;
                     }
                 }
             }
@@ -12903,11 +12935,15 @@ void ggml_compute_forward_loop_ctrl_down(const ggml_compute_params * params, ggm
 // ggml_compute_forward_loop_ctrl_apply
 
 void ggml_compute_forward_loop_ctrl_apply(const ggml_compute_params * params, ggml_tensor * dst) {
-    const ggml_tensor * cur = dst->src[0];
-    const ggml_tensor * msg = dst->src[1];
-    const ggml_tensor * d   = dst->src[2];
-    const ggml_tensor * wg  = dst->src[3];
-    const ggml_tensor * wf  = dst->src[4];
+    const ggml_tensor * cur  = dst->src[0];
+    const ggml_tensor * msg  = dst->src[1];
+    const ggml_tensor * d    = dst->src[2];
+    const ggml_tensor * wg   = dst->src[3];
+    const ggml_tensor * wf   = dst->src[4];
+    const ggml_tensor * norm = dst->src[5];
+
+    float eps;
+    memcpy(&eps, (const float *) dst->op_params + 0, sizeof(float));
 
     const int64_t n     = cur->ne[0];
     const int64_t n_tok = cur->ne[1];
@@ -12915,6 +12951,37 @@ void ggml_compute_forward_loop_ctrl_apply(const ggml_compute_params * params, gg
 
     const int ith = params->ith;
     const int nth = params->nth;
+
+    // with the norm a token is one unit of work (the rows are reduced), else the elements are split
+    if (norm) {
+        for (int64_t t = ith; t < n_tok; t += nth) {
+            const float * dv = (const float *) ((const char *) d->data + t*d->nb[1]);
+            const float * cv = (const float *) ((const char *) cur->data + t*cur->nb[1]);
+            const float * mv = (const float *) ((const char *) msg->data + t*msg->nb[1]);
+            float       * y  = (float *) ((char *) dst->data + t*dst->nb[1]);
+
+            ggml_float ss = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                const float * g = (const float *) ((const char *) wg->data + i*wg->nb[1]);
+                const float * f = (const float *) ((const char *) wf->data + i*wf->nb[1]);
+                float sg = 0.0f, sf = 0.0f;
+                for (int64_t k = 0; k < rank; ++k) {
+                    sg += g[k]*dv[k];
+                    sf += f[k]*dv[k];
+                }
+                const float gain   = tanhf(sg);
+                const float forget = tanhf(sf);
+                y[i] = (cv[i] - forget*cv[i]) + gain*mv[i];
+                ss += (ggml_float) (y[i]*y[i]);
+            }
+            const float scale = 1.0f/sqrtf((float) (ss/n) + eps);
+            const float * nw = (const float *) norm->data;
+            for (int64_t i = 0; i < n; ++i) {
+                y[i] = y[i]*scale*nw[i];
+            }
+        }
+        return;
+    }
 
     for (int64_t t = 0; t < n_tok; ++t) {
         const float * dv = (const float *) ((const char *) d->data + t*d->nb[1]);
@@ -12933,6 +13000,33 @@ void ggml_compute_forward_loop_ctrl_apply(const ggml_compute_params * params, gg
             const float gain   = tanhf(sg);
             const float forget = tanhf(sf);
             y[i] = (cv[i] - forget*cv[i]) + gain*mv[i];
+        }
+    }
+}
+
+// ggml_compute_forward_moe_sum
+
+void ggml_compute_forward_moe_sum(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * a = dst->src[0];
+    const ggml_tensor * w = dst->src[1];
+
+    const int64_t n0 = a->ne[0];
+    const int64_t n1 = a->ne[1];
+    const int64_t n2 = a->ne[2];
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    for (int64_t t = 0; t < n2; ++t) {
+        float * y = (float *) ((char *) dst->data + t*dst->nb[1]);
+        for (int64_t i = ith; i < n0; i += nth) {
+            float sum = 0.0f;
+            for (int64_t k = 0; k < n1; ++k) {
+                const float x  = *(const float *) ((const char *) a->data + i*a->nb[0] + k*a->nb[1] + t*a->nb[2]);
+                const float wk = *(const float *) ((const char *) w->data + k*w->nb[1] + t*w->nb[2]);
+                sum += x*wk;
+            }
+            y[i] = sum;
         }
     }
 }

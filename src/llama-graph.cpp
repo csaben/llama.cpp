@@ -2757,11 +2757,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     if (moe_sum_mul_mat && !weight_before_ffn) {
         // sum_k experts[:, k, t]*weights[k, t] as one matrix product over the experts
-        const int64_t n_used = experts->ne[1];
-        ggml_tensor * experts_t = ggml_cont(ctx0, ggml_permute(ctx0, experts, 1, 0, 2, 3)); // [n_used, n_embd, n_tokens]
-        ggml_tensor * w         = ggml_reshape_3d(ctx0, weights, n_used, 1, n_tokens);
-        ggml_tensor * moe_out   = ggml_mul_mat(ctx0, experts_t, w); // [n_embd, 1, n_tokens]
-        moe_out = ggml_reshape_2d(ctx0, moe_out, n_embd, n_tokens);
+        ggml_tensor * moe_out = ggml_moe_sum(ctx0, experts, weights); // [n_embd, n_tokens]
         cb(moe_out, "ffn_moe_out", il);
 
         return moe_out;

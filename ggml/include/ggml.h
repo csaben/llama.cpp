@@ -439,6 +439,7 @@ extern "C" {
         GGML_OP_REL_BIAS,
         GGML_OP_LOOP_CTRL_DOWN,
         GGML_OP_LOOP_CTRL_APPLY,
+        GGML_OP_MOE_SUM,
 
         GGML_OP_COUNT,
     };
@@ -2348,6 +2349,14 @@ extern "C" {
     //   res   [n_channels, n_t*n_seqs] (optional)
     //   state [d_conv - 1, n_slots, n_channels, n_seqs] (optional, any strides): the op also stores the last
     //         d_conv - 1 inputs of each sequence as seen k tokens back into slot k (n_slots <= n_t)
+    // post: the result is normalized per head of n_channels/n_heads_post channels:
+    //   GGML_SHORTCONV_POST_NONE, GGML_SHORTCONV_POST_RMS_NORM (eps) or GGML_SHORTCONV_POST_L2_CLIP (threshold, eps)
+    enum ggml_shortconv_post {
+        GGML_SHORTCONV_POST_NONE     = 0,
+        GGML_SHORTCONV_POST_RMS_NORM = 1,
+        GGML_SHORTCONV_POST_L2_CLIP  = 2,
+    };
+
     GGML_API struct ggml_tensor * ggml_shortconv_res(
             struct ggml_context * ctx,
             struct ggml_tensor  * past,
@@ -2357,6 +2366,20 @@ extern "C" {
             struct ggml_tensor  * res,
             struct ggml_tensor  * state,
             float                 scale);
+
+    GGML_API struct ggml_tensor * ggml_shortconv_res_post(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * past,
+            struct ggml_tensor  * w,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * taps,
+            struct ggml_tensor  * res,
+            struct ggml_tensor  * state,
+            float                 scale,
+            enum ggml_shortconv_post post,
+            int                   n_heads_post,
+            float                 post_eps,
+            float                 post_threshold);
 
     // relative-position attention bias gathered by distance, with per-query sinks and the mask added:
     //   out[kv, t, h] = sum_r table[r, pos[kv, t]] * r_cur[r, h, t] - sinks[h, t] + mask[kv, t]
@@ -2381,13 +2404,22 @@ extern "C" {
             float                 eps);
 
     // out = cur - tanh(w_forget^T d)*cur + tanh(w_gain^T d)*msg:  w_* [rank, n], d [rank, n_tokens], cur, msg [n, n_tokens]
+    // with norm_w [n], the result is RMS-normalized (eps) and multiplied by norm_w
     GGML_API struct ggml_tensor * ggml_loop_ctrl_apply(
             struct ggml_context * ctx,
             struct ggml_tensor  * cur,
             struct ggml_tensor  * msg,
             struct ggml_tensor  * d,
             struct ggml_tensor  * w_gain,
-            struct ggml_tensor  * w_forget);
+            struct ggml_tensor  * w_forget,
+            struct ggml_tensor  * norm_w,
+            float                 eps);
+
+    // weighted sum over the second dimension: a [n0, n1, n2], w [1, n1, n2] -> [n0, n2] = sum_k a[:, k, t]*w[0, k, t]
+    GGML_API struct ggml_tensor * ggml_moe_sum(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * w);
 
     GGML_API struct ggml_tensor * ggml_ssm_scan(
             struct ggml_context * ctx,

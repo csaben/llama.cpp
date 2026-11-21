@@ -2077,6 +2077,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_loop_ctrl_apply(params, tensor);
             } break;
+        case GGML_OP_MOE_SUM:
+            {
+                ggml_compute_forward_moe_sum(params, tensor);
+            } break;
         case GGML_OP_SSM_SCAN:
             {
                 ggml_compute_forward_ssm_scan(params, tensor);
@@ -2475,6 +2479,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_REL_BIAS:
         case GGML_OP_LOOP_CTRL_DOWN:
         case GGML_OP_LOOP_CTRL_APPLY:
+        case GGML_OP_MOE_SUM:
             {
                 n_tasks = n_threads;
             } break;

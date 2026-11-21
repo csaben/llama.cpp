@@ -3124,6 +3124,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_LOOP_CTRL_APPLY:
             ggml_cuda_op_loop_ctrl_apply(ctx, dst);
             break;
+        case GGML_OP_MOE_SUM:
+            ggml_cuda_op_moe_sum(ctx, dst);
+            break;
         case GGML_OP_SSM_SCAN:
             ggml_cuda_op_ssm_scan(ctx, dst);
             break;
@@ -6761,6 +6764,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_SHORTCONV_RES:
         case GGML_OP_LOOP_CTRL_DOWN:
         case GGML_OP_LOOP_CTRL_APPLY:
+        case GGML_OP_MOE_SUM:
             return true;
         case GGML_OP_REL_BIAS:
             return op->src[0]->ne[0] <= 16;
