@@ -1,0 +1,8 @@
+== fused
+'Write a Python function that parses an ISO-8601 du': '\n\n':-0.1272  '\n':-2.8811  '\n\n\n\n':-4.2914  '\n\n\n':-4.3626  ' ':-5.7778
+'The history of the bicycle begins in the early nin': ' the':-1.4715  ' a':-2.2212  ' invent':-2.5164  ' people':-2.6064  ' it':-3.2239
+'Explain step by step how TCP slow start and conges': '\n\n':-2.0864  '\n':-2.1136  ' What':-2.1783  ' (':-2.5898  ' How':-2.7154
+== unfused
+'Write a Python function that parses an ISO-8601 du': '\n\n':-0.0923  '\n':-3.1077  '\n\n\n\n':-4.1787  '\n\n\n':-4.7714  ' ':-6.0787
+'The history of the bicycle begins in the early nin': ' the':-1.5259  ' a':-2.1969  ' invent':-2.3800  ' people':-2.5768  ' it':-3.2214
+'Explain step by step how TCP slow start and conges': ' What':-2.1333  '\n':-2.1599  '\n\n':-2.1958  ' (':-2.6010  ' How':-2.6943

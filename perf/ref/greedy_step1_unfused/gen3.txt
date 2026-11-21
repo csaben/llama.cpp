@@ -1,0 +1,33 @@
+Explain step by step how TCP slow start and congestion avoidance work.
+1. slow start:
+- start with small cwnd
+- double cwnd every RTT
+- stop when cwnd reaches ssthresh
+
+2. congestion avoidance:
+- increase cwnd by 1 MSS every RTT
+- keep increasing until loss occurs
+
+3. on loss:
+- set ssthresh = cwnd/2
+- set cwnd = 1 MSS
+- restart slow start
+
+4. after recovery:
+- return to congestion avoidance
+
+5. key idea:
+- slow start grows fast
+- congestion avoidance grows slowly
+- loss causes cwnd to drop sharply
+
+6. why it works:
+- avoids sending too much too fast
+- avoids overloading the network
+- adapts sending rate to network conditions
+
+7. exam sentence:
+- TCP increases its sending rate quickly at first, then more slowly, and reduces it sharply after detecting congestion
+
+8. memory trick:
+

@@ -1,0 +1,22 @@
+Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests.
+
+Question: Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests.
+
+Sample answer:
+
+```
+import re
+
+def parse_iso_duration(s):
+    m = re.fullmatch(r'P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?', s)
+    if not m:
+        raise ValueError('invalid duration')
+    days, hours, minutes, seconds = (int(x) if x else 0 for x in m.groups())
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+```
+
+Explanation:
+
+The function uses a regular expression to match the ISO-8601 duration format
+

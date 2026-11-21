@@ -3929,12 +3929,15 @@ static bool ggml_cuda_topk_moe_fusion(const struct ggml_cgraph * cgraph, int nod
     }
 
     if (nodes[node_idx]->op == GGML_OP_RESHAPE) {
-        //check RESHAPE->SUM_ROWS->CLAMP->DIV->RESHAPE
+        //check RESHAPE->SUM_ROWS->CLAMP->DIV->RESHAPE (the clamp of the sum can also be a scale_bias: sum + eps)
         static const std::vector<ggml_op> norm_ops = { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, GGML_OP_CLAMP };
 
         args.norm = true;
+        args.norm_scale_bias = false;
         for (const ggml_op op : norm_ops) {
-            if (nodes[node_idx]->op == op && nodes[node_idx]->src[0] == nodes[node_idx - 1]) {
+            const bool is_scale_bias = op == GGML_OP_CLAMP && nodes[node_idx]->op == GGML_OP_SCALE;
+            if ((nodes[node_idx]->op == op || is_scale_bias) && nodes[node_idx]->src[0] == nodes[node_idx - 1]) {
+                args.norm_scale_bias |= is_scale_bias;
                 node_idx++;
             } else {
                 args.norm = false;
@@ -4601,7 +4604,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
                 if (args.norm) {
                     ops.insert(ops.end(),
-                               { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, GGML_OP_CLAMP, GGML_OP_DIV, GGML_OP_RESHAPE });
+                               { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, args.norm_scale_bias ? GGML_OP_SCALE : GGML_OP_CLAMP, GGML_OP_DIV, GGML_OP_RESHAPE });
                     clamp = cgraph->nodes[i + ops.size() - 3];
                 }
                 if (args.scale) {

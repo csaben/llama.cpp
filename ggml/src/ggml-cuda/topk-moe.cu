@@ -13,6 +13,10 @@ struct topk_moe_config {
     bool delayed_softmax;
     int  n_groups;
     int  n_group_used;
+    // the sum of the selected weights is clamped (max(sum, clamp_val)) or, with norm_affine, scaled and biased (sum*s + b)
+    bool  norm_affine;
+    float norm_scale;
+    float norm_bias;
 };
 
 // Warp-local softmax used for both the pre-top-k logits and the post-top-k delayed path.
@@ -334,7 +338,7 @@ __global__ void topk_moe_cuda(const float *         logits,
 
     if (config.with_norm) {
         wt_sum              = warp_reduce_sum<warp_size>(wt_sum);
-        wt_sum              = max(wt_sum, clamp_val);
+        wt_sum              = config.norm_affine ? wt_sum*config.norm_scale + config.norm_bias : max(wt_sum, clamp_val);
         const float inv_sum = 1.0f / wt_sum;
 
         for (int i = 0; i < experts_per_thread; i++) {
@@ -463,8 +467,18 @@ void ggml_cuda_op_topk_moe(ggml_backend_cuda_context &     ctx,
     const bool with_norm = clamp != nullptr;
 
     float clamp_val = -INFINITY;
+    bool  norm_affine = false;
+    float norm_scale  = 1.0f;
+    float norm_bias   = 0.0f;
     if (clamp) {
-        clamp_val = ggml_get_op_params_f32(clamp, 0);
+        if (clamp->op == GGML_OP_SCALE) {
+            // ggml_scale_bias(sum, s, b) in place of the clamp
+            norm_affine = true;
+            norm_scale  = ggml_get_op_params_f32(clamp, 0);
+            norm_bias   = ggml_get_op_params_f32(clamp, 1);
+        } else {
+            clamp_val = ggml_get_op_params_f32(clamp, 0);
+        }
     }
 
     topk_moe_config config;
@@ -474,6 +488,9 @@ void ggml_cuda_op_topk_moe(ggml_backend_cuda_context &     ctx,
     config.delayed_softmax   = args.delayed_softmax;
     config.n_groups          = args.n_groups;
     config.n_group_used      = args.n_group_used;
+    config.norm_affine       = norm_affine;
+    config.norm_scale        = norm_scale;
+    config.norm_bias         = norm_bias;
 
     if (bias) {
         launch_topk_moe_cuda<true>(ctx, logits_d, weights_d, ids_d, bias_d, n_rows, n_experts, n_expert_used, clamp_val,

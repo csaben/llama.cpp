@@ -1,0 +1,7 @@
+unfused gen1 IDENTICAL
+unfused gen2 IDENTICAL
+unfused gen3 IDENTICAL
+== decode-path PPL (ub=1) fused
+0.26.128.789 I Final estimate: PPL = 4.0483 +/- 0.28509
+== decode-path PPL (ub=1) unfused
+0.34.827.635 I Final estimate: PPL = 4.0660 +/- 0.28732

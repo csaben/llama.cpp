@@ -1,0 +1,10 @@
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |  16.41 GiB |    26.07 B | CUDA       |  99 |   1 |           tg128 |         98.30 ± 0.20 |
+0.13.331.043 I Final estimate: PPL = 2.9400 +/- 0.06401
+gen1 differs from baseline
+gen1 differs from step1
+gen2 differs from baseline
+gen2 differs from step1
+gen3 differs from baseline
+gen3 IDENTICAL to step1
+== decode-path PPL (ub=1, c=1024, 2 chunks) [unfused ref 4.0660, step1 4.0483]
+0.22.958.883 I Final estimate: PPL = 4.0631 +/- 0.28750

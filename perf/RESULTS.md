@@ -10,6 +10,10 @@ Greedy: perf/greedy.sh <outdir>  (3 prompts, temp 0, 200 tokens)
 |---|---|---|---|---|
 | baseline (nvcc 12.0 build) | acf48fa | 61.53 | - | user's number |
 | baseline (nvcc 12.8 build) | acf48fa | 62.15 | 2.9381 | GGML_CUDA_GRAPH_OPT=1: 61.86; GGML_CUDA_GRAPH_CHUNK_SIZE=0: 61.49 (no gain) |
+| step 1: fused ggml ops (res_mix, l2_clip, shortconv_res, rel_bias, loop_ctrl_down/apply, situ/siglu GLU, MoE sum via mul_mat) | 7889cdf, 82fb8d7 | 85.14 | 2.9363 | greedy: gen1 identical, gen2 diverges after 35 tok, gen3 after 15 tok (near-tie flips, see below) |
+| step 1b: res_mix/loop_ctrl_down/rel_bias kernel tuning | fe7e6f8 | 93.06 | - | kernel-only |
+| step 2: shortconv_res stores the conv state itself (no concat+cpy per convolution) | 94cb891 | 98.30 | 2.9400 | decode-path PPL (ub=1,c=1024,2 chunks): 4.0631 vs unfused 4.0660 |
+| step 3: CUDA topk-moe fusion accepts the scale_bias (sum+eps) normalization -> routing tail fused | (next) | 100.50 | - | test-backend-ops TOPK_MOE 692/692 |
 
 ## Baseline decode graph (per token, 1 stream)
 7764 non-view ggml nodes/token -> ~6100 kernel launches + ~1070 matvecs. Op histogram:
