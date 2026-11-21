@@ -112,6 +112,30 @@ When the server is running, use this OpenCode invocation from any working direct
 OPENCODE_CONFIG=/home/arelius/llama.cpp-fast/perf/opencode-inkling.json opencode -m localinkling/inkling-mini
 ```
 
+## Long context and prefill (phase 5)
+
+Decode used to fall from 209 to 131 tok/s between an empty context and 32K tokens, because the attention over the
+8 full-prefix layer visits was bound by its own arithmetic. That scan now runs on the tensor cores straight from the
+Q8_0 cache, with no change to the cache format. The loop controllers of a batch are GEMMs. Two-bit model, one RTX 3090:
+
+| | empty | 4K | 16K | 32K |
+|---|---:|---:|---:|---:|
+| decode before, tok/s | 209.5 | 168.7 | 148.9 | 131.2 |
+| decode now, tok/s | 210.3 | 194.9 | 182.5 | 168.7 |
+
+Prefill of 4,096 tokens went from 2,184 to 3,018 tok/s; a 16K-token prompt is answered after 6.3 s instead of 8.5 s.
+Both are on by default; `IK_ATTN_MMA=0` and `IK_CTRL_GEMM_MIN=0` give the previous paths. Tables, method, what did
+not work and the sources are in the phase 5 section of [`perf/RESULTS.md`](perf/RESULTS.md). The attention scan is
+adapted from Project Maya's `maya-ik2` (MIT); see [`NOTICE.inkling`](NOTICE.inkling).
+
+```bash
+. perf/p5env.sh                                    # GPU 1, the kernel flags, $Q2 / $IQ4
+build/bin/llama-bench -m $Q2 -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 0 -n 128 -d 0,4096,16384,32768 -r 3
+build/bin/llama-bench -m $Q2 -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 512,4096,16384 -n 0
+MODEL=$Q2 python3 perf/longctx.py --start --short -- --backend-sampling    # served: short, 16K and 32K prompts
+MODEL=$Q2 python3 perf/spec_probe.py plain -- --backend-sampling           # code / edit / prose, plain or DSpark
+```
+
 ## Core code
 
 | file | what |

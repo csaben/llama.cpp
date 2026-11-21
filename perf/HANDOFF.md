@@ -40,13 +40,23 @@ Raw outputs go to `perf/p5/`. Reference checkout (MIT): `git clone https://githu
   3260. Prefill PPL 3.0530 (was 3.0516). LOOP_CTRL_DOWN 14/14, LOOP_CTRL_APPLY 23/23 (new batch cases F32 + F16).
   Remaining prefill profile (1325 ms / 4096 tok): mul_mat_q 57%, flash_attn 8.7%, rel_bias 6.5%.
 
-### In flight
-- Served long-context script (`perf/longctx.py`), DSpark acceptance per prompt type, quality tables, RESULTS.md.
+- **Final tables and write-up done**: phase 5 section of `perf/RESULTS.md`, `INKLING.md` section, `NOTICE.inkling`,
+  `perf/longctx.py`, `perf/spec_probe.py`, `perf/margin_probe.py`, `perf/kernsum_total.py`, `perf/live/switch-to-p5.sh`.
+  Final 2-bit decode 210.32 / 194.88 / 182.46 / 168.67 tok/s at depth 0 / 4K / 16K / 32K; IQ4_NL dense 176.77 /
+  166.09 / 157.28 / 146.88. Prefill 3213 / 3018 / 2782. Served 206.9 / 205.6 short; 16K prompt 6.27 s TTFT and
+  179.4 tok/s; 32K prompt 13.47 s and 165.7 tok/s. PPL 3.0530 prefill / 4.2036 decode (2-bit).
+- DSpark measured on the unchanged batched verify (slower than plain on code, edit, prose and a 16K edit; table in
+  RESULTS). `--spec-draft-p-min` > 0 disables drafting entirely.
+- Live server restored with `bash perf/live/restore-live.sh` (old snapshot build; switching is the user's call).
 
-### Next
-1. Final tables in RESULTS.md (decode d0/4K/16K/32K for Q2 and IQ4_NL, prefill 512/4096/16384, served short + long,
-   PPL prefill + decode, greedy probes, 827-token probe, spec acceptance), then `bash perf/live/restore-live.sh`.
-2. Not started: grouped-expert DSpark verify (workstream 2). It needs multi-token versions of every fused decode op
-   (attention with in-window keys + state rollback, router, grouped expert matvec); estimate in RESULTS.
-3. Ideas left: CPU-side mask/rel_pos build is O(n_kv) per token (0.12 ms at 32K, 2%); fewer instructions per scan
-   step (source-lane P*scale, 32-bit row offsets); Q4_0 KV as an opt-in variant (needs a nibble row reader).
+### In flight
+- Nothing.
+
+### Next (for whoever continues)
+1. Grouped-expert, fused multi-token verify (workstream 2): not started. Per 4-token verify step today: expert
+   matvecs 4.8 ms, dense matvecs incl. drafter 4.0 ms, unfused glue ~8 ms (nsys of a DSpark request). Target: a
+   4-token window at <= ~9 ms including the drafter.
+2. Scan: ~680 instructions per 16 cells x 1 head; ideas: compute P*scale once in the lane that owns P and shuffle it,
+   32-bit row offsets, a cheaper mask/rel_pos path (CPU builds both per token, 0.12 ms at 32K).
+3. Prefill: `mul_mat_q` is 57% of what is left, then flash attention 8.7% and `rel_bias` 6.5%.
+4. `-ub 2048` decodes 4% slower after the prompt than `-ub 512` (unexplained) and takes 5.6 GB more VRAM.

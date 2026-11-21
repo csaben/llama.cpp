@@ -408,3 +408,188 @@ at 201.9 / 201.1 tok/s (T=0 / 0.7). All six exceeded 200 tok/s. With the
 full OpenCode tool set, the 16,963-token initial prompt took 8.92 s to
 prefill. The 78-token tool call decoded at 140.20 tok/s, and the 105-token
 follow-up decoded at 140.66 tok/s and returned the exact file marker.
+
+# Phase 5: long-context decode, prefill, speculative verify (2026-11-21)
+
+Start: `c3ab089`. One RTX 3090 (GPU 1), CUDA 12.8, the live flags (`perf/p5env.sh`), Q8_0 K/V, all three core passes.
+The 2-bit model is `Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf`; "IQ4_NL dense" is
+`Inkling-2-Mini-IQ4_NL-dense-iq4nl.gguf`. Raw outputs are in `perf/p5/`. Nothing here changes the weights or the KV
+cache format, and both changes are on by default (`IK_ATTN_MMA=0` and `IK_CTRL_GEMM_MIN=0` restore the old paths).
+
+## Tables
+
+### Decode at depth (`llama-bench -p 0 -n 128 -d 0,4096,16384,32768 -r 3`, tok/s ± sd)
+
+| Model | Build | 0 | 4,096 | 16,384 | 32,768 |
+|---|---|---:|---:|---:|---:|
+| 2-bit | before (`c3ab089`) | 209.47 ± 0.30 | 168.69 ± 4.41 | 148.92 ± 3.74 | 131.17 ± 3.21 |
+| 2-bit | phase 5 | 210.32 ± 0.32 | 194.88 ± 2.36 | 182.46 ± 2.09 | 168.67 ± 1.78 |
+| IQ4_NL dense | before (`IK_ATTN_MMA=0`) | 170.24 ± 1.11 | 146.83 ± 3.43 | 132.43 ± 2.85 | 118.64 ± 2.56 |
+| IQ4_NL dense | phase 5 | 176.77 ± 0.49 | 166.09 ± 1.75 | 157.28 ± 1.66 | 146.88 ± 1.30 |
+
+The 2-bit model gains 16% at 4K, 23% at 16K and 29% at 32K. It does not reach 200 tok/s at depth: 195 at 4K, 182 at
+16K, 169 at 32K. At 1,024 tokens it is 200.7 (was 191.8).
+
+### Prefill (`llama-bench -p 512,4096,16384 -n 0`, tok/s)
+
+| Model | Build | 512 | 4,096 | 16,384 |
+|---|---|---:|---:|---:|
+| 2-bit | before | 2,294 | 2,184 | 2,040 |
+| 2-bit | phase 5 | 3,213 | 3,018 | 2,782 |
+| 2-bit | phase 5, `-b 2048 -ub 2048` | 3,247 | 3,563 | 3,260 |
+| IQ4_NL dense | before (`IK_CTRL_GEMM_MIN=0`) | 2,353 | 2,255 | 2,119 |
+| IQ4_NL dense | phase 5 | 3,453 | 3,230 | 2,972 |
+
+### Served (2-bit model, 64K slot, `--backend-sampling`, one client)
+
+Short prompts are `perf/bench.py` (three 700-token replies per temperature). Long prompts are `perf/longctx.py`: this
+repository's `src/llama-*.cpp` cut to the token count, a 500-token reply, temperature 0, prompt cache off. Time to
+first token is measured at the client. "Before" is the same binary with both switches off.
+
+| Build | Short T=0 / 0.7 | 16,053-token prompt: TTFT, decode | 32,054-token prompt: TTFT, decode | VRAM after load |
+|---|---:|---:|---:|---:|
+| before | 201.9 / 200.7 | 8.46 s (1,910 tok/s), 147.9 tok/s | 17.87 s (1,799 tok/s), 131.1 tok/s | 13.9 GB |
+| phase 5 | 206.9 / 205.6 | 6.27 s (2,581 tok/s), 179.4 tok/s | 13.47 s (2,389 tok/s), 165.7 tok/s | 13.9 GB |
+| phase 5, `-b 2048 -ub 2048` | — | 5.38 s (3,001 tok/s), 172.7 tok/s | 11.62 s (2,772 tok/s), 160.0 tok/s | 19.5 GB |
+
+The larger micro-batch reads the prompt 16% faster but decodes 4% slower afterwards and takes 5.6 GB more VRAM. The
+cause of the slower decode was not investigated. The default micro-batch stays the recommendation.
+
+### Quality
+
+| Check | 2-bit before | 2-bit phase 5 | IQ4_NL dense before | IQ4_NL dense phase 5 |
+|---|---:|---:|---:|---:|
+| Prefill PPL, 8 × 2048 | 3.0516 | 3.0530 | 2.9458 | 2.9471 |
+| Decode-path PPL, 2 × 1024, `-ub 1` | 4.2080 | 4.2036 | 4.0990 | 4.0688 |
+| Decode-path PPL, 6 × 1024, `-ub 1` | 3.7258 | 3.7195 | 3.6260 | 3.6149 |
+
+- The IQ4_NL two-chunk decode PPL moved by −0.74%, past the 0.5% band in the favourable direction; its standard
+  error is 0.29. On six chunks the change is −0.31% (IQ4_NL) and −0.17% (2-bit).
+- Greedy probes (three 200-token prompts, 2-bit model): each diverges from the scan-off output at a near-tie. The
+  top-two logprob margins at the first differing token are 0.038, 0.030 and 0.028 (`perf/margin_probe.py`).
+- The 827-token mixed-prefill probe matches the unfused, unrotated reference for all 12 tokens.
+- `test-backend-ops`: `INKLING_ATTN` 16/16, `LOOP_CTRL_DOWN` 14/14, `LOOP_CTRL_APPLY` 23/23 (six new batch cases for each
+  controller op, F32 and F16 weights).
+
+### Speculative decoding (DSpark, existing batched verify; 2-bit model, 384-token replies, temperature 0)
+
+`perf/spec_probe.py`, a fresh server per row group, drafter `dspark-Inkling-2-Mini-Q8_0.gguf` on the same GPU.
+
+| Prompt | Prompt tokens | Plain tok/s | DSpark max 3 tok/s | Accepted / proposed | DSpark max 1 tok/s | Accepted / proposed |
+|---|---:|---:|---:|---:|---:|---:|
+| New code | 47 | 208.8 | 128.2 | 223 / 474 (47%) | 120.6 | 174 / 208 (84%) |
+| Edit of given code | 1,025 | 197.3 | 191.2 | 282 / 303 (93%) | 123.9 | 186 / 196 (95%) |
+| Prose | 36 | 207.4 | 107.5 | 190 / 575 (33%) | 110.7 | 144 / 239 (60%) |
+| Edit at 16K context | 16,044 | 179.2 | 136.6 | 265 / 352 (75%) | 97.8 | 182 / 201 (91%) |
+
+DSpark is slower than plain decode on every prompt, including the edit with 93% acceptance. The grouped-expert
+verify was not built in this round (see below), so these rows are the unchanged batched path.
+
+## What was done
+
+### 1. Tensor-core scan over the Q8_0 KV cache (`71929ea` and `9d27343`; tags `p5-mma-attn-d32k-164tok`, `p5-final-d32k-169tok`)
+
+Profile first. Going from 16K to 32K cost 0.91 ms per token for 285 MB of K and V (8 full-attention visits × 2,176
+bytes per cell): 313 GB/s, against 891 GB/s measured for plain reads on this card. The old scan was bound by its
+arithmetic, not by memory: every lane ran a 7-shuffle reduction per cell and `expf` per cell and head.
+
+The new scan runs inside the fused attention kernel and reads the same Q8_0 cache:
+
+- Steps of 16 cells per warp. `Q·Kᵀ` and `P·V` are `mma.sync m16n8k16` products with FP32 accumulation, 16 per step.
+- The int8 quants become FP16 exactly, in registers: two bytes are placed in the bit pattern `0x6400 | n` (the value
+  1024 + n) and one `sub.rn.f16x2` gives n − 128.
+- The per-block Q8_0 scales stay in FP32. On the K side they multiply each block's partial dot product. On the V
+  side each product takes 16 dims of one block (two per lane group), so the scale folds into P.
+- Q and P enter as two FP16 limbs (value and rounding remainder) in the spare columns of the 8-column operand, so the
+  result equals the FP32 kernel up to summation order. That is why it can be the default.
+- Q8_0 rows are 34-byte blocks, so half the quants are not 4-byte aligned. The misaligned blocks are read as a rotated
+  stream (dims 2..31, 0..1) and Q uses the same permutation; no unaligned loads.
+- One online softmax per lane group, rescaled only when a step raises the maximum.
+
+Result: 16K→32K now costs 0.45 ms per token (about 640 GB/s, of which 0.05 ms is CPU-side mask work). Decode is
+169 tok/s at 32K, from 131.
+
+### 2. Loop controllers as GEMMs in batches (`8b0afdd`, tag `p5-prefill-ctrl-gemm-3062tok`)
+
+An nsys trace of a 4,096-token prefill (1,884 ms of kernel time) showed `loop_ctrl_apply` at 21.8% and
+`loop_ctrl_down` at 13.2%. Both were written for one token: a block per (rank, token) and a warp per output element.
+For 8 or more tokens they are now `D = W_downᵀ·[rmsnorm(a); rmsnorm(msg)]` and `[G, F] = [W_gain, W_forget]·D` through
+`cublasSgemm`, followed by one element-wise kernel. The cuBLAS handle's TF32 mode is switched off around the calls so
+the sums stay FP32; F16 controller weights are widened into a scratch buffer per call. The controllers went from
+658 ms to about 90 ms of that trace. What remains is `mul_mat_q` 57%, flash attention 8.7%, `rel_bias` 6.5%.
+
+## What did not work
+
+- **Issuing the next step's loads before computing the current one.** 250 registers, no change in tok/s.
+- **Two blocks per SM for the fused kernel** (`__launch_bounds__(256, 2)`). The compiler spills 20 words; 1.5% slower.
+- **A stand-alone scan kernel with 4-warp blocks**, so an SM holds 16 scanning warps. 165 tok/s at 32K with 160
+  blocks, 151 with 328. More concurrent warps made it slower.
+- **The same with one block per cell range covering all eight kv heads**, so that the 128-byte lines shared by
+  neighbouring heads' 136-byte rows are fetched once. 162 tok/s at 32K: no gain, so line sharing is not the limit.
+- **A shared-memory tile filled with 16-byte loads in cache order.** Reading the same bytes with 16-byte sequential
+  loads and no arithmetic costs 0.39 ms per 16K cells against 0.53 ms for the 4-byte fragment loads, but with the
+  two block barriers per step the full kernel was slower (158 tok/s at 32K). The stand-alone kernel stays in the
+  tree, off by default (`IK_ATTN_SCAN_MIN=2048` turns it on).
+- **Larger splits on the old kernel** (`IK_ATTN_CELLS_PER_SPLIT` 128/256/512): at most +5% at 4K, nothing deeper.
+- **DSpark's `--spec-draft-p-min`** (0.6 to 0.9) as a cheap "draft only when it pays" switch: the server then
+  proposes no drafts at all and runs at the plain rate.
+- **Nsight Compute** could not be used: `ERR_NVGPUCTRPERM`, the GPU counters need admin rights on this machine.
+
+Knock-out measurements on the final scan (2-bit model, per 16K extra cells): without the scan 0.05 ms (the CPU builds
+and uploads the mask and distance arrays, O(cells) per token); K/V loads alone 0.53 ms; no loads 0.31 ms. The step is
+about 680 executed instructions for 16 cells of one kv head. Making the two-limb selection branch-free was worth
+2.8% at 32K, which says the instruction count still matters.
+
+## Not done
+
+- **Grouped-expert speculative verify (workstream 2).** A trace of a DSpark request (160 verify steps, 17 ms of
+  kernel time each) splits a 4-token step into: per-token expert matvecs 4.8 ms (no grouping), dense matvecs 4.0 ms
+  (the target's head, the drafter and its head), and about 8 ms of unfused per-layer glue across 1,960 launches. A
+  plain token is 4.8 ms. With the measured acceptance (2.4 tokens per step on code, 3.8 on the edit) a 4-token
+  window has to cost about 9 ms including the drafter before code breaks even. Reading each expert once would save
+  roughly 2 ms. The rest needs multi-token versions of every fused decode operator (attention with in-window keys
+  and rollback of the convolution state, router, grouped expert matvec, controllers), as Maya's window path has.
+  That is the next piece of work; an adaptive on/off rule only helps once the window is cheap.
+- **Lower-bit KV (FP8, Q4_0).** After the tensor-core change the scan is bound by per-step arithmetic and load
+  pattern more than by bytes, so halving the bytes would not halve the time. It also changes numerics and would have
+  shipped as an opt-in variant. Not attempted.
+- **Skipping the prefix on visits that do not need it.** All 8 full-attention visits attend over the whole prefix;
+  Maya reports that 0.0% of steps could skip V reads on a real 64K text. Not attempted.
+
+## Sources
+
+1. Project Maya `maya-ik2`, <https://github.com/alesha-pro/maya-inkling-mini> (MIT). `docs/INKLING2-MINI.md` for
+   the facts used here (8 of 48 visits attend over the full prefix; attention on tensor cores from the cache into
+   registers; GEMM prefill; the grouped-expert window and its adaptive rule, which were studied and not built).
+   `src/ik2/ik2_kernels.cu`, `attn_decode_mma_kernel`: the scan's structure, the `mma16816` wrapper and the
+   integer-to-FP16 bit pattern are adapted from it. Notice in `NOTICE.inkling` and in the header comment of the scan
+   in `ggml/src/ggml-cuda/inkling.cu`.
+2. Dao et al., "FlashAttention", arXiv:2205.14135, and Dao, "FlashAttention-2", arXiv:2307.08691: tiled attention
+   with an online softmax and FP32 accumulators.
+3. Dao, Haziza, Massa, Sizov, "Flash-Decoding for long-context inference" (PyTorch blog, 2023): splitting the keys
+   of a single query across blocks and merging (max, sum, partial output) at the end. The split merge predates this
+   phase; the split counts were retuned.
+4. Milakov and Gimelshein, "Online normalizer calculation for softmax", arXiv:1805.02867.
+5. Dekker, "A floating-point technique for extending the available precision", Numer. Math. 18 (1971): the
+   value-plus-remainder split behind the two FP16 limbs. Maya uses the same idea for its expert inputs.
+6. NVIDIA PTX ISA, `mma.sync.aligned.m16n8k16` fragment layout and `sub.rn.f16x2`.
+7. NVIDIA cuBLAS, `cublasSgemm` and `cublasSetMathMode` (TF32 tensor-op math is the handle default in ggml).
+8. llama.cpp PR #32218 (DSpark block drafting) and Leviathan et al., "Fast Inference from Transformers via
+   Speculative Decoding", arXiv:2211.17192, for the acceptance arithmetic.
+
+## Risks
+
+- The scan assumes the Q8_0 cache layout of this model: 128-dim heads, rows 4-byte aligned, K and V of the same type.
+  Anything else falls back to the previous kernel (F16 caches always do).
+- P is scaled by 4096 before it becomes FP16. A V block scale above 16 would overflow; V is RMS-normalized
+  (|v| ≤ 11.3, scale ≤ 0.09), so there is a factor of 180 of margin.
+- Greedy outputs change at near-ties relative to `c3ab089`, as with every earlier change of summation order.
+- The controller GEMMs allocate scratch from the CUDA pool per call (28 MB per controller op at 512 tokens).
+- Served 16K and 32K rows are single runs.
+
+## Deploy
+
+The live unit runs the snapshot in `~/inkling-live-bin` (build `c3ab089`) and was restored unchanged. To move it to
+this build with the same model and flags, run `bash perf/live/switch-to-p5.sh`. It snapshots `build/bin` into
+`~/inkling-live-bin-p5`, stops the unit and starts it from the snapshot. `bash perf/live/restore-live.sh` after a
+`systemctl --user stop inkling-3090-experiment` goes back.
