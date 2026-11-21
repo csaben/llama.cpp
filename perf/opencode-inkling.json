@@ -7,7 +7,7 @@
       "models": {
         "inkling-mini": {
           "name": "Inkling 2 Mini (experimental Q2)",
-          "limit": { "context": 16384, "output": 4096 },
+          "limit": { "context": 32768, "output": 4096 },
           "tool_call": true
         }
       }

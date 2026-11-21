@@ -91,7 +91,10 @@ The calibrated Q2_K gate/up and Q2_0 down model averaged 202.0 tok/s at
 temperature zero and 201.0 at 0.7 in three 700-token requests per setting.
 Its prefill perplexity was 3.0516 (reference 2.9401), outside the 0.5% quality
 target. OpenCode 1.2.5 used its read tool and returned the correct file contents.
-With 2,880 prompt tokens, its tool call and reply decoded at 165.7 and 163.8 tok/s.
+With a read-only tool configuration and 2,880 prompt tokens, its tool call and
+reply decoded at 165.7 and 163.8 tok/s. With the default tool set, the initial
+request used 16,963 prompt tokens. The 32K server read a fresh file and
+returned its exact marker, decoding the two turns at 140.2 and 140.7 tok/s.
 
 From the repository root, the equivalent server command is:
 
@@ -99,7 +102,7 @@ From the repository root, the equivalent server command is:
 export CUDA_VISIBLE_DEVICES=1 LLAMA_INKLING_CTRL_F16=1 IK_BATCH_MESSAGES=1
 export IK_SEGMENTED_IQ4=1 IK_SEGMENTED_Q6=1 IK_MIX_SPECIALIZE=1 IK_CTRL_APPLY8=1
 build/bin/llama-server -m "$HOME/models/inkling-2-mini/Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf" \
-  -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 16384 -np 1 --backend-sampling \
+  -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 32768 -np 1 --backend-sampling \
   --host 127.0.0.1 --port 8031 --alias inkling-mini
 ```
 

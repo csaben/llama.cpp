@@ -402,3 +402,9 @@ models. At a 2,880-token initial prompt, tool-call and follow-up generation
 rates were 144.8 / 143.1 tok/s with IQ4 and 165.7 / 163.8 with calibrated
 Q2. The short benchmark prompt and the OpenCode system prompt exercise
 different cache depths.
+
+The live 32K endpoint repeated the six short-prompt 700-token generations
+at 201.9 / 201.1 tok/s (T=0 / 0.7). All six exceeded 200 tok/s. With the
+full OpenCode tool set, the 16,963-token initial prompt took 8.92 s to
+prefill. The 78-token tool call decoded at 140.20 tok/s, and the 105-token
+follow-up decoded at 140.66 tok/s and returned the exact file marker.
