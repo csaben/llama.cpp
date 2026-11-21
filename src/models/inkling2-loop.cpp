@@ -138,6 +138,28 @@ void llama_model_inkling2_loop::load_arch_tensors(llama_model_loader & ml) {
 
 void llama_model_inkling2_loop::load_arch_tensors_post(llama_model_loader & ml) {
     llama_model_inkling2::load_arch_tensors_post(ml);
+    // Every layer of a repeated pass queries the same immutable previous-pass bank.
+    // Keep the original matrices for batched prefill and the unfused graph.
+    const char * group = getenv("IK_BATCH_MESSAGES");
+    if (fuse_weights && !loop_layers.empty() && group && atoi(group) != 0) {
+        ggml_tensor * first = loop_layers.front().msg_query;
+        bool compatible = first->type == GGML_TYPE_F32 && first->buffer;
+        for (const auto & layer : loop_layers) {
+            compatible = compatible && layer.msg_query->type == first->type && layer.msg_query->buffer &&
+                    ggml_backend_buffer_get_type(layer.msg_query->buffer) == ggml_backend_buffer_get_type(first->buffer);
+        }
+        if (compatible) {
+            core_msg_queries = ggml_new_tensor_2d(fused_context(), first->type, first->ne[0], LOOP_CTRL_COUNT*loop_layers.size());
+            ggml_set_name(core_msg_queries, "loop_msg_queries.weight");
+            fused_tensor f;
+            f.t = core_msg_queries;
+            f.ref = first;
+            for (size_t i = 0; i < loop_layers.size(); ++i) {
+                f.pieces.emplace_back(ggml_get_name(loop_layers[i].msg_query), i*ggml_nbytes(first));
+            }
+            fused_pending.push_back(std::move(f));
+        }
+    }
     load_fused(ml); // the controller stacks registered in load_arch_tensors (if not yet loaded)
 }
 
@@ -165,11 +187,16 @@ llama_model_inkling2_loop::graph::graph(const llm_graph_params & params) : llama
         // the bank of the previous pass: its blocks after the first core block, and its output
         std::vector<ggml_tensor *> bank;
         ggml_tensor * bank_out = nullptr;
+        ggml_tensor * pass_messages = nullptr;
         if (pass > 0) {
             bank.assign(blocks.begin() + prelude_blocks.size() + 1, blocks.end());
             bank_out = cur;
             cur = prelude;
             blocks = prelude_blocks;
+            if (fused && n_tokens == 1 && m.core_msg_queries) {
+                flush_pending();
+                pass_messages = mix(bank, bank_out, m.core_msg_queries);
+            }
         }
         for (int ip = start; ip < end; ++ip) {
             const int il = pass == 0 ? ip : m.n_phys + (pass - 1)*(end - start) + (ip - start);
@@ -180,7 +207,11 @@ llama_model_inkling2_loop::graph::graph(const llm_graph_params & params) : llama
             }
             const auto & loop = m.loop_layers[ip - start];
             flush_pending(); // bank_out may be a deferred layer output
-            cur = build_layer(il, ip, cur, blocks, mix(bank, bank_out, loop.msg_query), &loop);
+            ggml_tensor * messages = pass_messages ?
+                    ggml_view_3d(ctx0, pass_messages, n_embd, n_tokens, LOOP_CTRL_COUNT, pass_messages->nb[1],
+                            pass_messages->nb[2], (ip - start)*LOOP_CTRL_COUNT*pass_messages->nb[2]) :
+                    mix(bank, bank_out, loop.msg_query);
+            cur = build_layer(il, ip, cur, blocks, messages, &loop);
         }
     }
 
