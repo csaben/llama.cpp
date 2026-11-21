@@ -12733,21 +12733,23 @@ void ggml_compute_forward_res_mix(const ggml_compute_params * params, ggml_tenso
 // ggml_compute_forward_shortconv_res
 
 void ggml_compute_forward_shortconv_res(const ggml_compute_params * params, ggml_tensor * dst) {
-    const ggml_tensor * sx   = dst->src[0];
-    const ggml_tensor * w    = dst->src[1];
-    const ggml_tensor * cur  = dst->src[2];
-    const ggml_tensor * taps = dst->src[3];
-    const ggml_tensor * res  = dst->src[4];
+    const ggml_tensor * past  = dst->src[0];
+    const ggml_tensor * w     = dst->src[1];
+    const ggml_tensor * cur   = dst->src[2];
+    const ggml_tensor * taps  = dst->src[3];
+    const ggml_tensor * res   = dst->src[4];
+    ggml_tensor       * state = dst->src[5];
 
     float scale;
     memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
 
-    const int64_t d_conv = w->ne[0];
-    const int64_t n_chan = w->ne[1];
-    const int64_t n_t    = sx->ne[0] - d_conv + 1;
-    const int64_t n_s    = sx->ne[2];
+    const int64_t d_conv  = w->ne[0];
+    const int64_t n_chan  = w->ne[1];
+    const int64_t n_s     = past->ne[2];
+    const int64_t n_t     = cur->ne[1]/n_s;
+    const int64_t n_slots = state ? state->ne[1] : 0;
 
-    GGML_ASSERT(sx->nb[0] == sizeof(float));
+    GGML_ASSERT(past->nb[0] == sizeof(float));
     GGML_ASSERT(w->nb[0] == sizeof(float));
 
     const int64_t n_heads = taps ? taps->ne[1] : 1;
@@ -12760,29 +12762,46 @@ void ggml_compute_forward_shortconv_res(const ggml_compute_params * params, ggml
     const int64_t ic0 = dr*ith;
     const int64_t ic1 = MIN(ic0 + dr, n_chan);
 
+    float x[GGML_MAX_DIMS*4]; // d_conv <= 16
+    GGML_ASSERT(d_conv <= 16);
+
     for (int64_t s = 0; s < n_s; ++s) {
         for (int64_t t = 0; t < n_t; ++t) {
             const int64_t tok = s*n_t + t;
             for (int64_t c = ic0; c < ic1; ++c) {
-                const float * xs = (const float *) ((const char *) sx->data + c*sx->nb[1] + s*sx->nb[2]) + t;
+                // the window [t, t + d_conv) of the inputs [past, cur] of this channel
+                for (int64_t j = 0; j < d_conv; ++j) {
+                    const int64_t i = t + j;
+                    x[j] = i < d_conv - 1 ?
+                        *(const float *) ((const char *) past->data + i*past->nb[0] + c*past->nb[1] + s*past->nb[2]) :
+                        *(const float *) ((const char *) cur->data + c*cur->nb[0] + (s*n_t + i - (d_conv - 1))*cur->nb[1]);
+                }
                 const float * wc = (const float *) ((const char *) w->data + c*w->nb[1]);
 
                 float out = 0.0f;
                 for (int64_t j = 0; j < d_conv; ++j) {
-                    out += xs[j]*wc[j];
+                    out += x[j]*wc[j];
                 }
                 if (taps) {
                     const float * tp = (const float *) ((const char *) taps->data + (c/hd)*taps->nb[1] + tok*taps->nb[2]);
                     for (int64_t lag = 0; lag < d_conv; ++lag) {
-                        out += xs[d_conv - 1 - lag]*tp[lag];
+                        out += x[d_conv - 1 - lag]*tp[lag];
                     }
                 }
-                const float x = *(const float *) ((const char *) cur->data + c*cur->nb[0] + tok*cur->nb[1]);
-                float y = (x + out)*scale;
+                const float xc = x[d_conv - 1];
+                float y = (xc + out)*scale;
                 if (res) {
                     y += *(const float *) ((const char *) res->data + c*res->nb[0] + tok*res->nb[1]);
                 }
                 *(float *) ((char *) dst->data + c*dst->nb[0] + tok*dst->nb[1]) = y;
+
+                // slot k holds the last d_conv - 1 inputs as of k tokens back: x[1..] of the token t = n_t - 1 - k
+                const int64_t k = n_t - 1 - t;
+                if (k < n_slots) {
+                    for (int64_t j = 0; j < d_conv - 1; ++j) {
+                        *(float *) ((char *) state->data + j*state->nb[0] + k*state->nb[1] + c*state->nb[2] + s*state->nb[3]) = x[j + 1];
+                    }
+                }
             }
         }
     }

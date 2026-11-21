@@ -5729,29 +5729,32 @@ struct ggml_tensor * ggml_res_mix(
 
 struct ggml_tensor * ggml_shortconv_res(
         struct ggml_context * ctx,
-        struct ggml_tensor  * sx,
+        struct ggml_tensor  * past,
         struct ggml_tensor  * w,
         struct ggml_tensor  * cur,
         struct ggml_tensor  * taps,
         struct ggml_tensor  * res,
+        struct ggml_tensor  * state,
         float                 scale) {
-    GGML_ASSERT(ggml_is_3d(sx));
+    GGML_ASSERT(ggml_is_3d(past));
     GGML_ASSERT(ggml_is_matrix(w));
-    GGML_ASSERT(sx->type == GGML_TYPE_F32 && w->type == GGML_TYPE_F32 && cur->type == GGML_TYPE_F32);
+    GGML_ASSERT(past->type == GGML_TYPE_F32 && w->type == GGML_TYPE_F32 && cur->type == GGML_TYPE_F32);
 
-    const int64_t d_conv  = w->ne[0];
-    const int64_t n_chan  = w->ne[1];
-    const int64_t n_t     = sx->ne[0] - d_conv + 1; // tokens per sequence
-    const int64_t n_s     = sx->ne[2];
+    const int64_t d_conv = w->ne[0];
+    const int64_t n_chan = w->ne[1];
+    const int64_t n_s    = past->ne[2];
 
-    GGML_ASSERT(sx->ne[0] == d_conv - 1 + n_t);
-    GGML_ASSERT(sx->ne[1] == n_chan);
-    GGML_ASSERT(n_t >= 0);
-    GGML_ASSERT(ggml_is_matrix(cur) && cur->ne[0] == n_chan && cur->ne[1] == n_t*n_s);
+    GGML_ASSERT(past->ne[0] == d_conv - 1);
+    GGML_ASSERT(past->ne[1] == n_chan);
+    GGML_ASSERT(past->nb[0] == sizeof(float));
+    GGML_ASSERT(ggml_is_matrix(cur) && cur->ne[0] == n_chan && cur->ne[1] % n_s == 0);
     GGML_ASSERT(cur->nb[0] == sizeof(float));
+
+    const int64_t n_t = cur->ne[1]/n_s;
+
     if (taps) {
         GGML_ASSERT(taps->type == GGML_TYPE_F32);
-        GGML_ASSERT(ggml_is_3d(taps) && ggml_is_contiguous(taps));
+        GGML_ASSERT(ggml_is_3d(taps) && taps->nb[0] == sizeof(float));
         GGML_ASSERT(taps->ne[0] == d_conv && taps->ne[2] == n_t*n_s && n_chan % taps->ne[1] == 0);
     }
     if (res) {
@@ -5759,17 +5762,22 @@ struct ggml_tensor * ggml_shortconv_res(
         GGML_ASSERT(ggml_is_matrix(res) && res->ne[0] == n_chan && res->ne[1] == n_t*n_s);
         GGML_ASSERT(res->nb[0] == sizeof(float));
     }
+    if (state) {
+        GGML_ASSERT(state->type == GGML_TYPE_F32);
+        GGML_ASSERT(state->ne[0] == d_conv - 1 && state->ne[1] <= n_t && state->ne[2] == n_chan && state->ne[3] == n_s);
+    }
 
     struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_chan, n_t*n_s);
 
     ggml_set_op_params_f32(result, 0, scale);
 
     result->op     = GGML_OP_SHORTCONV_RES;
-    result->src[0] = sx;
+    result->src[0] = past;
     result->src[1] = w;
     result->src[2] = cur;
     result->src[3] = taps;
     result->src[4] = res;
+    result->src[5] = state;
 
     return result;
 }

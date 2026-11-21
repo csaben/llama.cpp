@@ -256,16 +256,19 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
 
     ggml_tensor * past = ggml_view_3d(ctx0, history, n_conv - 1, n_channels, n_seqs, history->nb[1], history->nb[2], offset*history->nb[1]);
 
+    if (fused) {
+        // the fused op convolves [past, cur] and stores the new state itself
+        ggml_tensor * taps = dynamic ? ggml_reshape_3d(ctx0, dynamic, n_conv, dynamic->ne[0]/n_conv, n_tokens) : nullptr;
+        ggml_tensor * state_view = build_conv_state_view(inp, state, n_conv - 1, n_channels, n_seqs, n_seq_tokens,
+                offset*(n_conv - 1)*ggml_element_size(state));
+
+        return ggml_shortconv_res(ctx0, past, weight, cur, taps, residual, state_view, scale);
+    }
+
     ggml_tensor * x = ggml_transpose(ctx0, ggml_reshape_3d(ctx0, cur, n_channels, n_seq_tokens, n_seqs));
     x = ggml_concat(ctx0, past, x, 0);
 
     build_conv_state_store(inp, state, x, n_conv - 1, offset*(n_conv - 1)*ggml_element_size(state));
-
-    if (fused) {
-        ggml_tensor * taps = dynamic ? ggml_reshape_3d(ctx0, dynamic, n_conv, dynamic->ne[0]/n_conv, n_tokens) : nullptr;
-
-        return ggml_shortconv_res(ctx0, x, weight, cur, taps, residual, scale);
-    }
 
     ggml_tensor * out = ggml_ssm_conv(ctx0, x, weight);
     out = ggml_reshape_2d(ctx0, out, n_channels, n_tokens);

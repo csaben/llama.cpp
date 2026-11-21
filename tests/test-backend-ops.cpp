@@ -4982,17 +4982,20 @@ struct test_shortconv_res : public test_case {
     const int64_t n_s;
     const int64_t n_heads; // 0: no dynamic taps
     const bool    with_res;
+    const int64_t n_slots; // 0: no state store
 
     std::string vars() override {
-        return VARS_TO_STR6(d_conv, n_chan, n_t, n_s, n_heads, with_res);
+        return VARS_TO_STR7(d_conv, n_chan, n_t, n_s, n_heads, with_res, n_slots);
     }
 
-    test_shortconv_res(int64_t d_conv = 4, int64_t n_chan = 1024, int64_t n_t = 1, int64_t n_s = 1, int64_t n_heads = 8, bool with_res = false)
-        : d_conv(d_conv), n_chan(n_chan), n_t(n_t), n_s(n_s), n_heads(n_heads), with_res(with_res) {}
+    test_shortconv_res(int64_t d_conv = 4, int64_t n_chan = 1024, int64_t n_t = 1, int64_t n_s = 1, int64_t n_heads = 8, bool with_res = false, int64_t n_slots = 0)
+        : d_conv(d_conv), n_chan(n_chan), n_t(n_t), n_s(n_s), n_heads(n_heads), with_res(with_res), n_slots(n_slots) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * sx = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, d_conv - 1 + n_t, n_chan, n_s);
-        ggml_set_name(sx, "sx");
+        // the past inputs come from a larger strided buffer, like a recurrent state gather
+        ggml_tensor * hist = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, d_conv - 1, 2*n_chan, n_s);
+        ggml_set_name(hist, "hist");
+        ggml_tensor * past = ggml_view_3d(ctx, hist, d_conv - 1, n_chan, n_s, hist->nb[1], hist->nb[2], (n_chan/2)*hist->nb[1]);
         ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d_conv, n_chan);
         ggml_set_name(w, "w");
         ggml_tensor * cur = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_chan, n_t*n_s);
@@ -5007,9 +5010,23 @@ struct test_shortconv_res : public test_case {
             res = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_chan, n_t*n_s);
             ggml_set_name(res, "res");
         }
+        ggml_tensor * state = nullptr;
+        ggml_tensor * cells = nullptr;
+        if (n_slots > 0) {
+            // n_slots planes of [(d_conv - 1)*n_chan, n_s] cells, the op writes slot k of each
+            cells = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, (d_conv - 1)*n_chan, n_s, n_slots);
+            ggml_set_name(cells, "cells");
+            state = ggml_view_4d(ctx, cells, d_conv - 1, n_slots, n_chan, n_s, cells->nb[2], (d_conv - 1)*sizeof(float), cells->nb[1], 0);
+        }
 
-        ggml_tensor * out = ggml_shortconv_res(ctx, sx, w, cur, taps, res, 1.0f/3.0f);
+        ggml_tensor * out = ggml_shortconv_res(ctx, past, w, cur, taps, res, state, 1.0f/3.0f);
         ggml_set_name(out, "out");
+
+        if (n_slots > 0) {
+            // the stored state is part of the checked output: the concat runs after the op (out is its first source)
+            out = ggml_concat(ctx, ggml_reshape_2d(ctx, out, n_chan, n_t*n_s), ggml_reshape_2d(ctx, cells, n_chan, (d_conv - 1)*n_s*n_slots), 1);
+            ggml_set_name(out, "out_with_state");
+        }
 
         return out;
     }
@@ -12115,9 +12132,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     for (int64_t n_heads : {0, 8}) {
         for (bool with_res : {false, true}) {
-            test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, n_heads, with_res));
-            test_cases.emplace_back(new test_shortconv_res(4, 2304, 5, 2, n_heads, with_res));
-            test_cases.emplace_back(new test_shortconv_res(3, 96, 33, 1, n_heads, with_res));
+            test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, n_heads, with_res, 0));
+            test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, n_heads, with_res, 1));
+            test_cases.emplace_back(new test_shortconv_res(4, 2304, 5, 2, n_heads, with_res, 0));
+            test_cases.emplace_back(new test_shortconv_res(4, 2304, 5, 2, n_heads, with_res, 4));
+            test_cases.emplace_back(new test_shortconv_res(3, 96, 33, 1, n_heads, with_res, 1));
+            test_cases.emplace_back(new test_shortconv_res(3, 96, 7, 3, n_heads, with_res, 7));
         }
     }
     for (ggml_type type_mask : {GGML_TYPE_F16, GGML_TYPE_F32}) {

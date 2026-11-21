@@ -221,14 +221,17 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// shortconv_res: y = res + (cur + conv(sx, w) + dynamic taps)*scale, one thread per (channel, token)
+// shortconv_res: y = res + (cur + conv([past, cur], w) + dynamic taps)*scale, one thread per (channel, token);
+// the thread of token n_t - 1 - k also stores the inputs it saw into state slot k
 
 template <int d_conv, bool has_taps>
-static __global__ void shortconv_res_f32(const float * __restrict__ sx, const float * __restrict__ w,
+static __global__ void shortconv_res_f32(const float * __restrict__ past, const float * __restrict__ w,
         const float * __restrict__ cur, const float * __restrict__ taps, const float * __restrict__ res, float * __restrict__ dst,
-        const int n_chan, const int n_t, const int n_s,
-        const int64_t sx_nb1, const int64_t sx_nb2, const int64_t w_nb1,
+        float * __restrict__ state,
+        const int n_chan, const int n_t, const int n_s, const int n_slots,
+        const int64_t past_nb1, const int64_t past_nb2, const int64_t w_nb1,
         const int64_t cur_nb1, const int64_t taps_nb1, const int64_t taps_nb2, const int64_t res_nb1, const int64_t dst_nb1,
+        const int64_t st_nb1, const int64_t st_nb2, const int64_t st_nb3,
         const int hd, const float scale) {
     const int64_t idx = (int64_t) blockIdx.x*blockDim.x + threadIdx.x;
     const int64_t n_tok = (int64_t) n_t*n_s;
@@ -240,13 +243,15 @@ static __global__ void shortconv_res_f32(const float * __restrict__ sx, const fl
     const int s   = tok / n_t;
     const int t   = tok - s*n_t;
 
-    const float * xs = (const float *) ((const char *) sx + c*sx_nb1 + s*sx_nb2) + t;
+    const float * ps = (const float *) ((const char *) past + c*past_nb1 + s*past_nb2);
     const float * wc = (const float *) ((const char *) w + c*w_nb1);
 
+    // the window [t, t + d_conv) of the inputs [past, cur] of this channel
     float x[d_conv];
 #pragma unroll
     for (int j = 0; j < d_conv; ++j) {
-        x[j] = xs[j];
+        const int i = t + j;
+        x[j] = i < d_conv - 1 ? ps[i] : *(const float *) ((const char *) cur + (int64_t) (s*n_t + i - (d_conv - 1))*cur_nb1 + c*sizeof(float));
     }
 
     float out = 0.0f;
@@ -262,30 +267,41 @@ static __global__ void shortconv_res_f32(const float * __restrict__ sx, const fl
         }
     }
 
-    const float xc = *(const float *) ((const char *) cur + tok*cur_nb1 + c*sizeof(float));
-    float y = (xc + out)*scale;
+    float y = (x[d_conv - 1] + out)*scale;
     if (res) {
         y += *(const float *) ((const char *) res + tok*res_nb1 + c*sizeof(float));
     }
     *(float *) ((char *) dst + tok*dst_nb1 + c*sizeof(float)) = y;
+
+    const int k = n_t - 1 - t;
+    if (k < n_slots) {
+        float * st = (float *) ((char *) state + k*st_nb1 + c*st_nb2 + s*st_nb3);
+#pragma unroll
+        for (int j = 0; j < d_conv - 1; ++j) {
+            st[j] = x[j + 1];
+        }
+    }
 }
 
 void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * sx   = dst->src[0];
-    const ggml_tensor * w    = dst->src[1];
-    const ggml_tensor * cur  = dst->src[2];
-    const ggml_tensor * taps = dst->src[3];
-    const ggml_tensor * res  = dst->src[4];
+    const ggml_tensor * past  = dst->src[0];
+    const ggml_tensor * w     = dst->src[1];
+    const ggml_tensor * cur   = dst->src[2];
+    const ggml_tensor * taps  = dst->src[3];
+    const ggml_tensor * res   = dst->src[4];
+    ggml_tensor       * state = dst->src[5];
 
     float scale;
     memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
 
-    const int d_conv = w->ne[0];
-    const int n_chan = w->ne[1];
-    const int n_t    = sx->ne[0] - d_conv + 1;
-    const int n_s    = sx->ne[2];
+    const int d_conv  = w->ne[0];
+    const int n_chan  = w->ne[1];
+    const int n_s     = past->ne[2];
+    const int n_t     = cur->ne[1]/n_s;
+    const int n_slots = state ? state->ne[1] : 0;
 
-    GGML_ASSERT(sx->nb[0] == sizeof(float) && w->nb[0] == sizeof(float));
+    GGML_ASSERT(past->nb[0] == sizeof(float) && w->nb[0] == sizeof(float));
+    GGML_ASSERT(!state || state->nb[0] == sizeof(float));
 
     const int hd = taps ? n_chan/taps->ne[1] : n_chan;
 
@@ -293,29 +309,36 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
     const int block_size = 256;
     const int64_t nblocks = (n + block_size - 1)/block_size;
 
-    auto launch = [&](auto DC) {
-        constexpr int kDC = decltype(DC)::value;
+    auto launch = [&](auto DC, auto TAPS) {
+        constexpr int  kDC   = decltype(DC)::value;
+        constexpr bool kTaps = decltype(TAPS)::value;
+        shortconv_res_f32<kDC, kTaps><<<nblocks, block_size, 0, ctx.stream()>>>(
+                (const float *) past->data, (const float *) w->data, (const float *) cur->data,
+                taps ? (const float *) taps->data : nullptr, res ? (const float *) res->data : nullptr, (float *) dst->data,
+                state ? (float *) state->data : nullptr,
+                n_chan, n_t, n_s, n_slots,
+                past->nb[1], past->nb[2], w->nb[1], cur->nb[1],
+                taps ? taps->nb[1] : 0, taps ? taps->nb[2] : 0, res ? res->nb[1] : 0, dst->nb[1],
+                state ? state->nb[1] : 0, state ? state->nb[2] : 0, state ? state->nb[3] : 0,
+                hd, scale);
+    };
+
+    auto launch_dc = [&](auto DC) {
         if (taps) {
-            shortconv_res_f32<kDC, true><<<nblocks, block_size, 0, ctx.stream()>>>(
-                    (const float *) sx->data, (const float *) w->data, (const float *) cur->data, (const float *) taps->data,
-                    res ? (const float *) res->data : nullptr, (float *) dst->data, n_chan, n_t, n_s,
-                    sx->nb[1], sx->nb[2], w->nb[1], cur->nb[1], taps->nb[1], taps->nb[2], res ? res->nb[1] : 0, dst->nb[1], hd, scale);
+            launch(DC, std::true_type{});
         } else {
-            shortconv_res_f32<kDC, false><<<nblocks, block_size, 0, ctx.stream()>>>(
-                    (const float *) sx->data, (const float *) w->data, (const float *) cur->data, nullptr,
-                    res ? (const float *) res->data : nullptr, (float *) dst->data, n_chan, n_t, n_s,
-                    sx->nb[1], sx->nb[2], w->nb[1], cur->nb[1], 0, 0, res ? res->nb[1] : 0, dst->nb[1], hd, scale);
+            launch(DC, std::false_type{});
         }
     };
 
     switch (d_conv) {
-        case 2: launch(std::integral_constant<int, 2>{}); break;
-        case 3: launch(std::integral_constant<int, 3>{}); break;
-        case 4: launch(std::integral_constant<int, 4>{}); break;
-        case 5: launch(std::integral_constant<int, 5>{}); break;
-        case 6: launch(std::integral_constant<int, 6>{}); break;
-        case 7: launch(std::integral_constant<int, 7>{}); break;
-        case 8: launch(std::integral_constant<int, 8>{}); break;
+        case 2: launch_dc(std::integral_constant<int, 2>{}); break;
+        case 3: launch_dc(std::integral_constant<int, 3>{}); break;
+        case 4: launch_dc(std::integral_constant<int, 4>{}); break;
+        case 5: launch_dc(std::integral_constant<int, 5>{}); break;
+        case 6: launch_dc(std::integral_constant<int, 6>{}); break;
+        case 7: launch_dc(std::integral_constant<int, 7>{}); break;
+        case 8: launch_dc(std::integral_constant<int, 8>{}); break;
         default: GGML_ABORT("shortconv_res: unsupported d_conv %d", d_conv);
     }
 }

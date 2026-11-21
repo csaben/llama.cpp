@@ -4281,6 +4281,30 @@ ggml_tensor * llm_graph_context::build_rs(
                     get_state_rows);
 }
 
+ggml_tensor * llm_graph_context::build_conv_state_view(
+        llm_graph_input_rs * inp,
+        ggml_tensor * s,
+            int64_t   n_cols,
+            int64_t   channels,
+            int64_t   n_seqs,
+            int64_t   n_seq_tokens,
+             size_t   offs) const {
+    const auto * mctx_cur = inp->mctx;
+
+    const size_t row_size  = s->nb[1];
+    const size_t cell_offs = mctx_cur->get_head()*row_size + offs;
+
+    // see build_conv_state_store: without rollback support one slot, else the K = n_rs_seq + 1 planes of the
+    // state hold the slots, and a ubatch of n tokens writes the min(n, K) most recent ones
+    const int64_t K  = cparams.n_rs_seq == 0 ? 1 : (int64_t) cparams.n_rs_seq + 1;
+    const int64_t Kw = std::min(n_seq_tokens, K);
+
+    return ggml_view_4d(ctx0, s,
+            n_cols, Kw, channels, n_seqs,
+            (size_t) mctx_cur->get_size()*row_size, ggml_row_size(s->type, n_cols), row_size,
+            cell_offs);
+}
+
 void llm_graph_context::build_conv_state_store(
         llm_graph_input_rs * inp,
         ggml_tensor * s,

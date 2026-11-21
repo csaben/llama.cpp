@@ -2340,19 +2340,22 @@ extern "C" {
             float                 eps,
             float                 scale);
 
-    // causal short convolution with a residual: y = res + (cur + conv(sx, w) + dynamic taps) * scale
-    //   sx   [d_conv - 1 + n_t, n_channels, n_seqs]  (past inputs followed by the current ones)
-    //   w    [d_conv, n_channels]
-    //   cur  [n_channels, n_t*n_seqs]
-    //   taps [d_conv, n_heads, n_t*n_seqs] (optional): tap[lag, h, t] multiplies the input lag steps back
-    //   res  [n_channels, n_t*n_seqs] (optional)
+    // causal short convolution with a residual: y = res + (cur + conv([past, cur], w) + dynamic taps) * scale
+    //   past  [d_conv - 1, n_channels, n_seqs]  (the inputs before the current ones, per sequence)
+    //   w     [d_conv, n_channels]
+    //   cur   [n_channels, n_t*n_seqs]
+    //   taps  [d_conv, n_heads, n_t*n_seqs] (optional): tap[lag, h, t] multiplies the input lag steps back
+    //   res   [n_channels, n_t*n_seqs] (optional)
+    //   state [d_conv - 1, n_slots, n_channels, n_seqs] (optional, any strides): the op also stores the last
+    //         d_conv - 1 inputs of each sequence as seen k tokens back into slot k (n_slots <= n_t)
     GGML_API struct ggml_tensor * ggml_shortconv_res(
             struct ggml_context * ctx,
-            struct ggml_tensor  * sx,
+            struct ggml_tensor  * past,
             struct ggml_tensor  * w,
             struct ggml_tensor  * cur,
             struct ggml_tensor  * taps,
             struct ggml_tensor  * res,
+            struct ggml_tensor  * state,
             float                 scale);
 
     // relative-position attention bias gathered by distance, with per-query sinks and the mask added:
