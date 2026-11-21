@@ -895,6 +895,85 @@ static __global__ void loop_ctrl_down_f32(const wt * __restrict__ w, const float
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The controllers of a batch (prefill): the per-token kernels above launch a block per (rank, token) and a warp per
+// output element, which was 35% of the prefill time (phase 5 profile). For n_tok >= IK_CTRL_GEMM_MIN the same sums are
+// two GEMMs: D = W_down^T [rmsnorm(a); rmsnorm(msg)] and [G, F] = [W_gain, W_forget] D, in FP32 (the handle's TF32
+// mode is switched off around them; F16 weights are widened to a scratch).
+
+static __global__ void ik_ctrl_stack_norm(const float * __restrict__ a, const float * __restrict__ b, float * __restrict__ x,
+        const int n, const int n_tok, const int64_t a_nb1, const int64_t a_nb2, const int64_t b_nb1, const int64_t b_nb2, const float eps) {
+    const int t  = blockIdx.x;
+    const int ib = blockIdx.y;
+    __shared__ float red[2][256/WARP_SIZE];
+    const float * av = (const float *) ((const char *) a + t*a_nb1 + ib*a_nb2);
+    const float * bv = (const float *) ((const char *) b + t*b_nb1 + ib*b_nb2);
+    float sa = 0.0f, sb = 0.0f;
+    for (int i = threadIdx.x; i < n; i += 256) {
+        sa += av[i]*av[i];
+        sb += bv[i]*bv[i];
+    }
+    sa = ik_block_sum<256>(sa, red[0]);
+    sb = ik_block_sum<256>(sb, red[1]);
+    const float ra = rsqrtf(sa/n + eps);
+    const float rb = rsqrtf(sb/n + eps);
+    float * xt = x + ((int64_t) ib*n_tok + t)*2*n;
+    for (int i = threadIdx.x; i < n; i += 256) {
+        xt[i]     = av[i]*ra;
+        xt[n + i] = bv[i]*rb;
+    }
+}
+
+static __global__ void ik_half_to_float(const half * __restrict__ x, float * __restrict__ y, const int64_t n) {
+    const int64_t i = (int64_t) blockIdx.x*blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = __half2float(x[i]);
+    }
+}
+
+// y = cur - tanh(f)*cur + tanh(g)*msg, one thread per element
+static __global__ void ik_ctrl_apply_elem(const float * __restrict__ cur, const float * __restrict__ msg, const float * __restrict__ g, const float * __restrict__ f,
+        float * __restrict__ y, const int n, const int n_tok, const int64_t cur_nb1, const int64_t cur_nb2, const int64_t msg_nb1, const int64_t msg_nb2) {
+    const int64_t e  = (int64_t) blockIdx.x*blockDim.x + threadIdx.x;
+    const int     ib = blockIdx.y;
+    if (e >= (int64_t) n*n_tok) {
+        return;
+    }
+    const int t = e/n;
+    const int i = e - (int64_t) t*n;
+    const int64_t o = ((int64_t) ib*n_tok + t)*n + i;
+    const float c = *(const float *) ((const char *) cur + t*cur_nb1 + ib*cur_nb2 + i*sizeof(float));
+    const float m = *(const float *) ((const char *) msg + t*msg_nb1 + ib*msg_nb2 + i*sizeof(float));
+    y[o] = (c - tanhf(f[o])*c) + tanhf(g[o])*m;
+}
+
+static int ik_ctrl_gemm_min() {
+    static const int v = getenv("IK_CTRL_GEMM_MIN") ? atoi(getenv("IK_CTRL_GEMM_MIN")) : 8; // tokens; 0: never
+    return v;
+}
+
+// the weights as FP32: the tensor itself, or a widened copy in the scratch
+static const float * ik_ctrl_weights_f32(ggml_backend_cuda_context & ctx, const ggml_tensor * w, ggml_cuda_pool_alloc<float> & scratch) {
+    if (w->type == GGML_TYPE_F32) {
+        return (const float *) w->data;
+    }
+    const int64_t ne = ggml_nelements(w);
+    scratch.alloc(ne);
+    ik_half_to_float<<<(ne + 255)/256, 256, 0, ctx.stream()>>>((const half *) w->data, scratch.get(), ne);
+    return scratch.get();
+}
+
+// c[m, n_col] (ldc) = a[k, m]^T (lda) b[k, n_col] (ldb), FP32 math
+static void ik_sgemm_tn(ggml_backend_cuda_context & ctx, const int m, const int n_col, const int k, const float * a, const int lda, const float * b, const int ldb,
+        float * c, const int ldc) {
+    cublasHandle_t h = ctx.cublas_handle();
+    const float one = 1.0f, zero = 0.0f;
+    CUBLAS_CHECK(cublasSetStream(h, ctx.stream()));
+    CUBLAS_CHECK(cublasSetMathMode(h, CUBLAS_DEFAULT_MATH));
+    CUBLAS_CHECK(cublasSgemm(h, CUBLAS_OP_T, CUBLAS_OP_N, m, n_col, k, &one, a, lda, b, ldb, &zero, c, ldc));
+    CUBLAS_CHECK(cublasSetMathMode(h, CUBLAS_TF32_TENSOR_OP_MATH));
+}
+
 void ggml_cuda_op_loop_ctrl_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * w = dst->src[0];
     const ggml_tensor * a = dst->src[1];
@@ -907,6 +986,19 @@ void ggml_cuda_op_loop_ctrl_down(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int n_tok = a->ne[1];
     const int rank  = w->ne[1];
     const int B     = w->ne[2];
+
+    if (ik_ctrl_gemm_min() > 0 && n_tok >= ik_ctrl_gemm_min() && (w->type == GGML_TYPE_F32 || w->type == GGML_TYPE_F16)) {
+        ggml_cuda_pool_alloc<float> x(ctx.pool(), (size_t) 2*n*n_tok*B);
+        ggml_cuda_pool_alloc<float> wbuf(ctx.pool());
+        ik_ctrl_stack_norm<<<dim3(n_tok, B), 256, 0, ctx.stream()>>>((const float *) a->data, (const float *) b->data, x.get(), n, n_tok,
+                a->nb[1], a->ne[2] == 1 ? 0 : a->nb[2], b->nb[1], b->nb[2], eps);
+        const float * wf32 = ik_ctrl_weights_f32(ctx, w, wbuf);
+        for (int ib = 0; ib < B; ++ib) {
+            ik_sgemm_tn(ctx, rank, n_tok, 2*n, wf32 + (int64_t) ib*rank*2*n, 2*n, x.get() + (int64_t) ib*n_tok*2*n, 2*n,
+                    (float *) dst->data + (int64_t) ib*n_tok*rank, rank);
+        }
+        return;
+    }
 
     const dim3 grid(rank, n_tok, B);
     // 1024 threads: the whole dot of a block in one round of loads (n <= 10240)
@@ -1257,7 +1349,21 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
             (const float *) d->data, (const wt_t *) wg->data, (const wt_t *) wf->data, y, n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2], \
             nw ? (const float *) nw->data : nullptr, nw_nb1, dst->data, eps, counters)
     static const bool group8 = getenv("IK_CTRL_APPLY8") && atoi(getenv("IK_CTRL_APPLY8"));
-    if (group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n_tok == 1 && n % 32 == 0 &&
+    if (ik_ctrl_gemm_min() > 0 && n_tok >= ik_ctrl_gemm_min() && !fused && (wg->type == GGML_TYPE_F32 || wg->type == GGML_TYPE_F16) && wf->type == wg->type) {
+        // the batch: G = W_gain D and F = W_forget D as GEMMs, then the element-wise update
+        ggml_cuda_pool_alloc<float> gbuf(ctx.pool(), (size_t) n*n_tok*B), fbuf(ctx.pool(), (size_t) n*n_tok*B);
+        ggml_cuda_pool_alloc<float> wgbuf(ctx.pool()), wfbuf(ctx.pool());
+        const float * wg32 = ik_ctrl_weights_f32(ctx, wg, wgbuf);
+        const float * wf32 = ik_ctrl_weights_f32(ctx, wf, wfbuf);
+        for (int ib = 0; ib < B; ++ib) {
+            const float * dv = (const float *) d->data + (int64_t) ib*n_tok*rank;
+            ik_sgemm_tn(ctx, n, n_tok, rank, wg32 + (int64_t) ib*n*rank, rank, dv, rank, gbuf.get() + (int64_t) ib*n_tok*n, n);
+            ik_sgemm_tn(ctx, n, n_tok, rank, wf32 + (int64_t) ib*n*rank, rank, dv, rank, fbuf.get() + (int64_t) ib*n_tok*n, n);
+        }
+        const int64_t ne = (int64_t) n*n_tok;
+        ik_ctrl_apply_elem<<<dim3((ne + 255)/256, B), 256, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data, gbuf.get(), fbuf.get(), y,
+                n, n_tok, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2]);
+    } else if (group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n_tok == 1 && n % 32 == 0 &&
             (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 && (uintptr_t) wf->data % 8 == 0) {
         ik_ctrl_apply8<<<dim3(n/32, B), 256, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
                 (const float *) d->data, (const half *) wg->data, (const half *) wf->data, y, n,

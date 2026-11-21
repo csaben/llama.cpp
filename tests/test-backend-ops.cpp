@@ -12846,6 +12846,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 1, true, 3, true, true, GGML_TYPE_Q8_1, GGML_TYPE_F16));
     test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 2, false, 1, false, false, GGML_TYPE_F32, GGML_TYPE_F16));
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1, 3, true, GGML_TYPE_F16));
+    // batches: the GEMM path of the controllers (prefill)
+    for (ggml_type wtype : { GGML_TYPE_F32, GGML_TYPE_F16 }) {
+        test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 48, 3, false, wtype));
+        test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 33, 3, true, wtype));
+        test_cases.emplace_back(new test_loop_ctrl_down(100, 7, 17, 1, false, wtype));
+        test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 48, true, 3, false, true, GGML_TYPE_F32, wtype));
+        test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 33, false, 3, true, false, GGML_TYPE_F32, wtype));
+        test_cases.emplace_back(new test_loop_ctrl_apply(100, 7, 17, true, 1, false, false, GGML_TYPE_F32, wtype));
+    }
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 2, 1, false, GGML_TYPE_F16));
     test_cases.emplace_back(new test_loop_ctrl_apply(2304, 64, 2, true, 3, true, true, GGML_TYPE_Q8_1));
     test_cases.emplace_back(new test_loop_ctrl_apply(96, 7, 3, true, 2, true, false, GGML_TYPE_Q8_1));
