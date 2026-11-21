@@ -36,22 +36,6 @@ struct ik_fmv_sync {
     int pad[2];
 };
 
-static __device__ __forceinline__ int ik_ld_acquire(const int * p) {
-    int v;
-    asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(v) : "l"(p) : "memory");
-    return v;
-}
-
-static __device__ __forceinline__ void ik_st_release(int * p, const int v) {
-    asm volatile("st.release.gpu.global.s32 [%0], %1;" :: "l"(p), "r"(v) : "memory");
-}
-
-static __device__ __forceinline__ int ik_atomic_add_acq_rel(int * p, const int v) {
-    int old;
-    asm volatile("atom.acq_rel.gpu.global.add.s32 %0, [%1], %2;" : "=r"(old) : "l"(p), "r"(v) : "memory");
-    return old;
-}
-
 static __device__ __forceinline__ void ik_wait_flag(const int * flag) {
     if (threadIdx.x == 0) {
         while (ik_ld_acquire(flag) == 0) {
@@ -59,10 +43,6 @@ static __device__ __forceinline__ void ik_wait_flag(const int * flag) {
         }
     }
     __syncthreads();
-}
-
-static __device__ __forceinline__ void ik_st_relaxed(int * p, const int v) {
-    asm volatile("st.relaxed.gpu.global.s32 [%0], %1;" :: "l"(p), "r"(v) : "memory");
 }
 
 // all threads of the block have written (the barrier orders them before thread 0's release, which is cumulative):

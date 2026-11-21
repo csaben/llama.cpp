@@ -1,6 +1,7 @@
 #include "inkling.cuh"
 #include "inkling-common.cuh"
 #include "vecdotq.cuh"
+#include "cp-async.cuh"
 
 #include <cmath>
 
@@ -2297,6 +2298,268 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
     if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); } // selection done (last block's clock)
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// inkling_router v2: n_expert/8 blocks of 256 threads (one expert row per warp). Every block issues all its loads in one
+// round trip (the states, query and norm weight into registers, its 8 router rows into shared memory with cp.async),
+// computes the mix weights and the RMS factor of the mixed input from the Gram matrix of the states (one pass), the
+// normalized input into shared memory (block 0 also writes the F32 / Q8_1 outputs), and its 8 logits; the last block
+// to arrive ranks the experts in parallel (rank = number of larger selection scores) instead of n_used argmax rounds.
+
+#define IK_R2_BLOCK      256
+#define IK_R2_WARPS      (IK_R2_BLOCK/WARP_SIZE)
+#define IK_R2_MAX_EMBD   2304
+#define IK_R2_CPT        (IK_R2_MAX_EMBD/IK_R2_BLOCK)  // channels per thread
+#define IK_R2_MAX_STATES 5
+#define IK_R2_MAX_EXPERT 256
+
+template <int NS>
+static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args) {
+    constexpr int NG = NS*(NS + 1)/2;          // Gram matrix (upper triangle)
+    constexpr int NP = NG + NS;                 // + the dots with the query
+    constexpr int C4 = (IK_R2_MAX_EMBD/4 + IK_R2_BLOCK - 1)/IK_R2_BLOCK; // float4 slots per thread
+    extern __shared__ float4 r2_smem[];
+    float4 * s_rows = r2_smem;                                          // [IK_R2_WARPS][n_embd/4]
+    float4 * s_x    = r2_smem + IK_R2_WARPS*(IK_R2_MAX_EMBD/4);         // [n_embd/4]
+    __shared__ float s_red[IK_R2_WARPS][NP];
+    __shared__ float s_tot[NP];
+    __shared__ float s_w[2*NS + 1];            // rms[NS], p[NS], factor
+    __shared__ float s_sel[IK_R2_MAX_EXPERT];
+    __shared__ float s_prob[IK_R2_MAX_EXPERT];
+    __shared__ float s_wsum;
+    __shared__ int   s_last;
+
+    const int tid  = threadIdx.x;
+    const int lane = tid % WARP_SIZE;
+    const int warp = tid / WARP_SIZE;
+    const int n_embd  = args.n_embd;
+    const int n_embd4 = n_embd/4;
+    const int e0 = blockIdx.x*IK_R2_WARPS;
+    IK_RDBG_T(0);
+
+    // ===== all loads in one round trip: the states / query / norm weight into registers (float4, lane-consecutive),
+    //       then the router row of this warp's expert into shared memory with cp.async (needed last) =====
+    float4 x[NS][C4], q[C4], nw[C4];
+#pragma unroll
+    for (int j = 0; j < C4; ++j) {
+        const int  k  = tid + j*IK_R2_BLOCK;
+        const bool ok = k < n_embd4;
+        const float4 z = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+#pragma unroll
+        for (int i = 0; i < NS; ++i) {
+            x[i][j] = ok ? ((const float4 *) args.st.p[i])[k] : z;
+        }
+        q[j]  = ok && args.query ? ((const float4 *) args.query)[k] : z;
+        nw[j] = ok ? ((const float4 *) args.norm_w)[k] : z;
+    }
+    {
+        const float4 * row = (const float4 *) (args.gate_inp + (int64_t) (e0 + warp)*n_embd);
+        for (int k = lane; k < n_embd4; k += WARP_SIZE) {
+            cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(s_rows + warp*(IK_R2_MAX_EMBD/4) + k), row + k);
+        }
+        cp_async_commit_group();
+    }
+
+    // ===== the Gram matrix of the states and their dots with the query: block reduction =====
+    {
+        float acc[NP];
+        int n = 0;
+#pragma unroll
+        for (int i = 0; i < NS; ++i) {
+#pragma unroll
+            for (int k = i; k < NS; ++k) {
+                float v = 0.0f;
+#pragma unroll
+                for (int j = 0; j < C4; ++j) {
+                    v += x[i][j].x*x[k][j].x + x[i][j].y*x[k][j].y + x[i][j].z*x[k][j].z + x[i][j].w*x[k][j].w;
+                }
+                acc[n++] = v;
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < NS; ++i) {
+            float v = 0.0f;
+#pragma unroll
+            for (int j = 0; j < C4; ++j) {
+                v += x[i][j].x*q[j].x + x[i][j].y*q[j].y + x[i][j].z*q[j].z + x[i][j].w*q[j].w;
+            }
+            acc[NG + i] = v;
+        }
+        IK_RDBG_T(7); // the loads landed (the products need them)
+#pragma unroll
+        for (int i = 0; i < NP; ++i) {
+            acc[i] = warp_reduce_sum(acc[i]);
+        }
+        IK_RDBG_T(8); // reduced
+        if (lane < NP) {
+            float v = 0.0f;
+#pragma unroll
+            for (int i = 0; i < NP; ++i) {
+                if (i == lane) {
+                    v = acc[i];
+                }
+            }
+            s_red[warp][lane] = v;
+        }
+    }
+    __syncthreads();
+    if (tid < NP) {
+        float v = 0.0f;
+#pragma unroll
+        for (int w = 0; w < IK_R2_WARPS; ++w) {
+            v += s_red[w][tid];
+        }
+        s_tot[tid] = v;
+    }
+    __syncthreads();
+    IK_RDBG_T(1);
+    if (warp == 0) {
+        // lane i < NS: state i
+        auto gram = [&](const int i, const int k) -> float {
+            const int lo = min(i, k), hi = max(i, k);
+            return s_tot[lo*NS - lo*(lo - 1)/2 + (hi - lo)];
+        };
+        float r = 1.0f, wgt = 0.0f;
+        if (args.query) {
+            const float ss = lane < NS ? gram(lane, lane) : 0.0f;
+            const float dt = lane < NS ? s_tot[NG + lane] : 0.0f;
+            r = rsqrtf(ss/n_embd + args.eps);
+            float       sc = lane < NS ? dt*r*args.scale : -INFINITY;
+            const float mx = warp_reduce_max(sc);
+            sc = lane < NS ? expf(sc - mx) : 0.0f;
+            const float sum = warp_reduce_sum(sc);
+            wgt = lane < NS ? r*(sc/sum) : 0.0f;
+        } else {
+            wgt = lane == 0 ? 1.0f : 0.0f;
+        }
+        // |y|^2 = sum_ik w_i w_k G_ik
+        float ssy = 0.0f;
+#pragma unroll
+        for (int k = 0; k < NS; ++k) {
+            const float wk = __shfl_sync(0xffffffff, wgt, k);
+            if (lane < NS) {
+                ssy += wgt*wk*gram(lane, k);
+            }
+        }
+        ssy = warp_reduce_sum(ssy);
+        if (lane < NS) {
+            s_w[lane]      = r;                              // the operation order of res_mix_norm: (x*rms)*p
+            s_w[NS + lane] = wgt/(r == 0.0f ? 1.0f : r);
+        }
+        if (lane == 0) {
+            s_w[2*NS] = rsqrtf(ssy/n_embd + args.norm_eps);
+        }
+    }
+    __syncthreads();
+    IK_RDBG_T(9); // weights ready
+
+    // ===== the normalized input: shared memory for the logits; the F32 and Q8_1 outputs spread over the blocks
+    //       (block b stores the Q8_1 blocks k/8 with (k/8) % gridDim.x == b) =====
+    {
+        const float factor = s_w[2*NS];
+#pragma unroll
+        for (int j = 0; j < C4; ++j) {
+            const int  k  = tid + j*IK_R2_BLOCK;
+            const bool ok = k < n_embd4;
+            float4 y = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+#pragma unroll
+            for (int i = 0; i < NS; ++i) {
+                const float f0 = s_w[i], f1 = s_w[NS + i];
+                y.x += (x[i][j].x*f0)*f1;
+                y.y += (x[i][j].y*f0)*f1;
+                y.z += (x[i][j].z*f0)*f1;
+                y.w += (x[i][j].w*f0)*f1;
+            }
+            const float4 v = make_float4(factor*y.x*nw[j].x, factor*y.y*nw[j].y, factor*y.z*nw[j].z, factor*y.w*nw[j].w);
+            const bool mine = ok && (k/8) % gridDim.x == blockIdx.x;
+            if (ok) {
+                s_x[k] = v;
+            }
+            if (mine) {
+                ((float4 *) args.dst)[k] = v;
+            }
+            if (args.xq) {
+                ik_store_q8_1_vec4(v, args.xq, k, mine); // 8 consecutive lanes hold one Q8_1 block
+            }
+        }
+    }
+    IK_RDBG_T(10); // y stored
+    cp_async_wait_all();
+    __syncthreads();
+    IK_RDBG_T(2);
+
+    // ===== the logit of this warp's expert =====
+    {
+        const float4 * row = s_rows + warp*(IK_R2_MAX_EMBD/4);
+        float dot = 0.0f;
+        for (int k = lane; k < n_embd4; k += WARP_SIZE) {
+            const float4 w = row[k];
+            const float4 v = s_x[k];
+            dot += w.x*v.x + w.y*v.y + w.z*v.z + w.w*v.w;
+        }
+        dot = warp_reduce_sum(dot);
+        if (lane == 0) {
+            args.logits[e0 + warp] = dot;
+        }
+    }
+    IK_RDBG_T(3);
+    __syncthreads();
+    if (tid == 0) {
+        s_last = ik_atomic_add_acq_rel(args.counter, 1) == (int) gridDim.x - 1; // releases the logits, acquires the others'
+    }
+    __syncthreads();
+    IK_RDBG_T(4);
+    if (!s_last) {
+        return;
+    }
+    if (args.dbg_times && tid == 0) { args.dbg_times[5] = clock64(); }
+
+    // ===== the selection by the last block: the rank of every expert (ties: the smaller id first) =====
+    const int n_expert = args.n_expert;
+    if (tid < n_expert) {
+        const float p = 1.0f/(1.0f + expf(-args.logits[tid]));
+        s_prob[tid] = p;
+        s_sel[tid]  = p + args.probs_b[tid];
+    }
+    if (tid == 0) {
+        s_wsum = 0.0f;
+    }
+    __syncthreads();
+    int rank = n_expert;
+    if (tid < n_expert) {
+        const float mine = s_sel[tid];
+        rank = 0;
+#pragma unroll 16
+        for (int e = 0; e < n_expert; ++e) {
+            const float o = s_sel[e];
+            rank += (o > mine || (o == mine && e < tid)) ? 1 : 0;
+        }
+        if (rank < args.n_used) {
+            args.route[rank] = tid;
+            atomicAdd(&s_wsum, s_prob[tid]);
+        }
+    }
+    __syncthreads();
+    if (rank < args.n_used) {
+        const float w = s_prob[tid]/(s_wsum + args.w_eps)*args.w_scale;
+        args.route[args.n_used + rank] = __float_as_int(w);
+    }
+    if (tid == 0) {
+        *args.counter = 0;
+    }
+    if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); }
+}
+
+template <int NS>
+static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
+    const size_t smem = (size_t) (IK_R2_WARPS + 1)*(IK_R2_MAX_EMBD/4)*sizeof(float4);
+    static bool attr_set[GGML_CUDA_MAX_DEVICES] = { false };
+    if (!attr_set[ctx.device]) {
+        CUDA_CHECK(cudaFuncSetAttribute(inkling_router2_kernel<NS>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem));
+        attr_set[ctx.device] = true;
+    }
+    inkling_router2_kernel<NS><<<a.n_expert/IK_R2_WARPS, IK_R2_BLOCK, smem, ctx.stream()>>>(a);
+}
+
 void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
@@ -2329,7 +2592,7 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     a.w_eps    = ggml_get_op_params_f32(dst, 5);
     GGML_ASSERT(a.n_embd % 4 == 0 && a.n_embd <= IK_ROUTER_MAX_EMBD && a.n_expert % 8 == 0 && a.n_expert <= IK_ROUTER_MAX_EXPERT);
     GGML_ASSERT(a.n_used <= 8 && n_states <= IK_MAX_STATES);
-    GGML_ASSERT(((uintptr_t) a.query) % 16 == 0 && ((uintptr_t) a.norm_w) % 16 == 0 && ((uintptr_t) a.gate_inp) % 16 == 0 && ((uintptr_t) a.dst) % 16 == 0);
+    GGML_ASSERT(((uintptr_t) a.query) % 16 == 0 && ((uintptr_t) a.norm_w) % 16 == 0 && ((uintptr_t) a.gate_inp) % 16 == 0 && ((uintptr_t) a.dst) % 16 == 0 && (a.xq == nullptr || ((uintptr_t) a.xq) % 16 == 0));
 
     ggml_cuda_pool_alloc<float> logits(ctx.pool(), a.n_expert);
     a.logits  = logits.get();
@@ -2346,13 +2609,24 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
         static long long * t_static = t;
         atexit([] {
             cudaDeviceSynchronize();
-            fprintf(stderr, "inkling_router phases of block 0 (cycles from T0): pass1 reduced %lld, input ready %lld, logits %lld, arrival %lld; last block: selection %lld cycles\n",
-                t_static[1]-t_static[0], t_static[2]-t_static[0], t_static[3]-t_static[0], t_static[4]-t_static[0], t_static[6]-t_static[5]);
+            fprintf(stderr, "inkling_router phases of block 0 (cycles from T0): loads landed %lld, warp-reduced %lld, block-reduced %lld, weights %lld, y stored %lld, rows ready %lld, logits %lld, arrival %lld; last block: selection %lld cycles\n",
+                t_static[7]-t_static[0], t_static[8]-t_static[0], t_static[1]-t_static[0], t_static[9]-t_static[0], t_static[10]-t_static[0], t_static[2]-t_static[0], t_static[3]-t_static[0], t_static[4]-t_static[0], t_static[6]-t_static[5]);
         });
         return t;
     }();
     a.dbg_times = dbg_times;
 
+    static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
+    if (!v1 && a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES) {
+        switch (n_states) {
+            case 1:  inkling_router2_launch<1>(ctx, a); break;
+            case 2:  inkling_router2_launch<2>(ctx, a); break;
+            case 3:  inkling_router2_launch<3>(ctx, a); break;
+            case 4:  inkling_router2_launch<4>(ctx, a); break;
+            default: inkling_router2_launch<5>(ctx, a); break;
+        }
+        return;
+    }
     static const int W = getenv("IK_ROUTER_WARPS") ? atoi(getenv("IK_ROUTER_WARPS")) : 8;
     switch (W) {
         case 2:  inkling_router_kernel<2><<<a.n_expert/2, 2*WARP_SIZE, 0, ctx.stream()>>>(a); break;
