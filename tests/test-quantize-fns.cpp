@@ -358,6 +358,9 @@ static int test_vec_dot_q(bool verbose) {
                 printf("%5s reference implementation error: %s (%f)\n", ggml_type_name(type), RESULT_STR[failed], reference_error);
             }
 
+            if (!qfns_cpu->vec_dot) {
+                continue; // activation-only formats still run the conversion checks above
+            }
             const float vec_dot_error = dot_product_error(qfns_cpu, type, test_size, test_data.data(), test_data2.data(), nullptr, nullptr, 1);
             const float max_allowed_error = type == GGML_TYPE_Q2_K || type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS ||
                 type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ2_S
@@ -426,6 +429,25 @@ static int test_quantize_imatrix_degenerate(bool verbose) {
     return num_failed;
 }
 
+// Exact Q2_0 codebook rows with opposite signs, two scales, and a zero row.
+static int test_q2_0_imatrix_codebook() {
+    const ggml_type type = GGML_TYPE_Q2_0;
+    const int64_t block = ggml_blck_size(type);
+    const int64_t width = 2*block;
+    std::vector<float> input(3*width), output(3*width), importance(width);
+    for (int64_t i = 0; i < width; ++i) {
+        importance[i] = 1 + i%7;
+        input[i] = (i%4 - 1)*(i < block ? 0.5f : 0.125f);
+        input[width+i] = -input[i];
+    }
+    std::vector<uint8_t> packed(3*ggml_row_size(type, width));
+    const size_t bytes = ggml_quantize_chunk(type, input.data(), packed.data(), 0, 3, width, importance.data());
+    ggml_get_type_traits(type)->to_float(packed.data(), output.data(), input.size());
+    const bool failed = bytes != packed.size() || input != output;
+    printf("q2_0 calibrated codebook: %s\n", RESULT_STR[failed]);
+    return failed;
+}
+
 int main(int argc, char * argv[]) {
     bool verbose = false;
 
@@ -449,6 +471,7 @@ int main(int argc, char * argv[]) {
     num_failed += test_f8_e4m3(verbose);
     num_failed += test_vec_dot_q(verbose);
     num_failed += test_quantize_imatrix_degenerate(verbose);
+    num_failed += test_q2_0_imatrix_codebook();
 
     if (num_failed || verbose) {
         printf("%d tests failed\n", num_failed);

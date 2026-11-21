@@ -2141,12 +2141,29 @@ size_t quantize_q2_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, 
         quantize_row_q2_0_ref(src, dst, (int64_t)nrow*n_per_row);
         return nrow * ggml_row_size(GGML_TYPE_Q2_0, n_per_row);
     }
-    size_t row_size = ggml_row_size(GGML_TYPE_Q2_0, n_per_row);
-    char * qrow = (char *)dst;
+    const size_t row_size = ggml_row_size(GGML_TYPE_Q2_0, n_per_row);
+    block_q2_0 * blocks = (block_q2_0 *) dst;
     for (int64_t row = 0; row < nrow; ++row) {
-        quantize_row_q2_0_ref(src, (block_q2_0*)qrow, n_per_row);
+        float sum_x2 = 0;
+        for (int64_t j = 0; j < n_per_row; ++j) {
+            sum_x2 += src[j]*src[j];
+        }
+        const float sigma2 = sum_x2/n_per_row;
+        for (int64_t i = 0; i < n_per_row; i += QK2_0, ++blocks) {
+            float weights[QK2_0];
+            int8_t levels[QK2_0];
+            for (int j = 0; j < QK2_0; ++j) {
+                weights[j] = quant_weights[i+j]*sqrtf(sigma2 + src[i+j]*src[i+j]);
+            }
+            const float scale = make_qx_quants(QK2_0, 2, src+i, levels, 1, weights);
+            // The fitter reconstructs scale*(level-2), Q2_0 reconstructs d*(code-1).
+            blocks->d = GGML_FP32_TO_FP16(-scale);
+            for (int j = 0; j < QK2_0; j += 4) {
+                blocks->qs[j/4] = (3-levels[j]) | ((3-levels[j+1]) << 2) |
+                        ((3-levels[j+2]) << 4) | ((3-levels[j+3]) << 6);
+            }
+        }
         src += n_per_row;
-        qrow += row_size;
     }
     return nrow * row_size;
 }
