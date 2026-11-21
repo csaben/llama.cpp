@@ -129,6 +129,7 @@ void ggml_compute_forward_inkling_attn(const struct ggml_compute_params * params
 void ggml_compute_forward_inkling_moe_up(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_inkling_moe_down(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_inkling_moe_sum_conv(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_inkling_router(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 #ifdef __cplusplus
 }
 #endif

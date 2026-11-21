@@ -13465,6 +13465,125 @@ void ggml_compute_forward_inkling_moe_sum_conv(const ggml_compute_params * param
     }
 }
 
+// ggml_compute_forward_inkling_router
+
+void ggml_compute_forward_inkling_router(const ggml_compute_params * params, ggml_tensor * dst) {
+    const int n_states = ggml_get_op_params_i32(dst, 6);
+    const ggml_tensor * query    = dst->src[0];
+    const ggml_tensor * norm_w   = dst->src[1 + n_states];
+    const ggml_tensor * gate_inp = dst->src[2 + n_states];
+    const ggml_tensor * probs_b  = dst->src[3 + n_states];
+    ggml_tensor       * route    = dst->src[4 + n_states];
+
+    const float eps      = ggml_get_op_params_f32(dst, 0);
+    const float scale    = ggml_get_op_params_f32(dst, 1);
+    const float norm_eps = ggml_get_op_params_f32(dst, 2);
+    const int   n_used   = ggml_get_op_params_i32(dst, 3);
+    const float w_scale  = ggml_get_op_params_f32(dst, 4);
+    const float w_eps    = ggml_get_op_params_f32(dst, 5);
+
+    const int64_t n_embd   = dst->ne[0];
+    const int64_t n_expert = gate_inp->ne[1];
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    // the mixed, normalized input (thread 0), then the router rows across the threads
+    float * y = (float *) dst->data;
+    if (ith == 0) {
+        float rms[GGML_MAX_SRC], sc[GGML_MAX_SRC];
+        if (query) {
+            const float * q = (const float *) query->data;
+            for (int i = 0; i < n_states; ++i) {
+                const float * x = (const float *) dst->src[1 + i]->data;
+                ggml_float sum = 0.0;
+                for (int64_t k = 0; k < n_embd; ++k) {
+                    sum += (ggml_float) (x[k]*x[k]);
+                }
+                rms[i] = 1.0f/sqrtf((float) (sum/n_embd) + eps);
+                float dot = 0.0f;
+                for (int64_t k = 0; k < n_embd; ++k) {
+                    dot += (x[k]*rms[i])*q[k];
+                }
+                sc[i] = dot*scale;
+            }
+            float mx = -INFINITY;
+            for (int i = 0; i < n_states; ++i) {
+                mx = MAX(mx, sc[i]);
+            }
+            float sum = 0.0f;
+            for (int i = 0; i < n_states; ++i) {
+                sc[i] = expf(sc[i] - mx);
+                sum += sc[i];
+            }
+            for (int64_t k = 0; k < n_embd; ++k) {
+                y[k] = 0.0f;
+            }
+            for (int i = 0; i < n_states; ++i) {
+                const float * x = (const float *) dst->src[1 + i]->data;
+                for (int64_t k = 0; k < n_embd; ++k) {
+                    y[k] += (x[k]*rms[i])*(sc[i]/sum);
+                }
+            }
+        } else {
+            memcpy(y, dst->src[1]->data, n_embd*sizeof(float));
+        }
+        const float * nw = (const float *) norm_w->data;
+        ggml_float ss = 0.0;
+        for (int64_t k = 0; k < n_embd; ++k) {
+            ss += (ggml_float) (y[k]*y[k]);
+        }
+        const float r = 1.0f/sqrtf((float) (ss/n_embd) + norm_eps);
+        for (int64_t k = 0; k < n_embd; ++k) {
+            y[k] = y[k]*r*nw[k];
+        }
+    }
+    ggml_barrier(params->threadpool);
+
+    // the logits, as sigmoid probabilities
+    float * probs = (float *) params->wdata; // n_expert floats (wsize is at least that: see ggml_graph_plan)
+    GGML_ASSERT(params->wsize >= (size_t) n_expert*sizeof(float));
+    for (int64_t e = ith; e < n_expert; e += nth) {
+        const float * w = (const float *) gate_inp->data + e*n_embd;
+        float logit = 0.0f;
+        for (int64_t k = 0; k < n_embd; ++k) {
+            logit += w[k]*y[k];
+        }
+        probs[e] = 1.0f/(1.0f + expf(-logit));
+    }
+    ggml_barrier(params->threadpool);
+
+    if (ith == 0) {
+        // the n_used largest selection scores (probs + bias), ties to the smaller index; the weights are the probs
+        int32_t * ids = (int32_t *) route->data;
+        float   * wts = (float *) route->data + n_used;
+        std::vector<char> taken(n_expert, 0);
+        float wsum = 0.0f;
+        for (int k = 0; k < n_used; ++k) {
+            int   best = -1;
+            float best_s = -INFINITY;
+            for (int64_t e = 0; e < n_expert; ++e) {
+                if (taken[e]) {
+                    continue;
+                }
+                const float sel = probs[e] + (probs_b ? ((const float *) probs_b->data)[e] : 0.0f);
+                if (sel > best_s) {
+                    best_s = sel;
+                    best   = e;
+                }
+            }
+            taken[best] = 1;
+            ids[k] = best;
+            wts[k] = probs[best];
+            wsum  += probs[best];
+        }
+        const float inv = 1.0f/(wsum + w_eps);
+        for (int k = 0; k < n_used; ++k) {
+            wts[k] = wts[k]*inv*w_scale;
+        }
+    }
+}
+
 // ggml_compute_forward_moe_sum
 
 void ggml_compute_forward_moe_sum(const ggml_compute_params * params, ggml_tensor * dst) {

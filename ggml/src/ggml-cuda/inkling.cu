@@ -1178,7 +1178,6 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
     __shared__ float s_v[HD];
     __shared__ float s_r[IK_ATTN_GQA_MAX][32];
     __shared__ float s_sink[IK_ATTN_GQA_MAX];
-    __shared__ float s_tbl[IK_ATTN_GQA_MAX*IK_ATTN_MAX_EXTENT];
     __shared__ float s_red[IK_ATTN_WARPS];
     __shared__ float s_m[IK_ATTN_GQA_MAX][IK_ATTN_WARPS];
     __shared__ float s_l[IK_ATTN_GQA_MAX][IK_ATTN_WARPS];
@@ -1196,11 +1195,10 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
 
     const float * pr0 = args.proj; // column 0: Q, R, sink, gate
     constexpr int G = IK_ATTN_GQA_MAX;
+    constexpr int U = 8; // cells per warp step (pairs of cells share a table-row load: lanes 0-15 / 16-31)
     IK_DBG_T(0);
-    constexpr int U = 8; // cells per warp step
 
-    // ===== round 1 of loads: everything that depends on no other load =====
-    // the K (threads 0..127) / V (threads 128..255) channel of this thread
+    // ===== round 1 of loads: the conv inputs, Q, gate, R, sinks, the first tile's mask and distances =====
     const int     which  = tid/HD;
     const int     ci     = tid % HD;
     const int64_t ch     = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
@@ -1219,7 +1217,6 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             taps[j] = args.has_taps && j < n_conv ? pr[offt + (int64_t) g*n_conv + j] : 0.0f;
         }
     }
-    // Q, its clip scale and the gate (threads 0..127), R and its clip scale (warp 4), the sinks
     float qv[G], gate_v[G], rv[G], sink_v[G];
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
@@ -1237,55 +1234,24 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             }
         }
     }
-    // the bias table rows of the 4 distances of this thread (n_extent <= 4*IK_ATTN_BLOCK)
-    float tb[4][16];
-    {
-        const float * table = args.consts + args.c_table;
-        const bool vec = args.n_rel == 16 && ((uintptr_t) table) % 16 == 0;
-#pragma unroll
-        for (int k = 0; k < 4; ++k) {
-            const int d = min(tid + k*IK_ATTN_BLOCK, args.n_extent - 1);
-            if (vec) {
-                const float4 * t4 = (const float4 *) (table + (int64_t) d*16);
-                const float4 t0 = t4[0], t1 = t4[1], t2 = t4[2], t3 = t4[3];
-                tb[k][0] = t0.x; tb[k][1] = t0.y; tb[k][2]  = t0.z; tb[k][3]  = t0.w; tb[k][4]  = t1.x; tb[k][5]  = t1.y; tb[k][6]  = t1.z; tb[k][7]  = t1.w;
-                tb[k][8] = t2.x; tb[k][9] = t2.y; tb[k][10] = t2.z; tb[k][11] = t2.w; tb[k][12] = t3.x; tb[k][13] = t3.y; tb[k][14] = t3.z; tb[k][15] = t3.w;
-            } else {
-#pragma unroll
-                for (int j = 0; j < 16; ++j) {
-                    tb[k][j] = j < args.n_rel ? table[(int64_t) d*args.n_rel + j] : 0.0f;
-                }
-            }
-        }
-    }
-    // the cells of this warp: [w0, w1), the first tile's mask and distance per lane
     const int kv0 = split*args.kv_per_split;
     const int kv1 = min(args.n_kv, kv0 + args.kv_per_split);
     const int per_warp = (kv1 - kv0 + IK_ATTN_WARPS - 1)/IK_ATTN_WARPS;
     const int w0 = kv0 + warp*per_warp;
     const int w1 = min(kv1, w0 + per_warp);
+    const bool has_cells = w0 < w1;
     auto load_tile = [&](const int tile, float & mv_l, int & d_l) {
         const int kvl = min(tile + lane, args.n_kv - 1);
         mv_l = tile + lane < w1 ? (args.mask_f16 ? __half2float(((const half *) args.mask)[kvl]) : ((const float *) args.mask)[kvl]) : -INFINITY;
         d_l  = args.rel_pos[kvl];
     };
-    auto load_rows = [&](const int tile, const int u0, float (*kvals)[4], float (*vvals)[4]) {
-#pragma unroll
-        for (int u = 0; u < U; ++u) {
-            const int kv = min(tile + u0 + u, args.n_kv - 1);
-            ik_attn_load4<cache_t>(args.k_cache + (int64_t) kv*args.kc_nb2 + g*args.kc_nb1, lane, kvals[u]);
-            ik_attn_load4<cache_t>(args.v_cache + (int64_t) kv*args.vc_nb2 + g*args.vc_nb1, lane, vvals[u]);
-        }
-    };
-    float mv_l0 = -INFINITY;
-    int   d_l0  = 0;
-    float kv0_k[U][4], kv0_v[U][4];
-    const bool has_cells = w0 < w1;
+    float mv_l = -INFINITY;
+    int   d_l  = 0;
     if (has_cells) {
-        load_tile(w0, mv_l0, d_l0);
+        load_tile(w0, mv_l, d_l);
     }
 
-    // ===== round 2: the past inputs (after read_cell) and the K/V rows of the first step =====
+    // ===== round 2: the past inputs (after read_cell) =====
     float x[8];
     {
         const float * past = args.state + (int64_t) read_cell*args.state_s1 + ch*(n_conv - 1);
@@ -1294,14 +1260,11 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             x[j] = j < n_conv - 1 ? past[j] : (j == n_conv - 1 ? cur_in : 0.0f);
         }
     }
-    if (has_cells) {
-        load_rows(w0, 0, kv0_k, kv0_v);
-    }
+    IK_DBG_T(1);
 
-    // ===== the K/V convolution, state, post-normalization, cache store =====
+    // ===== the K/V convolution, state, post-normalization, cache store; the clipped Q and R =====
     float x_new[7];
     {
-        IK_DBG_T(1); // the loads are issued (not yet consumed)
         const float scale = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
         float out = 0.0f;
 #pragma unroll
@@ -1340,7 +1303,7 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             }
         }
         __syncthreads();
-        IK_DBG_T(2); // conv + Q/R reductions done
+        IK_DBG_T(2);
         ss = s_red[4*which + 0] + s_red[4*which + 1] + s_red[4*which + 2] + s_red[4*which + 3];
         float factor;
         if (which == 0) {
@@ -1377,7 +1340,6 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
         }
         (which ? s_v : s_k)[ci] = yq;
 
-        // the clipped Q and R, the sinks
 #pragma unroll
         for (int hh = 0; hh < G; ++hh) {
             if (hh < gqa) {
@@ -1398,111 +1360,150 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
         }
     }
     __syncthreads();
-
-    // ===== the relative bias of every distance for the heads of the group =====
     IK_DBG_T(3);
-#pragma unroll
-    for (int k = 0; k < 4; ++k) {
-        const int d = tid + k*IK_ATTN_BLOCK;
-        if (d < args.n_extent) {
-#pragma unroll
-            for (int hh = 0; hh < G; ++hh) {
-                if (hh < gqa) {
-                    float bsum = 0.0f;
-#pragma unroll
-                    for (int j = 0; j < 16; ++j) {
-                        if (j < args.n_rel) {
-                            bsum += tb[k][j]*s_r[hh][j];
-                        }
-                    }
-                    s_tbl[hh*args.n_extent + d] = bsum;
-                }
-            }
-        }
-    }
-    __syncthreads();
 
     // ===== the attention over the cells of this warp (online softmax per head, a lane holds 4 dims) =====
-    IK_DBG_T(4);
-    float qreg[G][4], acc[G][4], m[G], l[G];
+    // the relative bias of a cell is table[d] . R: lane l holds R[l % 16] (the table rows of two cells are loaded by the
+    // two half-warps, 16 floats each, and reduced over the half-warps)
+    const float * table = args.consts + args.c_table;
+    float qreg[G][4], rreg[G], acc[G][4], m[G], l[G];
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
         m[hh] = -INFINITY;
         l[hh] = 0.0f;
+        rreg[hh] = hh < gqa && (lane % 16) < args.n_rel ? s_r[hh][lane % 16] : 0.0f;
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
             qreg[hh][e] = hh < gqa ? s_q[hh][4*lane + e] : 0.0f;
             acc[hh][e]  = 0.0f;
         }
     }
+    const float sinks[G] = { s_sink[0], s_sink[1], s_sink[2], s_sink[3] };
 
-    auto process_step = [&](const int tile, const int u0, const int n_tile, const float mv_l, const int d_l, float (*kvals)[4], float (*vvals)[4]) {
-        float mv[U];
-        int   d[U];
+    if (has_cells && !(args.dbg_skip & 2)) {
+        int n_tile = min(WARP_SIZE, w1 - w0);
+        for (int tile = w0, u0 = 0; tile < w1; ) {
+            // --- the loads of this step: K/V rows and table rows of U cells (clamped indices, in flight together)
+            //     the table row of a cell is loaded by both half-warps (lane l: entry l % 16): its contribution to the
+            //     score is folded into the dot-product partial sums (with a factor 1/2), so one reduction gives dot + bias
+            float kvals[U][4], vvals[U][4], trow[U];
+            int   d[U];
 #pragma unroll
-        for (int u = 0; u < U; ++u) {
-            const int kv = tile + u0 + u;
-            mv[u] = u0 + u < n_tile ? __shfl_sync(0xffffffff, mv_l, u0 + u) : -INFINITY;
-            d[u]  = __shfl_sync(0xffffffff, d_l, min(u0 + u, WARP_SIZE - 1));
-            if (kv == kv_idx) {
+            for (int u = 0; u < U; ++u) {
+                d[u] = __shfl_sync(0xffffffff, d_l, min(u0 + u, WARP_SIZE - 1));
+            }
+            if (!(args.dbg_skip & 8)) {
 #pragma unroll
-                for (int e = 0; e < 4; ++e) {
-                    kvals[u][e] = s_k[4*lane + e];
-                    vvals[u][e] = s_v[4*lane + e];
+                for (int u = 0; u < U; ++u) {
+                    const int kv = min(tile + u0 + u, args.n_kv - 1);
+                    ik_attn_load4<cache_t>(args.k_cache + (int64_t) kv*args.kc_nb2 + g*args.kc_nb1, lane, kvals[u]);
+                    ik_attn_load4<cache_t>(args.v_cache + (int64_t) kv*args.vc_nb2 + g*args.vc_nb1, lane, vvals[u]);
+                }
+            } else {
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+#pragma unroll
+                    for (int e = 0; e < 4; ++e) {
+                        kvals[u][e] = s_k[4*lane + e];
+                        vvals[u][e] = s_v[4*lane + e];
+                    }
                 }
             }
-        }
 #pragma unroll
-        for (int u = 0; u < U; ++u) {
-            if (mv[u] == -INFINITY) {
-                continue;
+            for (int u = 0; u < U; ++u) {
+                const int dc = min(max(d[u], 0), args.n_extent - 1);
+                trow[u] = table[(int64_t) dc*args.n_rel + min(lane % 16, args.n_rel - 1)];
+                trow[u] = d[u] >= 0 && d[u] < args.n_extent && !(args.dbg_skip & 1) ? 0.5f*trow[u] : 0.0f;
+            }
+            // --- the scores: kq_scale*(q . k) + bias, reduced over the warp for the 4 (padded) heads with a transposed
+            //     butterfly (6 shuffles), then each head's score broadcast from its lane group (lanes 8*hh..8*hh+7)
+            float sc[G][U];
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                const int kv = tile + u0 + u;
+                if (kv == kv_idx) {
+#pragma unroll
+                    for (int e = 0; e < 4; ++e) {
+                        kvals[u][e] = s_k[4*lane + e];
+                        vvals[u][e] = s_v[4*lane + e];
+                    }
+                }
+                float v[G];
+#pragma unroll
+                for (int hh = 0; hh < G; ++hh) {
+                    v[hh] = hh < gqa ? args.kq_scale*(qreg[hh][0]*kvals[u][0] + qreg[hh][1]*kvals[u][1] + qreg[hh][2]*kvals[u][2] + qreg[hh][3]*kvals[u][3])
+                                     + trow[u]*rreg[hh] : 0.0f;
+                }
+                const bool hi16 = lane >= 16;
+                float a0 = hi16 ? v[2] : v[0], a1 = hi16 ? v[3] : v[1];
+                const float b0 = hi16 ? v[0] : v[2], b1 = hi16 ? v[1] : v[3];
+                a0 += __shfl_xor_sync(0xffffffff, b0, 16);
+                a1 += __shfl_xor_sync(0xffffffff, b1, 16);
+                const bool hi8 = (lane & 8) != 0;
+                float c = hi8 ? a1 : a0;
+                c += __shfl_xor_sync(0xffffffff, hi8 ? a0 : a1, 8);
+                c += __shfl_xor_sync(0xffffffff, c, 4);
+                c += __shfl_xor_sync(0xffffffff, c, 2);
+                c += __shfl_xor_sync(0xffffffff, c, 1);
+                // lanes 8*hh..8*hh+7 hold the score of head hh
+#pragma unroll
+                for (int hh = 0; hh < G; ++hh) {
+                    if (hh < gqa) {
+                        sc[hh][u] = __shfl_sync(0xffffffff, c, 8*hh);
+                    }
+                }
+            }
+            // --- the softmax update of the step: the masks, the step maximum per head, then the U cells at once
+            float mv[U];
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                mv[u] = u0 + u < n_tile ? __shfl_sync(0xffffffff, mv_l, u0 + u) : -INFINITY;
             }
 #pragma unroll
             for (int hh = 0; hh < G; ++hh) {
                 if (hh < gqa) {
-                    float dot = qreg[hh][0]*kvals[u][0] + qreg[hh][1]*kvals[u][1] + qreg[hh][2]*kvals[u][2] + qreg[hh][3]*kvals[u][3];
-                    dot = warp_reduce_sum(dot);
-                    const float bias  = d[u] >= 0 && d[u] < args.n_extent ? s_tbl[hh*args.n_extent + d[u]] : 0.0f;
-                    const float sc    = args.kq_scale*dot + bias - s_sink[hh] + mv[u];
-                    const float m_new = fmaxf(m[hh], sc);
-                    const float corr  = expf(m[hh] - m_new);
-                    const float pk    = expf(sc - m_new);
-                    l[hh] = l[hh]*corr + pk;
+                    float m_new = m[hh];
+#pragma unroll
+                    for (int u = 0; u < U; ++u) {
+                        sc[hh][u] = mv[u] == -INFINITY ? -INFINITY : sc[hh][u] - sinks[hh] + mv[u];
+                        m_new = fmaxf(m_new, sc[hh][u]);
+                    }
+                    if (m_new == -INFINITY) {
+                        continue; // no cell of this step
+                    }
+                    const float corr = expf(m[hh] - m_new);
+                    l[hh] *= corr;
 #pragma unroll
                     for (int e = 0; e < 4; ++e) {
-                        acc[hh][e] = acc[hh][e]*corr + pk*vvals[u][e];
+                        acc[hh][e] *= corr;
+                    }
+#pragma unroll
+                    for (int u = 0; u < U; ++u) {
+                        const float pk = sc[hh][u] == -INFINITY ? 0.0f : expf(sc[hh][u] - m_new);
+                        l[hh] += pk;
+#pragma unroll
+                        for (int e = 0; e < 4; ++e) {
+                            acc[hh][e] += pk*vvals[u][e];
+                        }
                     }
                     m[hh] = m_new;
                 }
             }
-        }
-    };
-
-    if (has_cells && !(args.dbg_skip & 2)) {
-        // the first step with the preloaded rows, then the rest
-        float mv_l = mv_l0;
-        int   d_l  = d_l0;
-        int   n_tile = min(WARP_SIZE, w1 - w0);
-        process_step(w0, 0, n_tile, mv_l, d_l, kv0_k, kv0_v);
-        for (int tile = w0, u0 = U; tile < w1; ) {
+            // --- next step / tile
+            u0 += U;
             if (u0 >= n_tile) {
                 tile += WARP_SIZE;
                 u0 = 0;
-                if (tile >= w1) {
-                    break;
+                if (tile < w1) {
+                    load_tile(tile, mv_l, d_l);
+                    n_tile = min(WARP_SIZE, w1 - tile);
                 }
-                load_tile(tile, mv_l, d_l);
-                n_tile = min(WARP_SIZE, w1 - tile);
             }
-            float kvals[U][4], vvals[U][4];
-            load_rows(tile, u0, kvals, vvals);
-            process_step(tile, u0, n_tile, mv_l, d_l, kvals, vvals);
-            u0 += U;
         }
     }
+    IK_DBG_T(4);
 
     // ===== combine the warps =====
-    IK_DBG_T(5);
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
         if (hh < gqa) {
@@ -1517,6 +1518,7 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
         }
     }
     __syncthreads();
+    IK_DBG_T(5);
 
     // threads 0..127: dim i of every head; M, L of the split (M = -inf: no cell)
     float M[G], L[G], A[G];
@@ -1566,7 +1568,6 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             return;
         }
         __threadfence();
-        if (args.dbg_times && tid == 0 && blockIdx.x == 0) { args.dbg_times[7] = clock64(); } // the last block of head 0 starts merging
         if (tid < HD) {
 #pragma unroll
             for (int hh = 0; hh < G; ++hh) {
@@ -1611,7 +1612,6 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
         if (tid == 0) {
             args.counters[g] = 0;
         }
-        if (args.dbg_times && tid == 0 && blockIdx.x == 0) { args.dbg_times[8] = clock64(); } // merged
     }
 
     // ===== the new recurrent state of the K and V channels (every block has read the old state by now) =====
@@ -1643,7 +1643,7 @@ static __global__ void __launch_bounds__(IK_ATTN_BLOCK) inkling_attn_kernel(cons
             }
         }
     }
-    if (args.dbg_times && tid == 0 && blockIdx.x == 0) { args.dbg_times[9] = clock64(); } // the end of the writing block of head 0
+    IK_DBG_T(7);
 }
 
 void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -1707,7 +1707,7 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     a.n_kv       = k_cache->ne[2];
 
     // the cells split over blocks: about 64 cells per block, at most 64 splits
-    static const int cells_per_split = getenv("IK_ATTN_CELLS_PER_SPLIT") ? atoi(getenv("IK_ATTN_CELLS_PER_SPLIT")) : 64;
+    static const int cells_per_split = getenv("IK_ATTN_CELLS_PER_SPLIT") ? atoi(getenv("IK_ATTN_CELLS_PER_SPLIT")) : 32;
     static const int dbg_skip        = getenv("IK_ATTN_SKIP") ? atoi(getenv("IK_ATTN_SKIP")) : 0;
     a.dbg_skip     = dbg_skip;
     static long long * dbg_times = [] () -> long long * {
@@ -1720,8 +1720,8 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         static long long * t_static = t;
         atexit([] {
             cudaDeviceSynchronize();
-            fprintf(stderr, "inkling_attn phases (cycles from T0): loads issued %lld, conv+QR reduced %lld, QR done %lld, table done %lld, loop done %lld, warps combined %lld, merge start %lld, merge done %lld, end %lld\n",
-                t_static[1]-t_static[0], t_static[2]-t_static[0], t_static[3]-t_static[0], t_static[4]-t_static[0], t_static[5]-t_static[0], t_static[6]-t_static[0], t_static[7]-t_static[0], t_static[8]-t_static[0], t_static[9]-t_static[0]);
+            fprintf(stderr, "inkling_attn phases of block (0,0) (cycles from T0): loads issued %lld, reductions done %lld, prologue done %lld, loop done %lld, warps combined %lld, arrival counted %lld, end %lld\n",
+                t_static[1]-t_static[0], t_static[2]-t_static[0], t_static[3]-t_static[0], t_static[4]-t_static[0], t_static[5]-t_static[0], t_static[6]-t_static[0], t_static[7]-t_static[0]);
         });
         return t;
     }();

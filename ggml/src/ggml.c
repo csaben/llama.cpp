@@ -1129,9 +1129,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "INKLING_MOE_UP",
     "INKLING_MOE_DOWN",
     "INKLING_MOE_SUM_CONV",
+    "INKLING_ROUTER",
 };
 
-static_assert(GGML_OP_COUNT == 111, "GGML_OP_COUNT != 111");
+static_assert(GGML_OP_COUNT == 112, "GGML_OP_COUNT != 112");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1256,9 +1257,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "inkling_moe_up(as,x,ids)",
     "inkling_moe_down(as,h,ids)",
     "inkling_moe_sum_conv(a,w)",
+    "inkling_router(q,x...)",
 };
 
-static_assert(GGML_OP_COUNT == 111, "GGML_OP_COUNT != 111");
+static_assert(GGML_OP_COUNT == 112, "GGML_OP_COUNT != 112");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6201,7 +6203,7 @@ struct ggml_tensor * ggml_inkling_moe_sum_conv(
         float                 scale) {
     const int64_t n_embd = a->ne[0];
     GGML_ASSERT(a->type == GGML_TYPE_F32 && a->nb[0] == sizeof(float) && a->ne[2] == 1 && a->ne[3] == 1);
-    GGML_ASSERT(w->type == GGML_TYPE_F32 && w->ne[0] == 1 && w->ne[1] == a->ne[1] && w->ne[2] == 1);
+    GGML_ASSERT((w->type == GGML_TYPE_F32 || w->type == GGML_TYPE_I32) && w->ne[0] == 1 && w->ne[1] == a->ne[1] && w->ne[2] == 1);
     GGML_ASSERT(conv_w->type == GGML_TYPE_F32 && ggml_is_contiguous(conv_w) && conv_w->ne[1] == n_embd && conv_w->ne[0] >= 2 && conv_w->ne[0] <= 8);
     GGML_ASSERT(state->type == GGML_TYPE_F32 && state->nb[0] == sizeof(float));
     GGML_ASSERT(state->ne[0] >= (conv_w->ne[0] - 1)*(chan_offset + n_embd) && write_cell >= 0 && write_cell < state->ne[1]);
@@ -6221,6 +6223,66 @@ struct ggml_tensor * ggml_inkling_moe_sum_conv(
     result->src[3] = state;
     result->src[4] = rs_ids;
     result->src[5] = residual;
+
+    return result;
+}
+
+// ggml_inkling_router
+// op_params: [0] eps, [1] scale, [2] norm_eps, [3] n_used (int), [4] w_scale, [5] w_eps, [6] n_states (int)
+// src: [0] query (optional), [1 .. n_states] states, then norm_w, gate_inp, probs_b (optional), route
+
+struct ggml_tensor * ggml_inkling_router(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * query,
+        struct ggml_tensor ** states,
+        int                   n_states,
+        struct ggml_tensor  * norm_w,
+        struct ggml_tensor  * gate_inp,
+        struct ggml_tensor  * probs_b,
+        struct ggml_tensor  * route,
+        float                 eps,
+        float                 scale,
+        float                 norm_eps,
+        int                   n_used,
+        float                 w_scale,
+        float                 w_eps) {
+    GGML_ASSERT(n_states >= 1 && n_states <= GGML_MAX_SRC - 5);
+    GGML_ASSERT(query != NULL || n_states == 1);
+
+    const int64_t n_embd   = states[0]->ne[0];
+    const int64_t n_expert = gate_inp->ne[1];
+
+    if (query) {
+        GGML_ASSERT(query->type == GGML_TYPE_F32 && ggml_is_contiguous(query) && query->ne[0] == n_embd && query->ne[1] == 1);
+    }
+    for (int i = 0; i < n_states; ++i) {
+        GGML_ASSERT(states[i]->type == GGML_TYPE_F32 && states[i]->ne[0] == n_embd && states[i]->ne[1] == 1 && states[i]->nb[0] == sizeof(float));
+    }
+    GGML_ASSERT(norm_w->type == GGML_TYPE_F32 && ggml_is_contiguous(norm_w) && norm_w->ne[0] == n_embd && ggml_nrows(norm_w) == 1);
+    GGML_ASSERT(gate_inp->type == GGML_TYPE_F32 && ggml_is_contiguous(gate_inp) && gate_inp->ne[0] == n_embd && n_expert % 8 == 0 && n_expert <= 1024);
+    GGML_ASSERT(probs_b == NULL || (probs_b->type == GGML_TYPE_F32 && ggml_is_contiguous(probs_b) && ggml_nelements(probs_b) == n_expert));
+    GGML_ASSERT(route->type == GGML_TYPE_I32 && ggml_is_contiguous(route) && ggml_nelements(route) == 2*n_used);
+    GGML_ASSERT(n_used >= 1 && n_used <= 8 && n_used <= n_expert);
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+
+    ggml_set_op_params_f32(result, 0, eps);
+    ggml_set_op_params_f32(result, 1, scale);
+    ggml_set_op_params_f32(result, 2, norm_eps);
+    ggml_set_op_params_i32(result, 3, n_used);
+    ggml_set_op_params_f32(result, 4, w_scale);
+    ggml_set_op_params_f32(result, 5, w_eps);
+    ggml_set_op_params_i32(result, 6, n_states);
+
+    result->op     = GGML_OP_INKLING_ROUTER;
+    result->src[0] = query;
+    for (int i = 0; i < n_states; ++i) {
+        result->src[1 + i] = states[i];
+    }
+    result->src[1 + n_states] = norm_w;
+    result->src[2 + n_states] = gate_inp;
+    result->src[3 + n_states] = probs_b;
+    result->src[4 + n_states] = route;
 
     return result;
 }

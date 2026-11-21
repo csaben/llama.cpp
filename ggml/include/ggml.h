@@ -444,6 +444,7 @@ extern "C" {
         GGML_OP_INKLING_MOE_UP,
         GGML_OP_INKLING_MOE_DOWN,
         GGML_OP_INKLING_MOE_SUM_CONV,
+        GGML_OP_INKLING_ROUTER,
 
         GGML_OP_COUNT,
     };
@@ -2521,7 +2522,8 @@ extern "C" {
 
     // the weighted expert sum followed by the FFN short convolution + residual of inkling2 for one token:
     //   y = residual + (d + conv([past, d], conv_w))*scale, d[c] = sum_e w[e]*a[c, e]
-    //   a [n_embd, n_expert_used, 1] F32, w [1, n_expert_used, 1] F32, conv_w [n_conv, n_embd] F32,
+    //   a [n_embd, n_expert_used, 1] F32, w [1, n_expert_used, 1] F32 (or I32: the float bits of ggml_inkling_router's
+    //   weights), conv_w [n_conv, n_embd] F32,
     //   state [(n_conv - 1)*n_channels, n_cells] F32 (channels chan_offset.. of cell rs_ids[0] read, cell write_cell written),
     //   rs_ids [1] I32, residual [n_embd, 1] F32 -> [n_embd, 1] F32
     GGML_API struct ggml_tensor * ggml_inkling_moe_sum_conv(
@@ -2535,6 +2537,26 @@ extern "C" {
             int                   write_cell,
             int                   chan_offset,
             float                 scale);
+
+    // the FFN input of inkling2 for one token with its routing: the attention-residual mix (query, states; query == NULL:
+    // no mix) RMS-normalized by norm_w -> result [n_embd, 1] F32; the router logits gate_inp^T x (gate_inp [n_embd, n_expert]
+    // F32), sigmoid, selection of the n_used largest (plus probs_b [n_expert] when given), weights normalized by their sum
+    // (+ w_eps) and scaled by w_scale; route [2*n_used] I32 receives the expert ids (first n_used) and the weights (float bits)
+    GGML_API struct ggml_tensor * ggml_inkling_router(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * query,
+            struct ggml_tensor ** states,
+            int                   n_states,
+            struct ggml_tensor  * norm_w,
+            struct ggml_tensor  * gate_inp,
+            struct ggml_tensor  * probs_b,
+            struct ggml_tensor  * route,
+            float                 eps,
+            float                 scale,
+            float                 norm_eps,
+            int                   n_used,
+            float                 w_scale,
+            float                 w_eps);
 
     // weighted sum over the second dimension: a [n0, n1, n2], w [1, n1, n2] -> [n0, n2] = sum_k a[:, k, t]*w[0, k, t]
     GGML_API struct ggml_tensor * ggml_moe_sum(
