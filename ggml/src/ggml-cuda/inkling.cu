@@ -102,68 +102,91 @@ struct ik_state_ptrs {
 template <int block_size>
 static __global__ void res_mix_f32(const float * __restrict__ query, const ik_state_ptrs st, float * __restrict__ dst,
         const int n_embd, const int n_tok, const int n_states, const int64_t q_nb1, const float eps, const float scale) {
+    constexpr int n_warps = block_size/WARP_SIZE;
+
     const int t  = blockIdx.x;
     const int iq = blockIdx.y;
 
-    __shared__ float red[block_size/WARP_SIZE];
+    const int lane = threadIdx.x % WARP_SIZE;
+    const int wid  = threadIdx.x / WARP_SIZE;
+
+    __shared__ float red[n_warps][2*IK_MAX_STATES];
     __shared__ float s_rms[IK_MAX_STATES];
     __shared__ float s_p[IK_MAX_STATES];
 
     const float * q = (const float *) ((const char *) query + iq*q_nb1);
 
-    float ss[IK_MAX_STATES];
-    float dt[IK_MAX_STATES];
+    // partial sums of squares and of the dot products with the query, over the elements of this thread
+    float acc[2*IK_MAX_STATES];
 #pragma unroll
-    for (int i = 0; i < IK_MAX_STATES; ++i) {
-        ss[i] = 0.0f;
-        dt[i] = 0.0f;
+    for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+        acc[i] = 0.0f;
     }
 
     for (int k = threadIdx.x; k < n_embd; k += block_size) {
         const float qk = q[k];
-        for (int i = 0; i < n_states; ++i) {
-            const float x = ((const float *) ((const char *) st.p[i] + t*st.nb1[i]))[k];
-            ss[i] += x*x;
-            dt[i] += x*qk;
+#pragma unroll
+        for (int i = 0; i < IK_MAX_STATES; ++i) {
+            if (i < n_states) {
+                const float x = ((const float *) ((const char *) st.p[i] + t*st.nb1[i]))[k];
+                acc[2*i + 0] += x*x;
+                acc[2*i + 1] += x*qk;
+            }
         }
     }
 
-    for (int i = 0; i < n_states; ++i) {
-        const float s = ik_block_sum<block_size>(ss[i], red);
-        const float d = ik_block_sum<block_size>(dt[i], red);
-        if (threadIdx.x == 0) {
-            const float r = rsqrtf(s/n_embd + eps);
-            s_rms[i] = r;
-            s_p[i]   = d*r*scale;
+    // one reduction pass for all the partial sums
+#pragma unroll
+    for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+        if (i < 2*n_states) {
+            acc[i] = warp_reduce_sum(acc[i]);
         }
+    }
+    if (lane < 2*n_states) {
+        float v = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+            if (i == lane) {
+                v = acc[i];
+            }
+        }
+        red[wid][lane] = v;
     }
     __syncthreads();
 
-    if (threadIdx.x == 0) {
-        float mx = -INFINITY;
-        for (int i = 0; i < n_states; ++i) {
-            mx = fmaxf(mx, s_p[i]);
+    if (threadIdx.x < WARP_SIZE) {
+        // the scores and the softmax, in the first warp
+        float ss = 0.0f, dt = 0.0f;
+        if (lane < n_states) {
+#pragma unroll
+            for (int w = 0; w < n_warps; ++w) {
+                ss += red[w][2*lane + 0];
+                dt += red[w][2*lane + 1];
+            }
         }
-        float sum = 0.0f;
-        for (int i = 0; i < n_states; ++i) {
-            s_p[i] = expf(s_p[i] - mx);
-            sum += s_p[i];
-        }
-        const float inv = 1.0f/sum;
-        for (int i = 0; i < n_states; ++i) {
-            s_p[i] *= inv;
+        const float r  = rsqrtf(ss/n_embd + eps);
+        float       sc = lane < n_states ? dt*r*scale : -INFINITY;
+        const float mx = warp_reduce_max(sc);
+        sc = lane < n_states ? expf(sc - mx) : 0.0f;
+        const float sum = warp_reduce_sum(sc);
+        if (lane < n_states) {
+            s_rms[lane] = r;
+            s_p[lane]   = sc/sum;
         }
     }
     __syncthreads();
 
     float * y = dst + ((int64_t) iq*n_tok + t)*n_embd;
     for (int k = threadIdx.x; k < n_embd; k += block_size) {
-        float acc = 0.0f;
-        for (int i = 0; i < n_states; ++i) {
-            const float x = ((const float *) ((const char *) st.p[i] + t*st.nb1[i]))[k];
-            acc += (x*s_rms[i])*s_p[i];
+        float acc_y = 0.0f;
+#pragma unroll
+        for (int i = 0; i < IK_MAX_STATES; ++i) {
+            if (i < n_states) {
+                const float x = ((const float *) ((const char *) st.p[i] + t*st.nb1[i]))[k];
+                acc_y += (x*s_rms[i])*s_p[i];
+            }
         }
-        y[k] = acc;
+        y[k] = acc_y;
     }
 }
 
@@ -188,8 +211,13 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int n_q    = dst->ne[2];
 
     const dim3 grid(n_tok, n_q, 1);
-    res_mix_f32<256><<<grid, 256, 0, ctx.stream()>>>((const float *) query->data, st, (float *) dst->data,
-            n_embd, n_tok, n_states, query->nb[1], eps, scale);
+    if (n_embd >= 2048) {
+        res_mix_f32<1024><<<grid, 1024, 0, ctx.stream()>>>((const float *) query->data, st, (float *) dst->data,
+                n_embd, n_tok, n_states, query->nb[1], eps, scale);
+    } else {
+        res_mix_f32<256><<<grid, 256, 0, ctx.stream()>>>((const float *) query->data, st, (float *) dst->data,
+                n_embd, n_tok, n_states, query->nb[1], eps, scale);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -295,7 +323,7 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
 // ---------------------------------------------------------------------------------------------------------------------
 // rel_bias: out[kv, t, h] = sum_r table[r, pos[kv, t]]*r[r, h, t] - sinks[h, t] + mask[kv, t], one block per (head, token)
 
-#define IK_REL_BIAS_BLOCK 256
+#define IK_REL_BIAS_BLOCK 1024
 #define IK_REL_MAX_SMEM_EXTENT 12288
 
 template <typename dst_t, typename mask_t, bool use_smem>
@@ -411,36 +439,54 @@ void ggml_cuda_op_rel_bias(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 template <int block_size>
 static __global__ void loop_ctrl_down_f32(const float * __restrict__ w, const float * __restrict__ a, const float * __restrict__ b,
         float * __restrict__ dst, const int n, const int rank, const int64_t a_nb1, const int64_t b_nb1, const float eps) {
+    constexpr int n_warps = block_size/WARP_SIZE;
+
     const int k = blockIdx.x;
     const int t = blockIdx.y;
 
-    __shared__ float red[block_size/WARP_SIZE];
+    const int lane = threadIdx.x % WARP_SIZE;
+    const int wid  = threadIdx.x / WARP_SIZE;
+
+    __shared__ float red[n_warps][4];
 
     const float * av = (const float *) ((const char *) a + t*a_nb1);
     const float * bv = (const float *) ((const char *) b + t*b_nb1);
     const float * wk = w + (int64_t) k*2*n;
 
-    float sa = 0.0f, sb = 0.0f;
+    // the sums of squares and the raw dot products in one pass: w^T rmsnorm(a) = rsqrt(mean(a^2) + eps) * w^T a
+    float sa = 0.0f, sb = 0.0f, da = 0.0f, db = 0.0f;
     for (int i = threadIdx.x; i < n; i += block_size) {
-        sa += av[i]*av[i];
-        sb += bv[i]*bv[i];
+        const float x = av[i];
+        const float y = bv[i];
+        sa += x*x;
+        sb += y*y;
+        da += wk[i]*x;
+        db += wk[n + i]*y;
     }
-    sa = ik_block_sum<block_size>(sa, red);
-    sb = ik_block_sum<block_size>(sb, red);
-    const float ra = rsqrtf(sa/n + eps);
-    const float rb = rsqrtf(sb/n + eps);
-
-    float sum = 0.0f;
-    for (int i = threadIdx.x; i < n; i += block_size) {
-        sum += wk[i]*(av[i]*ra);
+    sa = warp_reduce_sum(sa);
+    sb = warp_reduce_sum(sb);
+    da = warp_reduce_sum(da);
+    db = warp_reduce_sum(db);
+    if (lane == 0) {
+        red[wid][0] = sa;
+        red[wid][1] = sb;
+        red[wid][2] = da;
+        red[wid][3] = db;
     }
-    for (int i = threadIdx.x; i < n; i += block_size) {
-        sum += wk[n + i]*(bv[i]*rb);
-    }
-    sum = ik_block_sum<block_size>(sum, red);
+    __syncthreads();
 
     if (threadIdx.x == 0) {
-        dst[(int64_t) t*rank + k] = sum;
+        sa = sb = da = db = 0.0f;
+#pragma unroll
+        for (int i = 0; i < n_warps; ++i) {
+            sa += red[i][0];
+            sb += red[i][1];
+            da += red[i][2];
+            db += red[i][3];
+        }
+        const float ra = rsqrtf(sa/n + eps);
+        const float rb = rsqrtf(sb/n + eps);
+        dst[(int64_t) t*rank + k] = da*ra + db*rb;
     }
 }
 
