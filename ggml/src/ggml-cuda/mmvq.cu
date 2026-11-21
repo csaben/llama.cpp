@@ -639,6 +639,11 @@ static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int
                 if (table_id == MMVQ_PARAMETERS_GB10) {
                     return type == GGML_TYPE_IQ2_S || type == GGML_TYPE_IQ3_S ? 2 : 1;
                 }
+                // two rows per block also for Q8_0 / IQ4_NL on the generic (Ampere-class) table: fewer, longer blocks
+                // measured on RTX 3090: 4-11% faster for 1k-9k row matvecs and the 128x8 expert matvecs, 2.5% for a 201k row one
+                if (table_id == MMVQ_PARAMETERS_GENERIC && (type == GGML_TYPE_Q8_0 || type == GGML_TYPE_IQ4_NL)) {
+                    return 2;
+                }
                 return (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_RDNA1) && mmvq_two_rows_ncols1(type) ? 2 : 1;
             case 2:
             case 3:

@@ -1,0 +1,27 @@
+Explain step by step how TCP slow start and congestion avoidance work.
+
+sobes.tech AI
+
+Answer from AI
+
+TCP slow start and congestion avoidance are mechanisms to control the amount of data sent to avoid network overload.
+
+Slow start:
+
+  • At the beginning of the connection, the sender sends a small amount of data (usually one segment).
+  • With each successful acknowledgment, the amount of data sent increases exponentially (doubles).
+  • This allows the network to be gradually loaded and detect congestion.
+
+Congestion avoidance:
+
+  • When the sender reaches a certain threshold (ssthresh), the growth of the amount of data sent becomes linear instead of exponential.
+  • This helps avoid sudden overload of the network.
+
+If a packet loss is detected, the sender reduces the amount of data sent and restarts the slow start.
+
+Example in pseudocode:
+
+```
+if (cwnd < ssthresh) {
+    cwnd += 1; // slow
+

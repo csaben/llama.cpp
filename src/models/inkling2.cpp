@@ -505,7 +505,8 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
 
     const float scale = 1.0f/sqrtf((dynamic ? 2 : 1)*n_conv + 1);
 
-    ggml_tensor * past = ggml_view_3d(ctx0, history, n_conv - 1, n_channels, n_seqs, history->nb[1], history->nb[2], offset*history->nb[1]);
+    // history: [n_conv - 1, channels, n_seqs], or all the cells of the cache when the fused op reads them by rs_ids
+    ggml_tensor * past = ggml_view_3d(ctx0, history, n_conv - 1, n_channels, history->ne[2], history->nb[1], history->nb[2], offset*history->nb[1]);
 
     if (fused) {
         // the fused op convolves [past, cur] and stores the new state itself
@@ -514,8 +515,10 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
         ggml_tensor * state_view = build_conv_state_view(inp, state, n_conv - 1, n_channels, n_seqs, n_seq_tokens,
                 offset*(n_conv - 1)*ggml_element_size(state));
 
-        return ggml_shortconv_res_post(ctx0, past, weight, cur, taps, residual, state_view, scale, post, n_heads_post, post_eps, post_threshold);
+        return ggml_shortconv_res_post(ctx0, past, weight, cur, taps, residual, state_view, rs_ids, scale, post, n_heads_post, post_eps, post_threshold);
     }
+
+    GGML_ASSERT(rs_ids == nullptr);
 
     ggml_tensor * x = ggml_transpose(ctx0, ggml_view_3d(ctx0, cur, n_channels, n_seq_tokens, n_seqs, cur->nb[1], n_seq_tokens*cur->nb[1], 0));
     x = ggml_concat(ctx0, past, x, 0);
@@ -622,8 +625,21 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
     };
 
     ggml_tensor * state   = recr->mctx->get_r_l(il);
-    ggml_tensor * history = build_rs(recr, state, hparams.n_embd_r(), ubatch.n_seqs);
-    history = ggml_reshape_3d(ctx0, history, hparams.n_shortconv_l_cache - 1, hparams.n_sconv_channels, ubatch.n_seqs);
+    ggml_tensor * history = nullptr;
+    rs_ids = nullptr;
+    if (fused && ubatch.n_seq_tokens == 1) {
+        // single-token sequences: the fused convolutions read the cells of the state straight from the cache (by s_copy)
+        // and write the new cells; with more tokens the readers and the writers of a channel differ, so the state is gathered
+        auto get_rows = [&](ggml_context * ctx, ggml_tensor * states, ggml_tensor * ids) {
+            rs_ids = ids;
+            return ggml_view_3d(ctx, states, hparams.n_shortconv_l_cache - 1, hparams.n_sconv_channels, states->ne[1],
+                    (hparams.n_shortconv_l_cache - 1)*ggml_element_size(states), states->nb[1], 0);
+        };
+        history = build_rs(recr, state, hparams.n_embd_r(), ubatch.n_seqs, get_rows);
+    } else {
+        history = build_rs(recr, state, hparams.n_embd_r(), ubatch.n_seqs);
+        history = ggml_reshape_3d(ctx0, history, hparams.n_shortconv_l_cache - 1, hparams.n_sconv_channels, ubatch.n_seqs);
+    }
 
     ggml_tensor * inpSA = cur;
 

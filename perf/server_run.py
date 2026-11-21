@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+# start llama-server on GPU1 with the given extra args, run the 3 greedy prompts (200 tokens, temp 0) through
+# /completion and the throughput bench (perf/bench.py), save the outputs under <outdir>, stop the server
+# usage: perf/server_run.py <outdir> [--no-bench] [-- extra server args...]
+import json, os, subprocess, sys, time, urllib.request
+args = sys.argv[1:]
+outdir = args.pop(0)
+no_bench = "--no-bench" in args
+if no_bench:
+    args.remove("--no-bench")
+extra = args[1:] if args and args[0] == "--" else args
+os.makedirs(outdir, exist_ok=True)
+M = os.path.expanduser("~/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL.gguf")
+PROMPTS = [
+    "Write a Python function that parses an ISO-8601 duration like 'P3DT4H5M' into seconds, with tests.",
+    "The history of the bicycle begins in the early nineteenth century, when",
+    "Explain step by step how TCP slow start and congestion avoidance work.",
+]
+port = 8041
+cmd = ["build/bin/llama-server", "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", "16384", "-np", "1",
+       "--port", str(port), "--host", "127.0.0.1"] + extra
+print("server:", " ".join(cmd), flush=True)
+log = open(os.path.join(outdir, "server.log"), "w")
+p = subprocess.Popen(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES="1"), stdout=log, stderr=subprocess.STDOUT)
+try:
+    for _ in range(1200):
+        if p.poll() is not None:
+            raise SystemExit("server exited early, see server.log")
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1); break
+        except Exception:
+            time.sleep(0.5)
+    for i, pr in enumerate(PROMPTS, 1):
+        body = {"prompt": pr, "n_predict": 200, "temperature": 0, "samplers": [], "cache_prompt": False}
+        d = json.load(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/completion", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=900))
+        open(os.path.join(outdir, f"gen{i}.txt"), "w").write(pr + d["content"])
+        t = d["timings"]
+        acc = f" draft {t.get('draft_n_accepted')}/{t.get('draft_n')}" if t.get("draft_n") else ""
+        print(f"gen{i}: {t['predicted_n']} tok at {t['predicted_per_second']:.1f} tok/s{acc}", flush=True)
+    if not no_bench:
+        subprocess.run([sys.executable, "perf/bench.py", f"http://127.0.0.1:{port}"], check=False)
+finally:
+    p.terminate(); p.wait()

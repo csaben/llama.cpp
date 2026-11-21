@@ -12739,13 +12739,14 @@ void ggml_compute_forward_shortconv_res(const ggml_compute_params * params, ggml
     const ggml_tensor * taps  = dst->src[3];
     const ggml_tensor * res   = dst->src[4];
     ggml_tensor       * state = dst->src[5];
+    const ggml_tensor * ids   = dst->src[6];
 
     float scale;
     memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
 
     const int64_t d_conv  = w->ne[0];
     const int64_t n_chan  = w->ne[1];
-    const int64_t n_s     = past->ne[2];
+    const int64_t n_s     = ids ? ids->ne[0] : past->ne[2];
     const int64_t n_t     = cur->ne[1]/n_s;
     const int64_t n_slots = state ? state->ne[1] : 0;
 
@@ -12777,6 +12778,7 @@ void ggml_compute_forward_shortconv_res(const ggml_compute_params * params, ggml
     GGML_ASSERT(d_conv <= 16);
 
     for (int64_t s = 0; s < n_s; ++s) {
+        const int64_t s_src = ids ? ((const int32_t *) ids->data)[s] : s;
         for (int64_t t = 0; t < n_t; ++t) {
             const int64_t tok = s*n_t + t;
             for (int64_t c = ic0; c < ic1; ++c) {
@@ -12784,7 +12786,7 @@ void ggml_compute_forward_shortconv_res(const ggml_compute_params * params, ggml
                 for (int64_t j = 0; j < d_conv; ++j) {
                     const int64_t i = t + j;
                     x[j] = i < d_conv - 1 ?
-                        *(const float *) ((const char *) past->data + i*past->nb[0] + c*past->nb[1] + s*past->nb[2]) :
+                        *(const float *) ((const char *) past->data + i*past->nb[0] + c*past->nb[1] + s_src*past->nb[2]) :
                         *(const float *) ((const char *) cur->data + c*cur->nb[0] + (s*n_t + i - (d_conv - 1))*cur->nb[1]);
                 }
                 const float * wc = (const float *) ((const char *) w->data + c*w->nb[1]);

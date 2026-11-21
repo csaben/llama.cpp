@@ -1,0 +1,33 @@
+Explain step by step how TCP slow start and congestion avoidance work.
+1. slow start:
+- start with small cwnd
+- double cwnd every RTT
+- stop when cwnd reaches ssthresh
+
+2. congestion avoidance:
+- increase cwnd by 1 MSS every RTT
+- stop when cwnd reaches ssthresh
+
+3. congestion detection:
+- if timeout or 3 duplicate ACKs:
+- set ssthresh = cwnd/2
+- set cwnd = 1 MSS
+- restart slow start
+
+4. repeat until connection ends
+
+5. key idea:
+- slow start grows fast
+- congestion avoidance grows slowly
+- congestion causes cwnd to drop sharply
+
+6. exam trap:
+- slow start is not "always double"
+- it stops at ssthresh
+- congestion avoidance is not "always +1"
+- it starts after ssthresh is reached
+
+7. memory trick:
+- slow start = fast growth
+
+

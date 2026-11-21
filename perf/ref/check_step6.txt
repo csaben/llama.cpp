@@ -1,0 +1,6 @@
+0.10.982.140 I Final estimate: PPL = 2.9410 +/- 0.06409
+gen1: common prefix with baseline 646 chars of 646 | identical
+gen2: common prefix with baseline 223 chars of 912 
+gen3: common prefix with baseline 231 chars of 791 
+== decode-path PPL (ub=1, c=1024, 2 chunks) [unfused ref 4.0660]
+0.19.671.879 I Final estimate: PPL = 4.0633 +/- 0.28740

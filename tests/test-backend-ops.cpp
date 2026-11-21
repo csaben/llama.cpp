@@ -4984,19 +4984,42 @@ struct test_shortconv_res : public test_case {
     const bool    with_res;
     const int64_t n_slots; // 0: no state store
     const int     post;    // ggml_shortconv_post
+    const int64_t n_cells; // > 0: the past is read from a state of n_cells cells through ids
 
     std::string vars() override {
-        return VARS_TO_STR8(d_conv, n_chan, n_t, n_s, n_heads, with_res, n_slots, post);
+        return VARS_TO_STR9(d_conv, n_chan, n_t, n_s, n_heads, with_res, n_slots, post, n_cells);
     }
 
-    test_shortconv_res(int64_t d_conv = 4, int64_t n_chan = 1024, int64_t n_t = 1, int64_t n_s = 1, int64_t n_heads = 8, bool with_res = false, int64_t n_slots = 0, int post = 0)
-        : d_conv(d_conv), n_chan(n_chan), n_t(n_t), n_s(n_s), n_heads(n_heads), with_res(with_res), n_slots(n_slots), post(post) {}
+    test_shortconv_res(int64_t d_conv = 4, int64_t n_chan = 1024, int64_t n_t = 1, int64_t n_s = 1, int64_t n_heads = 8, bool with_res = false, int64_t n_slots = 0, int post = 0, int64_t n_cells = 0)
+        : d_conv(d_conv), n_chan(n_chan), n_t(n_t), n_s(n_s), n_heads(n_heads), with_res(with_res), n_slots(n_slots), post(post), n_cells(n_cells) {}
+
+    void initialize_tensors(ggml_context * ctx) override {
+        std::random_device rd;
+        std::default_random_engine rng(rd());
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type == GGML_TYPE_I32) {
+                std::vector<int> data(ggml_nelements(t));
+                for (int i = 0; i < ggml_nelements(t); i++) {
+                    data[i] = rng() % n_cells;
+                }
+                ggml_backend_tensor_set(t, data.data(), 0, ggml_nelements(t) * sizeof(int));
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         // the past inputs come from a larger strided buffer, like a recurrent state gather
-        ggml_tensor * hist = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, d_conv - 1, 2*n_chan, n_s);
+        const int64_t n_hist = n_cells > 0 ? n_cells : n_s;
+        ggml_tensor * hist = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, d_conv - 1, 2*n_chan, n_hist);
         ggml_set_name(hist, "hist");
-        ggml_tensor * past = ggml_view_3d(ctx, hist, d_conv - 1, n_chan, n_s, hist->nb[1], hist->nb[2], (n_chan/2)*hist->nb[1]);
+        ggml_tensor * past = ggml_view_3d(ctx, hist, d_conv - 1, n_chan, n_hist, hist->nb[1], hist->nb[2], (n_chan/2)*hist->nb[1]);
+        ggml_tensor * ids = nullptr;
+        if (n_cells > 0) {
+            ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_s);
+            ggml_set_name(ids, "ids");
+        }
         ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, d_conv, n_chan);
         ggml_set_name(w, "w");
         ggml_tensor * cur = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_chan, n_t*n_s);
@@ -5020,7 +5043,7 @@ struct test_shortconv_res : public test_case {
             state = ggml_view_4d(ctx, cells, d_conv - 1, n_slots, n_chan, n_s, cells->nb[2], (d_conv - 1)*sizeof(float), cells->nb[1], 0);
         }
 
-        ggml_tensor * out = ggml_shortconv_res_post(ctx, past, w, cur, taps, res, state, 1.0f/3.0f, (ggml_shortconv_post) post, n_chan/128 > 0 ? n_chan/128 : 1, 1e-6f, 2.0f);
+        ggml_tensor * out = ggml_shortconv_res_post(ctx, past, w, cur, taps, res, state, ids, 1.0f/3.0f, (ggml_shortconv_post) post, n_chan/128 > 0 ? n_chan/128 : 1, 1e-6f, 2.0f);
         ggml_set_name(out, "out");
 
         if (n_slots > 0) {
@@ -12181,6 +12204,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 test_cases.emplace_back(new test_shortconv_res(4, 1024, 5, 2, n_heads, with_res, 0, post));
                 test_cases.emplace_back(new test_shortconv_res(3, 256, 3, 1, n_heads, with_res, 1, post));
             }
+            test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 1, n_heads, with_res, 0, 0, 5));
+            test_cases.emplace_back(new test_shortconv_res(4, 1024, 1, 3, n_heads, with_res, 0, 2, 7));
+            test_cases.emplace_back(new test_shortconv_res(4, 256, 4, 2, n_heads, with_res, 0, 1, 3));
         }
     }
     for (ggml_type type_mask : {GGML_TYPE_F16, GGML_TYPE_F32}) {

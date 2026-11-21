@@ -2367,6 +2367,7 @@ extern "C" {
             struct ggml_tensor  * state,
             float                 scale);
 
+    // ids [n_seqs] (I32, optional): past holds all the cells of a recurrent state, sequence s reads cell ids[s]
     GGML_API struct ggml_tensor * ggml_shortconv_res_post(
             struct ggml_context * ctx,
             struct ggml_tensor  * past,
@@ -2375,6 +2376,7 @@ extern "C" {
             struct ggml_tensor  * taps,
             struct ggml_tensor  * res,
             struct ggml_tensor  * state,
+            struct ggml_tensor  * ids,
             float                 scale,
             enum ggml_shortconv_post post,
             int                   n_heads_post,

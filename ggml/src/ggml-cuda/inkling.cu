@@ -379,6 +379,7 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
 struct ik_shortconv_args {
     const float * past; const float * w; const float * cur; const float * taps; const float * res;
+    const int32_t * ids;
     float * dst; float * state;
     int n_chan, n_t, n_s, n_slots;
     int64_t past_nb1, past_nb2, w_nb1, cur_nb1, taps_nb1, taps_nb2, res_nb1, dst_nb1, st_nb1, st_nb2, st_nb3;
@@ -392,8 +393,9 @@ template <int d_conv, bool has_taps>
 static __device__ __forceinline__ float shortconv_res_one(const ik_shortconv_args & args, const int c, const int tok) {
     const int s = tok / args.n_t;
     const int t = tok - s*args.n_t;
+    const int s_src = args.ids ? args.ids[s] : s;
 
-    const float * ps = (const float *) ((const char *) args.past + c*args.past_nb1 + s*args.past_nb2);
+    const float * ps = (const float *) ((const char *) args.past + c*args.past_nb1 + s_src*args.past_nb2);
     const float * wc = (const float *) ((const char *) args.w + c*args.w_nb1);
 
     // the window [t, t + d_conv) of the inputs [past, cur] of this channel
@@ -482,6 +484,7 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
     const ggml_tensor * taps  = dst->src[3];
     const ggml_tensor * res   = dst->src[4];
     ggml_tensor       * state = dst->src[5];
+    const ggml_tensor * ids   = dst->src[6];
 
     ik_shortconv_args args;
     memcpy(&args.scale,          (const float *)   dst->op_params + 0, sizeof(float));
@@ -493,8 +496,9 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
 
     const int d_conv = w->ne[0];
     args.n_chan  = w->ne[1];
-    args.n_s     = past->ne[2];
+    args.n_s     = ids ? ids->ne[0] : past->ne[2];
     args.n_t     = cur->ne[1]/args.n_s;
+    args.ids     = ids ? (const int32_t *) ids->data : nullptr;
     args.n_slots = state ? state->ne[1] : 0;
     args.hd      = taps ? args.n_chan/taps->ne[1] : args.n_chan;
     args.hd_post = args.post ? args.n_chan/n_heads_post : args.n_chan;

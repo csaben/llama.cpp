@@ -2579,6 +2579,8 @@ struct llama_model_inkling2 : public llama_model_base {
         ggml_tensor * zero_sinks(int64_t n_head);
         ggml_tensor * sinks_zero   = nullptr;
         int64_t       sinks_n_head = 0;
+        // the cells read by the convolutions of the current layer when they read the recurrent state directly (else nullptr)
+        ggml_tensor * rs_ids = nullptr;
 
         // the inputs and the token embeddings
         ggml_tensor * build_inputs();

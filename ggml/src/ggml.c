@@ -5738,7 +5738,7 @@ struct ggml_tensor * ggml_shortconv_res(
         struct ggml_tensor  * res,
         struct ggml_tensor  * state,
         float                 scale) {
-    return ggml_shortconv_res_post(ctx, past, w, cur, taps, res, state, scale, GGML_SHORTCONV_POST_NONE, 1, 0.0f, 0.0f);
+    return ggml_shortconv_res_post(ctx, past, w, cur, taps, res, state, NULL, scale, GGML_SHORTCONV_POST_NONE, 1, 0.0f, 0.0f);
 }
 
 struct ggml_tensor * ggml_shortconv_res_post(
@@ -5749,6 +5749,7 @@ struct ggml_tensor * ggml_shortconv_res_post(
         struct ggml_tensor  * taps,
         struct ggml_tensor  * res,
         struct ggml_tensor  * state,
+        struct ggml_tensor  * ids,
         float                 scale,
         enum ggml_shortconv_post post,
         int                   n_heads_post,
@@ -5757,10 +5758,13 @@ struct ggml_tensor * ggml_shortconv_res_post(
     GGML_ASSERT(ggml_is_3d(past));
     GGML_ASSERT(ggml_is_matrix(w));
     GGML_ASSERT(past->type == GGML_TYPE_F32 && w->type == GGML_TYPE_F32 && cur->type == GGML_TYPE_F32);
+    if (ids) {
+        GGML_ASSERT(ids->type == GGML_TYPE_I32 && ggml_is_vector(ids) && ggml_is_contiguous(ids));
+    }
 
     const int64_t d_conv = w->ne[0];
     const int64_t n_chan = w->ne[1];
-    const int64_t n_s    = past->ne[2];
+    const int64_t n_s    = ids ? ids->ne[0] : past->ne[2];
 
     GGML_ASSERT(past->ne[0] == d_conv - 1);
     GGML_ASSERT(past->ne[1] == n_chan);
@@ -5802,6 +5806,7 @@ struct ggml_tensor * ggml_shortconv_res_post(
     result->src[3] = taps;
     result->src[4] = res;
     result->src[5] = state;
+    result->src[6] = ids;
 
     return result;
 }
