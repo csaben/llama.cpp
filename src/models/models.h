@@ -2507,6 +2507,25 @@ struct llama_model_inkling2 : public llama_model_base {
         ggml_tensor * ctrl_forget[LOOP_CTRL_COUNT] = {};
     };
 
+    // the attention input projections of a physical layer concatenated along their rows into one quantized matrix:
+    // [wq | attn_rel | attn_sink_proj | attn_gate | wk | (attn_k_conv_proj) | wv | (attn_v_conv_proj)]
+    // q/k/v are the views of the Q-, K- and V-input groups (one matmul each; the whole matrix when the inputs agree)
+    struct attn_fused {
+        ggml_tensor * w = nullptr;
+        ggml_tensor * q = nullptr; // rows [0, n_q)
+        ggml_tensor * k = nullptr; // rows [n_q, n_q + n_k)
+        ggml_tensor * v = nullptr; // rows [n_q + n_k, n_q + n_k + n_v)
+        int64_t n_q = 0, n_k = 0, n_v = 0;
+        // row offsets of the pieces
+        int64_t off_rel = 0, off_sink = 0, off_gate = 0, off_kproj = -1, off_vproj = -1;
+        // the pieces to load into w, in row order: file tensor name and row count
+        std::vector<std::pair<std::string, int64_t>> pieces;
+    };
+    std::vector<attn_fused> fused_attn; // indexed by physical layer; w == nullptr: not fused
+    std::vector<ggml_backend_buffer_ptr> fused_bufs;
+    ggml_context_ptr fused_ctx;
+    void load_arch_tensors_post(llama_model_loader & ml) override;
+
     struct graph : public llm_graph_context {
         graph(const llm_graph_params & params);
         ggml_tensor * mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query);

@@ -352,7 +352,8 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
 template <typename dst_t, typename mask_t, bool use_smem>
 static __global__ void rel_bias_kernel(const float * __restrict__ r, const float * __restrict__ table, const float * __restrict__ sinks,
         const int32_t * __restrict__ pos, const mask_t * __restrict__ mask, dst_t * __restrict__ dst,
-        const int n_rel, const int n_head, const int n_tok, const int n_kv, const int n_extent, const int64_t mask_ne0) {
+        const int n_rel, const int n_head, const int n_tok, const int n_kv, const int n_extent, const int64_t mask_ne0,
+        const int64_t sinks_nb1) {
     const int h = blockIdx.x;
     const int t = blockIdx.y;
 
@@ -377,7 +378,7 @@ static __global__ void rel_bias_kernel(const float * __restrict__ r, const float
         __syncthreads();
     }
 
-    const float sk = sinks ? sinks[(int64_t) t*n_head + h] : 0.0f;
+    const float sk = sinks ? *(const float *) ((const char *) sinks + t*sinks_nb1 + h*sizeof(float)) : 0.0f;
     const int32_t * pv = pos + (int64_t) t*n_kv;
     const mask_t  * mv = mask ? mask + (int64_t) t*mask_ne0 : nullptr;
     dst_t * out = dst + ((int64_t) h*n_tok + t)*n_kv;
@@ -406,14 +407,14 @@ static __global__ void rel_bias_kernel(const float * __restrict__ r, const float
 template <typename dst_t, typename mask_t>
 static void rel_bias_launch(const float * r, const float * table, const float * sinks, const int32_t * pos, const mask_t * mask,
         dst_t * dst, const int n_rel, const int n_head, const int n_tok, const int n_kv, const int n_extent, const int64_t mask_ne0,
-        cudaStream_t stream) {
+        const int64_t sinks_nb1, cudaStream_t stream) {
     const dim3 grid(n_head, n_tok, 1);
     if (n_extent <= IK_REL_MAX_SMEM_EXTENT) {
         rel_bias_kernel<dst_t, mask_t, true><<<grid, IK_REL_BIAS_BLOCK, n_extent*sizeof(float), stream>>>(
-                r, table, sinks, pos, mask, dst, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0);
+                r, table, sinks, pos, mask, dst, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, sinks_nb1);
     } else {
         rel_bias_kernel<dst_t, mask_t, false><<<grid, IK_REL_BIAS_BLOCK, 0, stream>>>(
-                r, table, sinks, pos, mask, dst, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0);
+                r, table, sinks, pos, mask, dst, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, sinks_nb1);
     }
 }
 
@@ -438,20 +439,21 @@ void ggml_cuda_op_rel_bias(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const float   * sinks_d = sinks ? (const float *) sinks->data : nullptr;
     const int32_t * pos_d   = (const int32_t *) pos->data;
     const int64_t   mask_ne0 = mask ? mask->ne[0] : 0;
+    const int64_t   sinks_nb1 = sinks ? sinks->nb[1] : 0;
 
     cudaStream_t stream = ctx.stream();
 
     if (dst->type == GGML_TYPE_F16) {
         if (mask && mask->type == GGML_TYPE_F16) {
-            rel_bias_launch<half, half>(r_d, table_d, sinks_d, pos_d, (const half *) mask->data, (half *) dst->data, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, stream);
+            rel_bias_launch<half, half>(r_d, table_d, sinks_d, pos_d, (const half *) mask->data, (half *) dst->data, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, sinks_nb1, stream);
         } else {
-            rel_bias_launch<half, float>(r_d, table_d, sinks_d, pos_d, mask ? (const float *) mask->data : nullptr, (half *) dst->data, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, stream);
+            rel_bias_launch<half, float>(r_d, table_d, sinks_d, pos_d, mask ? (const float *) mask->data : nullptr, (half *) dst->data, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, sinks_nb1, stream);
         }
     } else {
         if (mask && mask->type == GGML_TYPE_F16) {
-            rel_bias_launch<float, half>(r_d, table_d, sinks_d, pos_d, (const half *) mask->data, (float *) dst->data, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, stream);
+            rel_bias_launch<float, half>(r_d, table_d, sinks_d, pos_d, (const half *) mask->data, (float *) dst->data, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, sinks_nb1, stream);
         } else {
-            rel_bias_launch<float, float>(r_d, table_d, sinks_d, pos_d, mask ? (const float *) mask->data : nullptr, (float *) dst->data, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, stream);
+            rel_bias_launch<float, float>(r_d, table_d, sinks_d, pos_d, mask ? (const float *) mask->data : nullptr, (float *) dst->data, n_rel, n_head, n_tok, n_kv, n_extent, mask_ne0, sinks_nb1, stream);
         }
     }
 }

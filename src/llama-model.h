@@ -1078,6 +1078,8 @@ struct llama_model {
     // model must define these
     virtual void load_arch_hparams(llama_model_loader & ml) = 0;
     virtual void load_arch_tensors(llama_model_loader & ml) = 0;
+    // runs after the tensor data is loaded, e.g. to build derived weights (load_tensors skips it in a memory-fit pass)
+    virtual void load_arch_tensors_post(llama_model_loader & ml) { GGML_UNUSED(ml); }
     virtual std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const = 0;
 
 protected:
@@ -1105,6 +1107,7 @@ struct llama_model_base : public llama_model {
     const int TENSOR_SKIP_IF_VIRTUAL;
     const int TENSOR_ALLOW_RESHAPE;
     const int TENSOR_READ_LAZY;
+    const int TENSOR_SKIP_QUIET;
 
     explicit llama_model_base(const llama_model_params & params);
     virtual ~llama_model_base() = default;

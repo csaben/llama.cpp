@@ -100,6 +100,14 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
     output_norm      = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM,      "weight"), {n_embd}, 0);
     output_res_query = create_tensor(tn(LLM_TENSOR_OUTPUT_RES_QUERY, "weight"), {n_embd}, 0);
 
+    // the attention input projections are concatenated into one matrix per layer after loading (see load_arch_tensors_post),
+    // when they share the type; LLAMA_INKLING_FUSED_QKV=0 disables, a memory-fit pass loads them as they are
+    const bool fuse_attn = [&] {
+        const char * env = getenv("LLAMA_INKLING_FUSED_QKV");
+        return (env == nullptr || atoi(env) != 0) && !ml->no_alloc;
+    }();
+    fused_attn.assign(n_layer_phys(), {});
+
     for (int i = 0; i < n_layer_phys(); ++i) {
         auto & layer = layers[i];
 
@@ -109,18 +117,55 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
         const int64_t n_ff_exp    = hparams.n_ff_exp(i);
         const int64_t n_extent    = hparams.is_swa(i) ? hparams.n_swa : hparams.n_relative_extent;
 
+        // the row groups of the fused projection matrix, in order
+        auto & fa = fused_attn[i];
+        std::vector<std::pair<std::string, int64_t>> pieces = {
+            { tn(LLM_TENSOR_ATTN_Q,         "weight", i).str(), n_embd_head*n_head },
+            { tn(LLM_TENSOR_ATTN_REL,       "weight", i).str(), n_rel*n_head },
+            { tn(LLM_TENSOR_ATTN_SINK_PROJ, "weight", i).str(), n_head },
+            { tn(LLM_TENSOR_ATTN_GATE,      "weight", i).str(), n_embd_head*n_head },
+            { tn(LLM_TENSOR_ATTN_K,         "weight", i).str(), n_embd_head*n_head_kv },
+        };
+        if (!hparams.is_swa(i)) {
+            pieces.emplace_back(tn(LLM_TENSOR_ATTN_K_CONV_PROJ, "weight", i).str(), n_conv*n_head_kv);
+        }
+        pieces.emplace_back(tn(LLM_TENSOR_ATTN_V, "weight", i).str(), n_embd_head*n_head_kv);
+        if (!hparams.is_swa(i)) {
+            pieces.emplace_back(tn(LLM_TENSOR_ATTN_V_CONV_PROJ, "weight", i).str(), n_conv*n_head_kv);
+        }
+
+        bool fuse = fuse_attn;
+        ggml_type type = GGML_TYPE_COUNT;
+        for (const auto & [name, n_rows] : pieces) {
+            const ggml_tensor * meta = ml->get_tensor_meta(name.c_str());
+            if (meta == nullptr || meta->ne[0] != n_embd || meta->ne[1] != n_rows) {
+                fuse = false;
+                break;
+            }
+            if (type == GGML_TYPE_COUNT) {
+                type = meta->type;
+            } else if (type != meta->type) {
+                fuse = false;
+                break;
+            }
+        }
+        if (fuse) {
+            fa.pieces = pieces;
+        }
+        const int skip = fuse ? TENSOR_SKIP | TENSOR_SKIP_QUIET : 0;
+
         // attention
-        layer.wq        = create_tensor(tn(LLM_TENSOR_ATTN_Q,    "weight", i), {n_embd, n_embd_head*n_head}, 0);
-        layer.wk        = create_tensor(tn(LLM_TENSOR_ATTN_K,    "weight", i), {n_embd, n_embd_head*n_head_kv}, 0);
-        layer.wv        = create_tensor(tn(LLM_TENSOR_ATTN_V,    "weight", i), {n_embd, n_embd_head*n_head_kv}, 0);
+        layer.wq        = create_tensor(tn(LLM_TENSOR_ATTN_Q,    "weight", i), {n_embd, n_embd_head*n_head}, skip);
+        layer.wk        = create_tensor(tn(LLM_TENSOR_ATTN_K,    "weight", i), {n_embd, n_embd_head*n_head_kv}, skip);
+        layer.wv        = create_tensor(tn(LLM_TENSOR_ATTN_V,    "weight", i), {n_embd, n_embd_head*n_head_kv}, skip);
         layer.wo        = create_tensor(tn(LLM_TENSOR_ATTN_OUT,  "weight", i), {n_embd_head*n_head, n_embd}, 0);
-        layer.wqkv_gate = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "weight", i), {n_embd, n_embd_head*n_head}, 0);
+        layer.wqkv_gate = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "weight", i), {n_embd, n_embd_head*n_head}, skip);
 
         layer.attn_q_clip    = create_tensor(tn(LLM_TENSOR_ATTN_Q_CLIP,    "weight", i), {n_embd_head, n_head}, 0);
-        layer.attn_sink_proj = create_tensor(tn(LLM_TENSOR_ATTN_SINK_PROJ, "weight", i), {n_embd, n_head}, 0);
+        layer.attn_sink_proj = create_tensor(tn(LLM_TENSOR_ATTN_SINK_PROJ, "weight", i), {n_embd, n_head}, skip);
 
         // relative-position bias
-        layer.attn_rel      = create_tensor(tn(LLM_TENSOR_ATTN_REL,      "weight", i), {n_embd, n_rel*n_head}, 0);
+        layer.attn_rel      = create_tensor(tn(LLM_TENSOR_ATTN_REL,      "weight", i), {n_embd, n_rel*n_head}, skip);
         layer.attn_rel_bias = create_tensor(tn(LLM_TENSOR_ATTN_REL_BIAS, "weight", i), {n_rel, n_extent}, 0);
         layer.attn_rel_clip = create_tensor(tn(LLM_TENSOR_ATTN_REL_CLIP, "weight", i), {n_rel, n_head}, 0);
 
@@ -137,8 +182,8 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
             layer.attn_q_inp_norm  = create_tensor(tn(LLM_TENSOR_ATTN_Q_INP_NORM,  "weight", i), {n_embd}, 0);
             layer.attn_k_inp_norm  = create_tensor(tn(LLM_TENSOR_ATTN_K_INP_NORM,  "weight", i), {n_embd}, 0);
             layer.attn_v_inp_norm  = create_tensor(tn(LLM_TENSOR_ATTN_V_INP_NORM,  "weight", i), {n_embd}, 0);
-            layer.attn_k_conv_proj = create_tensor(tn(LLM_TENSOR_ATTN_K_CONV_PROJ, "weight", i), {n_embd, n_conv*n_head_kv}, 0);
-            layer.attn_v_conv_proj = create_tensor(tn(LLM_TENSOR_ATTN_V_CONV_PROJ, "weight", i), {n_embd, n_conv*n_head_kv}, 0);
+            layer.attn_k_conv_proj = create_tensor(tn(LLM_TENSOR_ATTN_K_CONV_PROJ, "weight", i), {n_embd, n_conv*n_head_kv}, skip);
+            layer.attn_v_conv_proj = create_tensor(tn(LLM_TENSOR_ATTN_V_CONV_PROJ, "weight", i), {n_embd, n_conv*n_head_kv}, skip);
         }
 
         // block attention residuals
@@ -154,6 +199,172 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
         layer.ffn_gate_up_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_UP_EXPS, "weight", i), {n_embd, 2*n_ff_exp, n_expert}, 0);
         layer.ffn_down_exps    = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS,    "weight", i), {n_ff_exp, n_embd, n_expert}, 0);
     }
+}
+
+// concatenate the attention input projections of each layer into one matrix, loaded straight from the file,
+// and point the layer's tensors at the row groups of that matrix
+void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
+    const int64_t n_embd = hparams.n_embd;
+
+    int n_fused = 0;
+    for (const auto & fa : fused_attn) {
+        n_fused += fa.pieces.empty() ? 0 : 1;
+    }
+    if (n_fused == 0) {
+        return;
+    }
+
+    // one context for the fused matrices and the views of their pieces
+    ggml_init_params params = {
+        /*.mem_size   =*/ ggml_tensor_overhead()*n_fused*16,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    fused_ctx.reset(ggml_init(params));
+    if (!fused_ctx) {
+        throw std::runtime_error("inkling2: failed to create the context of the fused attention projections");
+    }
+
+    // the fused matrices go with the layer's other weights, one buffer per buffer type
+    std::map<ggml_backend_buffer_type_t, std::vector<ggml_tensor *>> by_buft;
+
+    for (int i = 0; i < n_layer_phys(); ++i) {
+        auto & fa = fused_attn[i];
+        if (fa.pieces.empty()) {
+            continue;
+        }
+        const ggml_tensor * wo = layers[i].wo;
+        GGML_ASSERT(wo != nullptr && wo->buffer != nullptr);
+        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(wo->buffer);
+        if (ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft)) {
+            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                buft = ggml_backend_dev_buffer_type(dev);
+            }
+        }
+
+        const ggml_type type = ml.get_tensor_meta(fa.pieces[0].first.c_str())->type;
+        int64_t n_rows = 0;
+        for (const auto & piece : fa.pieces) {
+            n_rows += piece.second;
+        }
+
+        fa.w = ggml_new_tensor_2d(fused_ctx.get(), type, n_embd, n_rows);
+        ggml_format_name(fa.w, "blk.%d.attn_fused.weight", i);
+        by_buft[buft].push_back(fa.w);
+    }
+
+    for (auto & [buft, tensors] : by_buft) {
+        // allocate the matrices of this buffer type together
+        ggml_init_params params_buf = {
+            /*.mem_size   =*/ ggml_tensor_overhead()*tensors.size(),
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        ggml_context_ptr ctx_buf { ggml_init(params_buf) };
+        std::vector<ggml_tensor *> dups;
+        for (ggml_tensor * t : tensors) {
+            ggml_tensor * d = ggml_dup_tensor(ctx_buf.get(), t);
+            ggml_set_name(d, ggml_get_name(t));
+            dups.push_back(d);
+        }
+        ggml_backend_buffer_ptr buf { ggml_backend_alloc_ctx_tensors_from_buft(ctx_buf.get(), buft) };
+        if (!buf) {
+            throw std::runtime_error(format("inkling2: unable to allocate the %s buffer of the fused attention projections", ggml_backend_buft_name(buft)));
+        }
+        ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        for (size_t j = 0; j < tensors.size(); ++j) {
+            tensors[j]->buffer = dups[j]->buffer;
+            tensors[j]->data   = dups[j]->data;
+        }
+        fused_bufs.emplace_back(std::move(buf));
+    }
+
+    // load the pieces
+    std::vector<uint8_t> staging;
+    for (int i = 0; i < n_layer_phys(); ++i) {
+        auto & fa = fused_attn[i];
+        if (fa.pieces.empty()) {
+            continue;
+        }
+        auto & layer = layers[i];
+
+        const size_t row_size = ggml_row_size(fa.w->type, n_embd);
+
+        int64_t row = 0;
+        for (const auto & [name, n_piece] : fa.pieces) {
+            const llama_model_loader::llama_tensor_weight & w = ml.require_weight(name.c_str());
+            GGML_ASSERT(w.tensor->type == fa.w->type && w.tensor->ne[0] == n_embd && w.tensor->ne[1] == n_piece);
+
+            // read from the file: the loader unmaps the regions of the skipped tensors
+            const size_t nbytes = ggml_nbytes(w.tensor);
+            staging.resize(nbytes);
+            const auto & file = ml.files.at(w.idx);
+            file->seek(w.offs, SEEK_SET);
+            file->read_raw(staging.data(), nbytes);
+            ggml_backend_tensor_set(fa.w, staging.data(), row*row_size, nbytes);
+
+            // the layer tensor of this piece becomes a view of the fused matrix
+            ggml_tensor * view = ggml_view_2d(fused_ctx.get(), fa.w, n_embd, n_piece, row_size, row*row_size);
+            ggml_set_name(view, name.c_str());
+            tensors_by_name.emplace_back(name, view);
+
+            const int64_t n_head    = hparams.n_head(i);
+            const int64_t n_head_kv = hparams.n_head_kv(i);
+            const int64_t n_embd_head = hparams.n_embd_head_k(i);
+            if (n_piece == n_embd_head*n_head && name == tn(LLM_TENSOR_ATTN_Q, "weight", i).str()) {
+                layer.wq = view;
+            } else if (name == tn(LLM_TENSOR_ATTN_REL, "weight", i).str()) {
+                layer.attn_rel = view;
+                fa.off_rel = row;
+            } else if (name == tn(LLM_TENSOR_ATTN_SINK_PROJ, "weight", i).str()) {
+                layer.attn_sink_proj = view;
+                fa.off_sink = row;
+            } else if (name == tn(LLM_TENSOR_ATTN_GATE, "weight", i).str()) {
+                layer.wqkv_gate = view;
+                fa.off_gate = row;
+                fa.n_q = row + n_piece;
+            } else if (name == tn(LLM_TENSOR_ATTN_K, "weight", i).str()) {
+                layer.wk = view;
+                fa.n_k = n_piece;
+            } else if (name == tn(LLM_TENSOR_ATTN_K_CONV_PROJ, "weight", i).str()) {
+                layer.attn_k_conv_proj = view;
+                fa.off_kproj = row - fa.n_q;
+                fa.n_k += n_piece;
+            } else if (name == tn(LLM_TENSOR_ATTN_V, "weight", i).str()) {
+                layer.wv = view;
+                fa.n_v = n_piece;
+            } else if (name == tn(LLM_TENSOR_ATTN_V_CONV_PROJ, "weight", i).str()) {
+                layer.attn_v_conv_proj = view;
+                fa.off_vproj = row - fa.n_q - fa.n_k;
+                fa.n_v += n_piece;
+            } else {
+                GGML_ABORT("inkling2: unexpected fused piece %s", name.c_str());
+            }
+            GGML_UNUSED(n_head_kv);
+
+            row += n_piece;
+        }
+        GGML_ASSERT(row == fa.w->ne[1] && fa.n_q + fa.n_k + fa.n_v == row);
+
+        fa.q = ggml_view_2d(fused_ctx.get(), fa.w, n_embd, fa.n_q, row_size, 0);
+        fa.k = ggml_view_2d(fused_ctx.get(), fa.w, n_embd, fa.n_k, row_size, fa.n_q*row_size);
+        fa.v = ggml_view_2d(fused_ctx.get(), fa.w, n_embd, fa.n_v, row_size, (fa.n_q + fa.n_k)*row_size);
+        ggml_format_name(fa.q, "blk.%d.attn_fused_q.weight", i);
+        ggml_format_name(fa.k, "blk.%d.attn_fused_k.weight", i);
+        ggml_format_name(fa.v, "blk.%d.attn_fused_v.weight", i);
+    }
+
+    // the cache slots past the physical layers share the weights
+    for (int il = n_layer_phys(); il < (int) hparams.n_layer(); ++il) {
+        for (int ip = 0; ip < n_layer_phys(); ++ip) {
+            if (layers[il].wo == layers[ip].wo) {
+                layers[il] = layers[ip];
+                break;
+            }
+        }
+    }
+
+    LLAMA_LOG_INFO("%s: fused the attention input projections of %d layers\n", __func__, n_fused);
 }
 
 std::unique_ptr<llm_graph_context> llama_model_inkling2::build_arch_graph(const llm_graph_params & params) const {
@@ -258,14 +469,15 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
 
     if (fused) {
         // the fused op convolves [past, cur] and stores the new state itself
-        ggml_tensor * taps = dynamic ? ggml_reshape_3d(ctx0, dynamic, n_conv, dynamic->ne[0]/n_conv, n_tokens) : nullptr;
+        // the taps may be a strided view of the fused projection output
+        ggml_tensor * taps = dynamic ? ggml_view_3d(ctx0, dynamic, n_conv, dynamic->ne[0]/n_conv, n_tokens, n_conv*sizeof(float), dynamic->nb[1], 0) : nullptr;
         ggml_tensor * state_view = build_conv_state_view(inp, state, n_conv - 1, n_channels, n_seqs, n_seq_tokens,
                 offset*(n_conv - 1)*ggml_element_size(state));
 
         return ggml_shortconv_res(ctx0, past, weight, cur, taps, residual, state_view, scale);
     }
 
-    ggml_tensor * x = ggml_transpose(ctx0, ggml_reshape_3d(ctx0, cur, n_channels, n_seq_tokens, n_seqs));
+    ggml_tensor * x = ggml_transpose(ctx0, ggml_view_3d(ctx0, cur, n_channels, n_seq_tokens, n_seqs, cur->nb[1], n_seq_tokens*cur->nb[1], 0));
     x = ggml_concat(ctx0, past, x, 0);
 
     build_conv_state_store(inp, state, x, n_conv - 1, offset*(n_conv - 1)*ggml_element_size(state));
@@ -276,7 +488,7 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
     if (dynamic) {
         const int64_t n_heads = dynamic->ne[0]/n_conv;
 
-        dynamic = ggml_reshape_3d(ctx0, dynamic, n_conv, n_heads, n_tokens);
+        dynamic = ggml_view_3d(ctx0, dynamic, n_conv, n_heads, n_tokens, n_conv*sizeof(float), dynamic->nb[1], 0);
 
         for (int64_t lag = 0; lag < n_conv; ++lag) {
             ggml_tensor * tap    = ggml_view_3d(ctx0, dynamic, 1, n_heads, n_tokens, dynamic->nb[1], dynamic->nb[2], lag*dynamic->nb[0]);
@@ -389,18 +601,61 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
     }
 
     // self-attention
+    ggml_tensor * attn_proj = nullptr; // the fused projection output, [n_q, n_tokens]
     {
-        ggml_tensor * Qcur = build_lora_mm(layer.wq, inputs[0]);
-        ggml_tensor * Kcur = convolve(build_lora_mm(layer.wk, inputs[1]), layer.attn_k_conv,
-                is_swa ? nullptr : build_lora_mm(layer.attn_k_conv_proj, inputs[1]), state, history, recr, 0);
-        ggml_tensor * Vcur = convolve(build_lora_mm(layer.wv, inputs[2]), layer.attn_v_conv,
-                is_swa ? nullptr : build_lora_mm(layer.attn_v_conv_proj, inputs[2]), state, history, recr, n_embd_k_gqa);
-        ggml_tensor * Rcur = build_lora_mm(layer.attn_rel, inputs[0]);
+        const auto & fa = static_cast<const llama_model_inkling2 &>(model).fused_attn[ip];
+        const bool use_fused = fused && fa.w != nullptr;
 
-        Qcur = clip(ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens), layer.attn_q_clip, hparams.f_qk_clip);
-        Kcur = clip(ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens), nullptr,           hparams.f_qk_clip);
+        ggml_tensor * Qcur = nullptr;
+        ggml_tensor * Kcur = nullptr;
+        ggml_tensor * Vcur = nullptr;
+        ggml_tensor * Rcur = nullptr;
+        ggml_tensor * k_taps = nullptr;
+        ggml_tensor * v_taps = nullptr;
+        if (use_fused) {
+            // the Q group, and the K and V groups when their inputs differ; else everything in one matmul
+            ggml_tensor * out_q = nullptr;
+            ggml_tensor * out_k = nullptr;
+            ggml_tensor * out_v = nullptr;
+            if (inputs[0] == inputs[1] && inputs[0] == inputs[2]) {
+                out_q = ggml_mul_mat(ctx0, fa.w, inputs[0]);
+                out_k = ggml_view_2d(ctx0, out_q, fa.n_k, n_tokens, out_q->nb[1], fa.n_q*sizeof(float));
+                out_v = ggml_view_2d(ctx0, out_q, fa.n_v, n_tokens, out_q->nb[1], (fa.n_q + fa.n_k)*sizeof(float));
+            } else {
+                out_q = ggml_mul_mat(ctx0, fa.q, inputs[0]);
+                out_k = ggml_mul_mat(ctx0, fa.k, inputs[1]);
+                out_v = ggml_mul_mat(ctx0, fa.v, inputs[2]);
+            }
+            cb(out_q, "attn_proj", il);
+
+            Qcur = ggml_view_3d(ctx0, out_q, n_embd_head, n_head, n_tokens, n_embd_head*sizeof(float), out_q->nb[1], 0);
+            Rcur = ggml_view_3d(ctx0, out_q, hparams.n_relative, n_head, n_tokens, hparams.n_relative*sizeof(float), out_q->nb[1], fa.off_rel*sizeof(float));
+            Kcur = ggml_view_2d(ctx0, out_k, n_embd_k_gqa, n_tokens, out_k->nb[1], 0);
+            Vcur = ggml_view_2d(ctx0, out_v, n_embd_k_gqa, n_tokens, out_v->nb[1], 0);
+            if (!is_swa) {
+                const int64_t n_conv = hparams.n_shortconv_l_cache;
+                k_taps = ggml_view_2d(ctx0, out_k, n_conv*n_head_kv, n_tokens, out_k->nb[1], fa.off_kproj*sizeof(float));
+                v_taps = ggml_view_2d(ctx0, out_v, n_conv*n_head_kv, n_tokens, out_v->nb[1], fa.off_vproj*sizeof(float));
+            }
+            attn_proj = out_q;
+        } else {
+            Qcur = ggml_reshape_3d(ctx0, build_lora_mm(layer.wq, inputs[0]), n_embd_head, n_head, n_tokens);
+            Rcur = ggml_reshape_3d(ctx0, build_lora_mm(layer.attn_rel, inputs[0]), hparams.n_relative, n_head, n_tokens);
+            Kcur = build_lora_mm(layer.wk, inputs[1]);
+            Vcur = build_lora_mm(layer.wv, inputs[2]);
+            if (!is_swa) {
+                k_taps = build_lora_mm(layer.attn_k_conv_proj, inputs[1]);
+                v_taps = build_lora_mm(layer.attn_v_conv_proj, inputs[2]);
+            }
+        }
+
+        Kcur = convolve(Kcur, layer.attn_k_conv, k_taps, state, history, recr, 0);
+        Vcur = convolve(Vcur, layer.attn_v_conv, v_taps, state, history, recr, n_embd_k_gqa);
+
+        Qcur = clip(Qcur, layer.attn_q_clip, hparams.f_qk_clip);
+        Kcur = clip(ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens), nullptr, hparams.f_qk_clip);
         Vcur = ggml_rms_norm(ctx0, ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens), hparams.f_norm_rms_eps);
-        Rcur = clip(ggml_reshape_3d(ctx0, Rcur, hparams.n_relative, n_head, n_tokens), layer.attn_rel_clip, hparams.f_relative_clip);
+        Rcur = clip(Rcur, layer.attn_rel_clip, hparams.f_relative_clip);
 
         if (!is_swa) {
             Qcur = ggml_mul(ctx0, Qcur, tau);
@@ -419,7 +674,9 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
         const int64_t n_stream = mask_raw->ne[3];
         const int64_t n_kv     = rel_pos->ne[0];
 
-        ggml_tensor * sinks = build_lora_mm(layer.attn_sink_proj, inputs[0]);
+        ggml_tensor * sinks = use_fused ?
+            ggml_view_2d(ctx0, attn_proj, n_head, n_tokens, attn_proj->nb[1], fa.off_sink*sizeof(float)) :
+            build_lora_mm(layer.attn_sink_proj, inputs[0]);
 
         if (fused && n_stream == 1 && mask_raw->ne[2] == 1) {
             // the bias table projected by r, gathered by distance, with the sink logits and the mask: the per-head mask
@@ -435,7 +692,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
             ggml_tensor * table = ggml_mul_mat(ctx0, ggml_pad(ctx0, layer.attn_rel_bias, 0, 1, 0, 0), Rcur);
 
             // the sink logit t is per query: exp(s - t)/(1 + sum(exp(s - t))) = exp(s)/(exp(t) + sum(exp(s))), with a zero sink
-            table = ggml_sub(ctx0, table, ggml_reshape_3d(ctx0, sinks, 1, n_head, n_tokens));
+            table = ggml_sub(ctx0, table, ggml_reshape_3d(ctx0, ggml_cont(ctx0, sinks), 1, n_head, n_tokens));
             table = ggml_cont(ctx0, ggml_permute(ctx0, table, 1, 0, 2, 3));
 
             ggml_tensor * kq_b = ggml_get_rows(ctx0, table, rel_pos);
@@ -448,7 +705,9 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                     Qcur, Kcur, Vcur, kq_b, zero_sinks(n_head), 1.0f/sqrtf(n_embd_head), il);
         }
 
-        ggml_tensor * gate = build_lora_mm(layer.wqkv_gate, inputs[0]);
+        ggml_tensor * gate = use_fused ?
+            ggml_view_2d(ctx0, attn_proj, n_embd_head*n_head, n_tokens, attn_proj->nb[1], fa.off_gate*sizeof(float)) :
+            build_lora_mm(layer.wqkv_gate, inputs[0]);
         if (fused) {
             cur = ggml_siglu_split(ctx0, gate, cur);
         } else {

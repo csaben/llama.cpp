@@ -12830,7 +12830,7 @@ void ggml_compute_forward_rel_bias(const ggml_compute_params * params, ggml_tens
         const int64_t h = iht - t*n_head;
 
         const float * rv = (const float *) ((const char *) r->data + h*r->nb[1] + t*r->nb[2]);
-        const float   sk = sinks ? ((const float *) sinks->data)[t*n_head + h] : 0.0f;
+        const float   sk = sinks ? *(const float *) ((const char *) sinks->data + t*sinks->nb[1] + h*sinks->nb[0]) : 0.0f;
         const int32_t * pv = (const int32_t *) ((const char *) pos->data + t*pos->nb[1]);
 
         for (int64_t kv = 0; kv < n_kv; ++kv) {

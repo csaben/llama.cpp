@@ -5805,8 +5805,8 @@ struct ggml_tensor * ggml_rel_bias(
     GGML_ASSERT(table->ne[0] == n_rel);
     GGML_ASSERT(pos->ne[1] == n_tok);
     if (sinks) {
-        GGML_ASSERT(sinks->type == GGML_TYPE_F32 && ggml_is_contiguous(sinks));
-        GGML_ASSERT(ggml_nelements(sinks) == n_head*n_tok);
+        GGML_ASSERT(sinks->type == GGML_TYPE_F32 && ggml_is_matrix(sinks) && sinks->nb[0] == sizeof(float));
+        GGML_ASSERT(sinks->ne[0] == n_head && sinks->ne[1] == n_tok);
     }
     if (mask) {
         GGML_ASSERT(mask->type == GGML_TYPE_F32 || mask->type == GGML_TYPE_F16);
