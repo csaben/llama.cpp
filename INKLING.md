@@ -96,13 +96,13 @@ reply decoded at 165.7 and 163.8 tok/s. With the default tool set, the initial
 request used 16,963 prompt tokens. The 32K server read a fresh file and
 returned its exact marker, decoding the two turns at 140.2 and 140.7 tok/s.
 
-From the repository root, the equivalent server command is:
+The live experiment uses a 65,536-token slot. GPU 1 had 10,236 MiB free after loading. From the repository root, start that configuration with:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=1 LLAMA_INKLING_CTRL_F16=1 IK_BATCH_MESSAGES=1
 export IK_SEGMENTED_IQ4=1 IK_SEGMENTED_Q6=1 IK_MIX_SPECIALIZE=1 IK_CTRL_APPLY8=1
 build/bin/llama-server -m "$HOME/models/inkling-2-mini/Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf" \
-  -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 32768 -np 1 --backend-sampling \
+  -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 65536 -np 1 --backend-sampling \
   --host 127.0.0.1 --port 8031 --alias inkling-mini
 ```
 
