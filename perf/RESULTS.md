@@ -77,3 +77,36 @@ Serve (plain decode, recommended):
   (no_alloc) pass loads the plain tensors instead.
 - No speculative decoding gain anymore: DSpark is slower than plain decode at this speed.
 - Only the CUDA backend has fast kernels; the CPU implementations are reference-quality (correct, not optimized).
+
+# Phase 2 (start: checkpoint-124tok = 5196d97, 124.4 tok/s tg128)
+
+## Budget re-derived from the GGUF (per decode token)
+experts 1847 MB (8/128 per pass, IQ4_NL layers 0-19, Q8_0 layers 20-23), dense 1781 MB (Q8_0 1373 MB + F32 409 MB:
+loop ctrl down 170 MB, gain/forget 170 MB, router 57 MB, bias tables 3 MB), output head 492 MB -> 4121 MB/token.
+Measured on GPU1: raw read bandwidth 891 GB/s (1 GiB), 737 GB/s for a 2 MB read, 711 GB/s for 8 MB, 831 GB/s for 32 MB
+(ramp/tail of each kernel). Empty kernel in a CUDA graph: 0.65 us; tiny 82x256 kernel: 1.10 us.
+Floor at 891 GB/s: 4.62 ms = 216 tok/s (weights only, exact types). 200 tok/s = 5.0 ms.
+
+## Where the 8.0 ms go (nsys, one steady-state token, 1613 launches)
+| part | time | bytes | GB/s |
+|---|---|---|---|
+| mmvq expert gate_up (IQ4_NL, 23.9 MB) | 29.7 us x 44 | | 805 |
+| mmvq expert down (IQ4_NL, 11.9 MB) | 15.7 us x 44 | | 760 |
+| mmvq attn proj SWA (8600 rows Q8_0, 21.0 MB) | 25.9 us x 40 | | 813 |
+| mmvq attn proj full-attn q group (16.0 MB) / k, v groups (2.6 MB) | 20.2 / 4.7 us | | 794 / 557 |
+| mmvq wo (7.5 MB) | 10.4 us x 48 | | 723 |
+| mmvq output head (492 MB) | 557 us | | 883 |
+| all mmvq | 4.74 ms | ~3700 MB | 780 avg |
+| F32 loop ctrl down/apply (340 MB) + router mul_mat_vec_f (57 MB) | 0.61 ms | 409 MB | 670 |
+| flash attention (vec + combine) | 0.30 ms | | |
+| ~1260 small kernels (res_mix, rms_norm, quantize, l2_clip, rel_bias, shortconv, set_rows, topk, situ, moe_sum...) | 2.33 ms | | |
+
+So: weight streaming is at 780 GB/s on average (88% of measured peak); the other 3 ms are ~1300 latency-bound launches
+of 1.2-4 us each. A persistent megakernel would replace a kernel boundary (~1.1 us in a graph) by a grid barrier
+(~1.5-3 us on 82 SMs with cooperative groups) -> no gain per se; the gain is in the number of dependency points.
+Plan: fuse the per-layer body into ~8 launches (prologue/epilogue fusion around the matvecs, one attention kernel),
+then tune the matvecs (bytes in flight, tail), then quality-gated byte reduction and the DSpark verify path.
+
+## Phase 2 steps
+| step | commit | tg128 tok/s | PPL | notes |
+|---|---|---|---|---|
