@@ -2,6 +2,8 @@
 
 Local merge `f7f505c` (`p8m-merged`) combines stream A with `p8c-final`. Git merged the distinct controller/attention and relative-bias hunks in `inkling.cu` cleanly. The SM86 build and nine-file snapshot at `~/inkling-live-bin-p8m-f7f505c` are complete. The staged binary reports `f7f505c` and resolves all eight local libraries. Frozen stream A controls are captured. On GPU1 the 16K tool replay reached 5.738 s plain and 5.868 s with cap 3 (stream A 6.486 / 6.567 s). The 2,048/512 trial left 2,084 MiB free through 32K. The six release matrices are in progress. The live endpoint is stopped.
 
+- Main at 384 tokens: 126 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/main/384/).
+
 # Phase 8
 
 **Staged and verified on GPU1.** Source `66eadaf` (`p8a-runtime`), local release tag `p8a-release`, snapshot `~/inkling-live-bin-p8-66eadaf`. All nine hashes passed and all eight project libraries resolved inside the snapshot. The manual deploy script was syntax-checked and left unexecuted. It uses guarded adaptive cap 3, the folded 32K drafter and one 64K slot on GPU1, with Phase 5 fallback. [Manual deploy](live/deploy-p8.sh), [SHA-256 manifest](p8/snapshot.sha256), [results and reproduction](RESULTS.md#phase-8).

@@ -1,0 +1,6 @@
+n2-adapt       code      prompt     47   384 tok   251.1 tok/s    1320 chars  accepted/proposed 173/218  runs 251/251/251
+n2-adapt       edit      prompt   1025   384 tok   320.0 tok/s    1115 chars  accepted/proposed 246/249  runs 319/320/321
+n2-adapt       prose     prompt     36   384 tok   226.5 tok/s    1474 chars  accepted/proposed 123/176  runs 225/226/227
+n2-adapt       edit@16K  prompt  16044   384 tok   267.6 tok/s    1196 chars  accepted/proposed 237/250  runs 267/268/268
+n2-adapt       edit@32K  prompt  32045   384 tok   242.1 tok/s    1321 chars  accepted/proposed 224/243  runs 241/242/242
+n2-adapt       agent     prompt   2025   384 tok   282.0 tok/s    1284 chars  accepted/proposed 231/249  runs 282/282/283
