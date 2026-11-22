@@ -2370,8 +2370,8 @@ static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float 
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
 #endif
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
-static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split) {
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool late_gate = false, bool ungated = false>
+static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, const int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
@@ -2492,7 +2492,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         qv[hh] = gate_v[hh] = rv[hh] = sink_v[hh] = 0.0f;
         if (tid < HD) {
             qv[hh]     = pr0[(int64_t) h*HD + tid]*args.consts[(int64_t) h*HD + tid];
-            gate_v[hh] = pr0[args.off_gate + (int64_t) h*HD + tid];
+            if constexpr (!late_gate && !ungated) { gate_v[hh] = pr0[args.off_gate + (int64_t) h*HD + tid]; }
         } else if (warp == 4) {
             if (lane < args.n_rel) {
                 rv[hh] = pr0[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane];
@@ -2978,6 +2978,14 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         }
     }
 
+    if constexpr (late_gate) {
+        if (tid == 0) { while (ik_ld_acquire(ready) != producers) {} }
+        __syncthreads();
+        if (tid < HD) {
+#pragma unroll
+            for (int hh = 0; hh < G; ++hh) { gate_v[hh] = pr0[3480 + (g*G + hh)*HD + tid]; }
+        }
+    }
     // ===== the zero sink logit, the normalization and the sigmoid gate; threads 0..127 write the heads =====
     if (tid < HD) {
 #pragma unroll
@@ -2986,7 +2994,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             const float m_new = fmaxf(M[hh], 0.0f);
             const float corr  = expf(M[hh] - m_new);
             const float Lf    = L[hh]*corr + expf(0.0f - m_new);
-            const float o     = A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate_v[hh])));
+            const float o     = ungated ? A[hh]*corr/Lf : A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate_v[hh])));
             if constexpr (q8_out) {
                 ik_warp_store_q8_1(o, (block_q8_1 *) args.dst + ((int64_t) h*HD)/QK8_1 + warp, lane, true);
             } else {
@@ -3373,6 +3381,7 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
         if (!short_scan || (proj->ne[0] != (a.has_taps ? 8664 : 8600))) { return false; }
         ggml_cuda_pool_alloc<float> projection(ctx.pool(), proj->ne[0]);
         ggml_cuda_pool_alloc<block_q8_1> activation(ctx.pool(), 3072/QK8_1);
+        visit->activation = activation.get();
         a.proj = projection.get();
         a.dst = visit->mode == 2 ? dst->data : activation.get();
         visit->counters = ik_counters(ctx, 192, 10);

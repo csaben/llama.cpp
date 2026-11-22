@@ -1,0 +1,20 @@
+control
+head-to-head 4.83065 ms
+graph prefix        48.0 visits/token    25.090 us/visit
+graph visit         48.0 visits/token    31.839 us/visit
+graph qkv           48.0 visits/token    16.063 us/visit
+graph attention     48.0 visits/token     9.089 us/visit
+graph output        48.0 visits/token     6.799 us/visit
+late
+head-to-head 4.81694 ms
+ik_dense_late_gate  48.0 visits/token    31.630 us/visit
+split
+head-to-head 4.79721 ms
+staged scan+gate    48.0 visits/token    13.440 us/visit
+staged output       48.0 visits/token     7.047 us/visit
+three-stage visit   48.0 visits/token    31.320 us/visit
+staged qkv          48.0 visits/token    10.938 us/visit
+staged
+head-to-head 5.08228 ms
+two-stage visit     48.0 visits/token    37.207 us/visit
+staged qkv          48.0 visits/token    10.937 us/visit

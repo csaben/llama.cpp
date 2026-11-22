@@ -29,6 +29,20 @@ for lo, hi in zip(heads[-120:-1], heads[-119:]):
                 times["prefix + output"].append(visits[i + 1][4] - row[3])
             else:
                 times["full visit"].append(row[4] - row[3])
+        elif name == "ik_dense_scan_inputs":
+            if visits[i + 1][0] == "ik_dense_gate_scan":
+                assert visits[i + 2][0] == "ik_dense_output"
+                times["staged scan+gate"].append(visits[i + 1][4] - visits[i + 1][3])
+                times["staged output"].append(visits[i + 2][4] - visits[i + 2][3])
+                times["three-stage visit"].append(visits[i + 2][4] - row[3])
+            else:
+                assert visits[i + 1][0] == "ik_dense_late_gate"
+                times["two-stage visit"].append(visits[i + 1][4] - row[3])
+            times["staged qkv"].append(row[4] - row[3])
+        elif name in {"ik_dense_late_gate", "ik_dense_queue"}:
+            if i > 0 and visits[i - 1][0] == "ik_dense_scan_inputs":
+                continue
+            times[name].append(row[4] - row[3])
         elif name == "ik_projection_conv_kernel" and visits[i - 1][0] == "inkling_attn2_kernel":
             q, attn = visits[i - 2:i]
             if q[0] not in {"mul_mat_vec_q", "ik_segmented_projection"}:

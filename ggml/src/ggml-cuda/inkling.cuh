@@ -32,6 +32,7 @@ struct ik_dense_visit {
     const block_iq4_nl * wi, * wo;
     const block_q8_1 * x;
     float * out;
+    block_q8_1 * activation;
     ik_projection_conv conv;
     int * counters;
     int mode, prefetch;
