@@ -4579,6 +4579,7 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
 }
 
 #if defined(USE_CUDA_GRAPH) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11040
+template<bool retain>
 static __global__ void ik_gap_prefetch(const char * w, size_t stride, size_t bytes, const int32_t * ids, int experts) {
     const int expert = ids ? ids[blockIdx.y] : blockIdx.y;
     if ((unsigned) expert >= (unsigned) experts) {
@@ -4586,7 +4587,12 @@ static __global__ void ik_gap_prefetch(const char * w, size_t stride, size_t byt
     }
     w += expert*stride;
     for (size_t line = blockIdx.x*blockDim.x + threadIdx.x; line*128 < bytes; line += gridDim.x*blockDim.x) {
-        ggml_cuda_prefetch_l2(w + line*128);
+#if __CUDA_ARCH__ >= 800
+        if constexpr (retain) {
+            asm volatile("prefetch.global.L2::evict_last [%0];" :: "l"(w + line*128));
+        } else
+#endif
+        { ggml_cuda_prefetch_l2(w + line*128); }
     }
 }
 
@@ -4658,9 +4664,11 @@ struct ik_gap_branch {
         const void * selection = ids ? ids->data : nullptr;
         cudaKernelNodeParams kernel{};
         void * args[] = { &address, &stride, &bytes, &selection, &experts };
-        kernel.func = (void *) ik_gap_prefetch;
-        kernel.gridDim = dim3(std::min<int>((bytes + 4095)/4096, std::max(1, std::min(1024, std::max(1, blocks))/slots)), slots);
-        kernel.blockDim = dim3(32);
+        static const bool retain = ggml_cuda_env_flag("IK_GAP_RETAIN");
+        static const int threads = 32*std::min(8, std::max(1, ggml_cuda_env_int("IK_GAP_WARPS", 1)));
+        kernel.func = retain ? (void *) ik_gap_prefetch<true> : (void *) ik_gap_prefetch<false>;
+        kernel.gridDim = dim3(std::min<int>((bytes + 128*threads - 1)/(128*threads), std::max(1, std::min(1024, std::max(1, blocks))/slots)), slots);
+        kernel.blockDim = dim3(threads);
         kernel.kernelParams = args;
 
         stream = ctx.stream();
@@ -5961,6 +5969,28 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 GGML_UNUSED(integrated);
 #endif  // NDEBUG
 
+                static const int inline_mask = ggml_cuda_env_int("IK_INLINE_MASK", 0);
+                if (inline_mask && !should_launch_concurrent_events && !ggml_cuda_env_flag("IK_MR") && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X &&
+                        ((node->op == GGML_OP_RES_MIX && node->ne[0] == 2304 && node->ne[1] == 1 && (inline_mask & 1)) ||
+                        (node->op == GGML_OP_SHORTCONV_RES && ggml_is_vector(node) && node->ne[0] == 2304 && (inline_mask & 2)) ||
+                        (node->op == GGML_OP_GLU && ggml_get_glu_op(node) == GGML_GLU_OP_SITU && (inline_mask & 4)))) {
+                    int j = i + 1;
+                    while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j])) { ++j; }
+                    if (j < cgraph->n_nodes) {
+                        auto * next = cgraph->nodes[j];
+                        if (node->op == GGML_OP_GLU && next->op == GGML_OP_MUL_MAT_ID && next->src[1] == node && ggml_cuda_situ_prefetch(*cuda_ctx, node, next)) { continue; }
+                        const ggml_tensor * w = nullptr;
+                        if (next->op == GGML_OP_LOOP_CTRL_DOWN || next->op == GGML_OP_MUL_MAT) { w = next->src[0]; }
+                        if (next->op == GGML_OP_INKLING_ROUTER) {
+                            int ns = ggml_get_op_params_i32(next, 6);
+                            if (ns >= 1 && ns + 2 < GGML_MAX_SRC) { w = next->src[ns + 2]; }
+                        }
+                        if (w && w->buffer && w->buffer->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device) && ggml_is_contiguous(w)) {
+                            if (node->op == GGML_OP_RES_MIX) { ggml_cuda_op_res_mix(*cuda_ctx, node, w); continue; }
+                            if (node->op == GGML_OP_SHORTCONV_RES) { ggml_cuda_op_shortconv_res(*cuda_ctx, node, w); continue; }
+                        }
+                    }
+                }
                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
                 if (!ok) {
                     GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));

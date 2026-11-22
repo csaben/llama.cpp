@@ -2,6 +2,8 @@
 #include "inkling-common.cuh"
 #include "vecdotq.cuh"
 #include "cp-async.cuh"
+#include "unary.cuh"
+#include "ggml-cuda.h"
 
 #include <cmath>
 
@@ -121,7 +123,61 @@ void ggml_cuda_op_l2_clip(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 // res_mix: softmax-weighted mix of RMS-normalized states, one block per (token, query); optional RMS norm of the result
 // (scaled by nw) and F32 or Q8_1 output. query == nullptr: no mix, the (normalized) first state.
 
+struct ik_inline_prefetch {
+    const char * w;
+    int bytes;
+    int blocks;
+};
+
+static ik_inline_prefetch ik_make_prefetch(const ggml_tensor * w) {
+    static const int kib = std::min(6144, std::max(1, getenv("IK_INLINE_KIB") ? atoi(getenv("IK_INLINE_KIB")) : 512));
+    static const int blocks = std::min(512, std::max(1, getenv("IK_INLINE_BLOCKS") ? atoi(getenv("IK_INLINE_BLOCKS")) : 64));
+    return w ? ik_inline_prefetch{(const char *) w->data, int(std::min(ggml_nbytes(w), size_t(kib*1024))), blocks} : ik_inline_prefetch{};
+}
+
+static __device__ void ik_prefetch_tile(ik_inline_prefetch p, int block, int count) {
+    for (int i = (block*blockDim.x + threadIdx.x)*128; i < p.bytes; i += 128*count*blockDim.x) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(GGML_USE_HIP)
+        asm volatile("prefetch.global.L2::evict_last [%0];" :: "l"(p.w + i));
+#else
+        ggml_cuda_prefetch_l2(p.w + i);
+#endif
+    }
+}
+
+static __global__ void ik_situ_prefetch(const float * gate, const float * up, int gs, int us, block_q8_1 * x, const int32_t * ids,
+        float beta, float lb, size_t stride, ik_inline_prefetch pf) {
+    const int slot = blockIdx.y;
+    if (blockIdx.x >= 5) {
+        const int expert = ids[slot];
+        if ((unsigned) expert < 128) {
+            pf.w += expert*stride;
+            ik_prefetch_tile(pf, blockIdx.x - 5, gridDim.x - 5);
+        }
+        return;
+    }
+    const int i = blockIdx.x*256 + threadIdx.x;
+    if (i < 1152) {
+        const float v = ggml_cuda_op_situ_single(gate[slot*gs + i], up[slot*us + i], beta, lb);
+        ik_warp_store_q8_1(v, x + slot*36 + i/32, threadIdx.x%32, true);
+    }
+}
+
+bool ggml_cuda_situ_prefetch(ggml_backend_cuda_context & ctx, ggml_tensor * op, ggml_tensor * down) {
+    const auto * g = op->src[0], * u = op->src[1], * w = down->src[0], * ids = down->src[2];
+    if (!g || !u || g->type != GGML_TYPE_F32 || u->type != GGML_TYPE_F32 || g->nb[0] != 4 || u->nb[0] != 4 || g->nb[1] > INT_MAX || u->nb[1] > INT_MAX ||
+            !ggml_are_same_shape(g, u) || !ggml_are_same_shape(g, op) || !ggml_is_matrix(op) || op->ne[0] != 1152 || op->ne[1] != 8 ||
+            op->type != GGML_TYPE_Q8_1 || !ggml_is_contiguous(op) || ids->type != GGML_TYPE_I32 || !ggml_is_vector(ids) || ids->ne[0] != 8 || !ggml_is_contiguous(ids) ||
+            w->ne[2] != 128 || w->ne[3] != 1 || !ggml_is_contiguous(w) || !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device)) { return false; }
+    auto pf = ik_make_prefetch(w);
+    pf.bytes = int(std::min(w->nb[2], size_t(pf.bytes/8)));
+    ik_situ_prefetch<<<dim3(5 + (pf.blocks + 7)/8, 8), 256, 0, ctx.stream()>>>((const float *) g->data, (const float *) u->data,
+        g->nb[1]/4, u->nb[1]/4, (block_q8_1 *) op->data, (const int32_t *) ids->data, ggml_get_op_params_f32(op, 2), ggml_get_op_params_f32(op, 3), w->nb[2], pf);
+    return true;
+}
+
 struct ik_res_mix_norm {
+    ik_inline_prefetch pf;
     const float * nw;     // nullptr: no norm
     int64_t       nw_nb1; // bytes per query (0: shared)
     float         eps;
@@ -267,6 +323,10 @@ template <int block_size, bool q8, int NS = 0>
 static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
         const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
         const ik_res_mix_norm norm) {
+    if (blockIdx.x >= n_tok) {
+        ik_prefetch_tile(norm.pf, (blockIdx.x - n_tok)*gridDim.y + blockIdx.y, norm.pf.blocks*gridDim.y);
+        return;
+    }
     const int n_states = NS ? NS : state_count;
     constexpr int n_warps = block_size/WARP_SIZE;
 
@@ -410,7 +470,7 @@ bool ggml_cuda_supports_res_mix(const ggml_tensor * node) {
     return count >= 1 && count <= IK_MAX_STATES;
 }
 
-void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_tensor * next_w) {
     const ggml_tensor * query = dst->src[0];
 
     const bool has_norm = ggml_get_op_params_i32(dst, 3) != 0;
@@ -439,6 +499,7 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT(ggml_is_contiguous(dst));
 
     ik_res_mix_norm norm;
+    norm.pf = ik_make_prefetch(next_w);
     norm.nw     = norm_w ? (const float *) norm_w->data : nullptr;
     norm.nw_nb1 = norm_w && ggml_nrows(norm_w) > 1 ? norm_w->nb[1] : 0;
     norm.eps    = norm_eps;
@@ -466,7 +527,7 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                 static const bool specialize = getenv("IK_MIX_SPECIALIZE") && atoi(getenv("IK_MIX_SPECIALIZE")) != 0;
                 auto launch_mix = [&](auto state_count) {
                     constexpr int ns = decltype(state_count)::value;
-                    res_mix_f32_vec4<640, kQ8, ns><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
+                    res_mix_f32_vec4<640, kQ8, ns><<<dim3(n_tok + norm.pf.blocks, n_q), 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
                             n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
                 };
                 switch (specialize && (n_tok == 1 || (ik_mr_enabled() && n_tok <= 8)) ? n_states : 0) {
@@ -498,6 +559,7 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 // the thread of token n_t - 1 - k also stores the inputs it saw into state slot k
 
 struct ik_shortconv_args {
+    ik_inline_prefetch pf;
     const float * past; const float * w; const float * cur; const float * taps; const float * res;
     const int32_t * ids;
     float * dst; float * state;
@@ -558,6 +620,10 @@ static __device__ __forceinline__ float shortconv_res_one(const ik_shortconv_arg
 // one thread per (channel, token)
 template <int d_conv, bool has_taps>
 static __global__ void shortconv_res_f32(const ik_shortconv_args args) {
+    if (args.pf.blocks && blockIdx.x >= gridDim.x - args.pf.blocks) {
+        ik_prefetch_tile(args.pf, blockIdx.x - (gridDim.x - args.pf.blocks), args.pf.blocks);
+        return;
+    }
     const int64_t idx = (int64_t) blockIdx.x*blockDim.x + threadIdx.x;
     const int64_t n_tok = (int64_t) args.n_t*args.n_s;
     if (idx >= n_tok*args.n_chan) {
@@ -640,7 +706,7 @@ static __global__ void shortconv_res_rows_f32(const ik_shortconv_args args) {
     }
 }
 
-void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_tensor * next_w) {
     const ggml_tensor * past  = dst->src[0];
     const ggml_tensor * w     = dst->src[1];
     const ggml_tensor * cur   = dst->src[2];
@@ -650,6 +716,7 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
     const ggml_tensor * ids   = dst->src[6];
 
     ik_shortconv_args args;
+    args.pf = ik_make_prefetch(next_w);
     memcpy(&args.scale,          (const float *)   dst->op_params + 0, sizeof(float));
     memcpy(&args.post,           (const int32_t *) dst->op_params + 1, sizeof(int32_t));
     int32_t n_heads_post = 1;
@@ -709,7 +776,7 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
         } else {
             const int block_size = 256;
             const int64_t nblocks = (n_tok*args.n_chan + block_size - 1)/block_size;
-            shortconv_res_f32<kDC, kTaps><<<nblocks, block_size, 0, stream>>>(args);
+            shortconv_res_f32<kDC, kTaps><<<nblocks + args.pf.blocks, block_size, 0, stream>>>(args);
         }
     };
 

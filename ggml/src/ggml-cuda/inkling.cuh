@@ -4,8 +4,8 @@
 
 void ggml_cuda_op_l2_clip(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 bool ggml_cuda_supports_res_mix(const ggml_tensor * node);
-void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
-void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_tensor * next_w = nullptr);
+void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_tensor * next_w = nullptr);
 void ggml_cuda_op_rel_bias(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_loop_ctrl_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
@@ -22,3 +22,4 @@ bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * ds
 bool ggml_cuda_inkling_resident_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst);
 bool ggml_cuda_inkling_up_quant(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * situ);
+bool ggml_cuda_situ_prefetch(ggml_backend_cuda_context & ctx, ggml_tensor * op, ggml_tensor * down);
