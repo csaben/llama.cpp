@@ -1156,50 +1156,50 @@ This command was not run at 64K context in this phase (the measurements used a 3
 
 # Phase 7 (levers 1-2)
 
-Inference build `c71f680` on physical GPU1 (RTX 3090), one 64K slot. The staged preset uses three draft tokens, a four-row packed verify window, the folded 32K shortlist and GPU sampling. Fixed n3 had the highest long-reply rate on code and all three edits. Adaptive n2 was fastest on long prose.
+Inference build `59c71a9` on physical GPU1 (RTX 3090), one 64K slot. The staged preset uses three draft tokens, a four-row packed verify window, the folded 32K shortlist and GPU sampling. It reached 324.1 tok/s on short edit, 287.4 on long edit, 277.3 on long edit at 16K and 277.4 at 32K. Long prose peaked at 244.6 with n2-adapt.
 
 ### Served decode throughput
 
-Each value is generated tokens per second. Each configuration had a fresh server. Plain-mr used the same target, flags, tensor placement, sampling and context as the drafted runs. The two deep prompts had 16,044 and 32,045 prompt tokens. All full messages and 90,000 drafted token IDs matched plain at 3,000 tokens. [Long replies and comparisons](p7/final3000/).
+Each value is generated tokens per second. Each configuration had a fresh server. Plain-mr used the same target, flags, tensor placement, sampling and context as the drafted runs. The two deep prompts had 16,044 and 32,045 prompt tokens. All full messages and 90,000 drafted token IDs matched plain at 3,000 tokens. [Long replies and comparisons](p7/release/3000/).
 
 **384 generated tokens, median of three requests**
 
 | Configuration | Code | Edit | Prose | Edit @ 16K | Edit @ 32K |
 |---|---:|---:|---:|---:|---:|
-| plain-mr | 210.0 | 200.3 | 210.0 | 184.1 | 170.9 |
-| n2 | 236.8 | 290.1 | 191.1 | 264.2 | 238.5 |
-| n3 | 233.7 | 324.2 | 172.9 | 290.2 | 250.8 |
-| n4 | 210.4 | 312.4 | 148.8 | 276.3 | 229.8 |
-| n2-adapt | 235.2 | 290.2 | 190.9 | 263.5 | 237.2 |
-| n3-adapt | 232.0 | 323.2 | 172.3 | 292.1 | 243.2 |
-| n4-adapt | 229.0 | 321.3 | 171.1 | 290.4 | 245.2 |
+| plain-mr | 210.1 | 200.6 | 209.8 | 184.2 | 170.9 |
+| n2 | 236.0 | 291.1 | 190.6 | 263.8 | 236.6 |
+| n3 | 233.5 | 324.1 | 172.2 | 287.2 | 250.0 |
+| n4 | 211.1 | 311.7 | 148.6 | 276.9 | 229.8 |
+| n2-adapt | 235.6 | 290.2 | 191.3 | 263.4 | 236.6 |
+| n3-adapt | 231.0 | 322.7 | 172.8 | 289.0 | 246.8 |
+| n4-adapt | 227.8 | 320.6 | 171.7 | 289.9 | 243.5 |
 
-Fixed n3 improved the short edit from 308.4 tok/s on Round 4 to 324.2 (+5.1%), or +4.3% against Round 4's staged adaptive n3. Fixed n3 also lost to plain on short prose (172.9 vs 210.0). Every repeat agreed with its other two runs and with same-flags plain. Together the two matrices exercised 120 drafted replies and 124,560 token IDs. Both lengths also reproduced all four historical Round 4 plain messages and token streams. [Short replies, repetitions and comparisons](p7/final384/).
+Fixed n3 improved the short edit from 308.4 tok/s on Round 4 to 324.1 (+5.1%), or +4.3% against Round 4's staged adaptive n3. Short prose favored plain at 209.8 vs 172.2 for fixed n3. Every repeat agreed with its other two runs and with same-flags plain. Together the two matrices exercised 120 drafted replies and 124,560 token IDs. Both lengths also reproduced all four historical Round 4 plain messages and token streams. [Short replies, repetitions and comparisons](p7/release/384/).
 
 **3,000 generated tokens**
 
 | Configuration | Code | Edit | Prose | Edit @ 16K | Edit @ 32K |
 |---|---:|---:|---:|---:|---:|
-| plain-mr | 202.2 | 197.3 | 201.4 | 183.4 | 170.0 |
-| n2 | 253.2 | 270.2 | 243.9 | 254.5 | 251.5 |
-| n3 | 262.0 | 288.1 | 239.3 | 276.7 | 275.3 |
-| n4 | 238.9 | 273.2 | 217.7 | 261.7 | 267.3 |
-| n2-adapt | 251.9 | 268.6 | 244.4 | 253.6 | 250.4 |
-| n3-adapt | 260.1 | 287.3 | 241.8 | 276.3 | 274.4 |
-| n4-adapt | 247.2 | 272.8 | 237.6 | 275.1 | 274.1 |
+| plain-mr | 201.9 | 197.5 | 201.2 | 183.0 | 170.1 |
+| n2 | 254.2 | 271.6 | 243.9 | 255.4 | 251.4 |
+| n3 | 261.8 | 287.4 | 239.3 | 277.3 | 277.4 |
+| n4 | 238.1 | 274.6 | 217.8 | 262.2 | 267.5 |
+| n2-adapt | 252.8 | 270.6 | 244.6 | 254.1 | 250.6 |
+| n3-adapt | 260.0 | 286.3 | 210.6 | 274.0 | 276.0 |
+| n4-adapt | 258.3 | 285.1 | 237.7 | 274.6 | 274.8 |
 
-For fixed n3, the long edit improved from 273.6 to 288.1 tok/s (+5.3%) and edit at 16K from 259.3 to 276.7 (+6.7%) against fixed n3 on Round 4 (`399b61a`). Against the staged Round 4 adaptive preset, the gains were 8.0% and 10.5%. Phase 7 also measured the 32K edit, where fixed n3 beat same-flags plain by 61.9%.
+Fixed n3 improved long edit by 5.0% and long edit at 16K by 6.9% against fixed n3 on Round 4 (`399b61a`). Against Round 4's staged adaptive n3, the gains were 7.8% and 10.7%. At 32K, fixed n3 beat same-flags plain by 63.1%. The previous single-fence candidate (`c71f680`) produced identical messages and IDs. [Candidate long sweep](p7/final3000/), [short sweep](p7/final384/).
 
 **Effective mean round cost at 3,000 tokens, ms**
 
 | Configuration | Code | Edit | Prose | Edit @ 16K | Edit @ 32K |
 |---|---:|---:|---:|---:|---:|
-| plain-mr | 4.95 | 5.07 | 4.97 | 5.45 | 5.88 |
-| n2 | 9.71 | 10.08 | 9.69 | 10.77 | 11.41 |
-| n3 | 11.31 | 11.74 | 11.27 | 12.53 | 13.39 |
-| n4 | 13.81 | 14.54 | 13.73 | 15.53 | 16.65 |
+| plain-mr | 4.95 | 5.06 | 4.97 | 5.46 | 5.88 |
+| n2 | 9.67 | 10.03 | 9.69 | 10.73 | 11.42 |
+| n3 | 11.32 | 11.77 | 11.27 | 12.51 | 13.29 |
+| n4 | 13.86 | 14.47 | 13.72 | 15.50 | 16.64 |
 
-These costs divide total decode time by the estimated number of target steps (generated tokens minus accepted drafts). The last round can be truncated. They include host work, any graph captures during generation, and all device work. Long edit n3 used 2,113 accepted drafts vs 2,245 for n4. Its approximately 2.8 ms cheaper round outweighed n4's extra acceptance. [Long edit n3](p7/final3000/n3.txt), [n4](p7/final3000/n4.txt).
+These costs divide total decode time by the estimated number of target steps (generated tokens minus accepted drafts). The last round can be truncated. They include host work, any graph captures during generation, and all device work. Long edit n3 used 2,113 accepted drafts vs 2,245 for n4. The four-row verify saved more time than the fifth row's extra accepted drafts returned. [Long edit n3](p7/release/3000/n3.txt), [n4](p7/release/3000/n4.txt).
 
 ### Changes and ablations
 
@@ -1207,7 +1207,7 @@ The target saves the four extracted feature rows on its device, and the drafter 
 
 Each cached width has its own scheduler, tensor arena and CUDA graph addresses. The input uploader takes a bounded pinned snapshot of CPU tensors before the producer can overwrite them. Uploads and their consumers share the device stream. After a fence, the contexts can reuse the pinned storage of their cached schedulers. The cached-width policy learns the cost between consecutive rounds. It uses recent acceptance at each draft position because the current margins arrive after the next verify graph is submitted. Its short-context priors for plain and verify widths 1..5 are 1.00, 1.20, 1.67, 1.99, 2.35 and 2.87 plain steps. Switching between cached widths carries no graph-rebuild penalty.
 
-At adaptive cap 3 on the release binary, the previous cost model reached 319.9 tok/s on short edit and 284.9 / 274.7 / 271.7 on long edit / edit@16K / edit@32K. Retuning gave 323.2 and 287.3 / 276.3 / 274.4. On long prose it raised throughput from 235.9 to 241.8. Both policy versions agreed with plain for all five prompts at both lengths. [Previous-policy short A/B](p7/prior-policy384/), [long A/B](p7/prior-policy3000/).
+At adaptive cap 3 on candidate `c71f680`, the previous cost model reached 319.9 tok/s on short edit and 284.9 / 274.7 / 271.7 on long edit / edit@16K / edit@32K. Retuning gave 323.2 and 287.3 / 276.3 / 274.4. On long prose it raised throughput from 235.9 to 241.8. Both policy versions agreed with plain for all five prompts at both lengths. [Previous-policy short A/B](p7/prior-policy384/), [long A/B](p7/prior-policy3000/).
 
 | Trial | Inference commit | Short edit, fixed n3 (median tok/s) |
 |---|---|---:|
@@ -1236,7 +1236,7 @@ The 16-cell MMA microstep uses the two FP16 limbs of each query as two columns. 
 
 These are four-row target windows with all logits read back. The first trial used one prefix token. The final paired sweep below also starts with an empty cache. The first two columns use `10c8f8c`, except the 1,024-row control at `0f4c67b`. The last column uses `4b8cb7b`. The separate-kernel version reads each K/V tile once for all query warps, but pays for an extra launch and intermediate global partials. Staging a whole split inside the fused kernel also lost at 1K and 16K. At 16K, staging two or four rows cost 11.86 or 12.03 ms against 11.48 ms without staging (`0f4c67b`). Every row in these three depth sweeps matched single-token logits bit for bit. [Raw sweeps](p7/trials/).
 
-The release sweep at `c71f680` used 32 consecutive four-row windows per configuration. Times average the last 31 windows, with all logits read back. Packing added 0.10 ms from an empty cache and saved 0.25 / 0.29 / 0.51 ms at 4K / 16K / 32K. The separate shared-memory launch cost 9.56 ms from empty. All 1,152 rows across the nine runs matched single-token logits bit for bit. [Release depth sweep](p7/trials/final-depths.txt).
+The first one-fence sweep at `c71f680` used 32 consecutive four-row windows per configuration. Times average the last 31 windows, with all logits read back. Packing added 0.10 ms from an empty cache and saved 0.25 / 0.29 / 0.51 ms at 4K / 16K / 32K. The separate shared-memory launch cost 9.56 ms from empty. All 1,152 rows across the nine runs matched single-token logits bit for bit. [Candidate depth sweep](p7/trials/final-depths.txt).
 
 | Initial prefix | Separate rows, ms | Packed rows, ms |
 |---:|---:|---:|
@@ -1244,6 +1244,15 @@ The release sweep at `c71f680` used 32 consecutive four-row windows per configur
 | 4,096 | 11.20 | 10.95 |
 | 16,384 | 11.52 | 11.23 |
 | 32,768 | 12.71 | 12.20 |
+
+The final `59c71a9` run repeated both paths. All 1,024 rows matched single-token logits. [Final depth sweep](p7/release/depths.txt).
+
+| Initial prefix | Separate rows, ms | Packed rows, ms |
+|---:|---:|---:|
+| 0 | 9.28 | 9.38 |
+| 4,096 | 11.11 | 10.87 |
+| 16,384 | 11.48 | 11.21 |
+| 32,768 | 12.44 | 12.09 |
 
 At `8899fa9` we also packed the first four rows of a five-row window. Isolated target-window time at 32K went from 15.27 to 15.03 ms, with all 120 rows exact for each setting. Served fixed n4 fell from 271.0 to 263.4 tok/s on the long edit and from 260.2 to 256.9 at 16K. The release uses `IK_WINDOW_COLS=1`, which packs only four-row windows. [Five-row A/B](p7/wide/).
 
@@ -1261,13 +1270,13 @@ In launch order, injection, draft and target medians were 0.115 / 0.828 / 10.254
 
 `LLAMA_SPEC_PROF=1` on the short edit recorded 0 draft-read calls, 0.087 ms/step to submit the draft graph, 0.153 ms/step to submit injection, 0.004 ms/step for host sampling/acceptance and 0.002 ms/step to construct the verification batch after drafting. For comparison, candidate `c71f680` running the previous path (`r3_prof.sh`, 32K slot) made 102 draft-read calls. Its draft.decode, inject.decode, accept and batch.build timers were 1.063, 0.347, 0.011 and 0.004 ms/step. Both profiles verified 281 of 306 draft tokens over 104 target steps. [Previous path host timers](p7/control-profile.txt).
 
-The target wait includes outstanding device work from the drafter. The profiler's wall total includes prompt processing. Token selection runs on the GPU; the server still commits token history and rolls back its cache indices on the host after the fence. [Short host timers](p7/release/profile/short/spec.txt), [long host timers](p7/release/profile/edit/spec.txt).
+The target wait includes outstanding device work from the drafter. The profiler's wall total includes prompt processing. Token selection runs on the GPU. The server commits token history and rolls back its cache indices on the host after the fence. [Short host timers](p7/release/profile/short/spec.txt), [long host timers](p7/release/profile/edit/spec.txt).
 
 Nsight Systems 2024.6 with the installed CUDA 13.0 driver collected initialization events only. The API and CUDA-event traces above were collected with the repository probe. Benchmark tables use separate uninstrumented requests.
 
 ### Plain decode and exactness checks
 
-On the release build, `r4_checks.sh` replayed 1,699 rows from the old failing trace. Mixed widths, pad-boundary prefixes, and SWA ring wraps supplied another 1,015 rows. All 2,714 matched single-token logits with maximum absolute difference zero. The trace's two historical emitted IDs that differed from its greedy argmax are present in both evaluations. The six CLI greedy outputs matched Round 4 byte for byte. Prefill PPL was 3.0530 with either attention setting. Decode PPL was 4.1979 on default attention and 4.2038 on MR/MMA, identical to Round 4. The backend passed all 1,108 selected operation tests. [Logit checks](p7/checks/rows.txt), [greedy comparisons](p7/checks/greedy.txt), [PPL and backend output](p7/checks/).
+With both the release preset and default settings, `r4_checks.sh` replayed 1,699 rows from the old failing trace. Mixed widths, pad-boundary prefixes, and SWA ring wraps supplied another 1,015 rows. All 2,714 matched single-token logits with maximum absolute difference zero. The trace's two historical emitted IDs that differed from its greedy argmax are present in both evaluations. The six CLI greedy outputs matched Round 4 byte for byte. Prefill PPL was 3.0530 with either attention setting. Decode PPL was 4.1979 on default attention and 4.2038 on MR/MMA, identical to Round 4. The backend passed all 1,108 selected operation tests. [Staged logit checks](p7/release/checks/rows.txt), [greedy probes](p7/release/checks/greedy.txt), [PPL and backend output](p7/release/checks/), [default checks](p7/release/checks-default/).
 
 With Phase 7 flags off, three paired runs against the frozen Round 4 build found a small shortfall in candidate `c71f680`. In order, each row used old/new, new/old, old/new, with three repetitions per depth per invocation. The largest median paired loss in plain mode was 0.90% at 16K. MR/MMA-mode paired changes ranged from -0.06% to +0.31%. On the candidate, enabling only `IK_QUEUE_INPUTS=1` gave 221.69 / 202.89 / 191.95 / 176.87 tok/s in plain mode at depths 0 / 4K / 16K / 32K. The final change at `59c71a9` selects the pinned input uploader automatically for single-token Q8 Inkling attention on the supported CUDA topology. `IK_QUEUE_INPUTS=0` selects the previous copy path. The staged DSpark setting remains explicitly enabled. [Paired runs and input-copy controls](p7/checks/).
 
@@ -1280,7 +1289,7 @@ The final default-only check ran the Round 4 and `59c71a9` binaries from their r
 
 ### Reproduction and staging
 
-Run from the repository root on physical GPU1. The process sees that card as CUDA0. The final inference commit is `c71f680`. The short run sorts each set of three requests by decode rate after checking all three full messages and token streams.
+Run from the repository root on physical GPU1. The process sees that card as CUDA0. The final inference commit is `59c71a9`. The short run sorts each set of three requests by decode rate after checking all three full messages and token streams.
 
 ```bash
 source perf/p5env.sh
@@ -1297,7 +1306,7 @@ python3 perf/p6/r4_cmp.py /tmp/p7-short "${rows[@]}"
 CHECKS_OUT=/tmp/p7-checks bash perf/p6/r4_checks.sh
 ```
 
-The depth sweep uses the checker built by `r4_checks.sh` and enough corpus tokens for the deepest prefix:
+The depth sweep uses the checker built by `r4_checks.sh` and enough corpus tokens for the deepest prefix.
 
 ```bash
 cat perf/ppl.txt perf/ppl.txt > /tmp/p7-depth.txt
@@ -1309,7 +1318,7 @@ for depth in 0 4096 16384 32768; do
 done
 ```
 
-To reproduce the CUDA fence and graph measurements with the same environment and a CUDA 12.8 development toolkit:
+The CUDA fence and graph measurements use the same environment and a CUDA 12.8 development toolkit.
 
 ```bash
 g++ -std=c++17 -O2 -fPIC -shared perf/p7/timeline.cpp -I"$HOME/opt/cuda-12.8/include" -o /tmp/p7-timeline.so -ldl -lcudart
@@ -1318,7 +1327,7 @@ LD_PRELOAD=/tmp/p7-timeline.so LLAMA_SPEC_PROF=1 SPEC_SERVER_LOG=/tmp/p7-round.l
 python3 perf/p7/round_times.py /tmp/p7-round.log 3
 ```
 
-The staged server and its eight project libraries are in `~/inkling-live-bin-p7-c71f680`. All nine hashes verified, and the dynamic loader resolved every project library from the snapshot. The manual deploy script was syntax-checked and left unexecuted. [Deployment script](live/deploy-p7.sh), [SHA-256 manifest](p7/snapshot.sha256), [resolved libraries](p7/snapshot-libraries.txt).
+The staged server and its eight project libraries are in `~/inkling-live-bin-p7-59c71a9`. All nine hashes verified, and the dynamic loader resolved every project library from the snapshot. The manual deploy script was syntax-checked and left unexecuted. [Deployment script](live/deploy-p7.sh), [SHA-256 manifest](p7/snapshot.sha256), [resolved libraries](p7/snapshot-libraries.txt).
 
 ### Sources
 

@@ -1,21 +1,21 @@
 # Phase 7 hand-off
 
-The staged build is `c71f680`, local tag `p7-final-edit-324tok`, on branch `inkling-3090`. All measurements used physical GPU1 (RTX 3090). The release uses a fixed three-token draft, four-row MMA verification, a folded 32K shortlist, GPU-resident embedding tables and one 64K slot. The scripts and benchmark records after the inference commit leave the staged binary unchanged.
+The staged build is `59c71a9`, local tag `p7-release-edit-324tok`, on branch `inkling-3090`. All measurements used physical GPU1 (RTX 3090). The release uses a fixed three-token draft, four-row MMA verification, a folded 32K shortlist, GPU-resident embedding tables and one 64K slot.
 
 | Edit workload | Round 4 staged adaptive n3 | Phase 7 staged fixed n3 | Same-flags Phase 7 plain |
 |---|---:|---:|---:|
-| 384 tokens, median of three | 310.7 | 324.2 | 200.3 |
-| 3,000 tokens | 266.6 | 288.1 | 197.3 |
-| 3,000 tokens at 16K | 250.5 | 276.7 | 183.4 |
-| 3,000 tokens at 32K | | 275.3 | 170.0 |
+| 384 tokens, median of three | 310.7 | 324.1 | 200.6 |
+| 3,000 tokens | 266.6 | 287.4 | 197.5 |
+| 3,000 tokens at 16K | 250.5 | 277.3 | 183.0 |
+| 3,000 tokens at 32K | n/a | 277.4 | 170.1 |
 
-- Fixed n3 won all three long edits and long code. It reached 239.3 tok/s on long prose and 172.9 tok/s on short prose (plain 201.4 and 210.0). The target graphs consumed most of the round. Exactly one CUDA synchronization occurred in each of 1,800 measured steady fixed-n3 rounds. The serialized draft and target alone exceeded each requested whole-reply time budget at the observed acceptance. A five-row pack improved the isolated 32K scan but reduced served throughput.
-- Packing four query rows into one pass at each head matched single-token reductions for full and sliding attention. At initial depths 0 / 4K / 16K / 32K, separate rows cost 9.22 / 11.20 / 11.52 / 12.71 ms. Packed rows cost 9.32 / 10.95 / 11.23 / 12.20 ms. Device feature rows and draft IDs, schedulers cached by width and pinned graph inputs let the target verify before the host reads the draft. The target sampler determines the result, then the host applies the verified rollback boundary.
-- All 120 drafted replies and 124,560 generated token IDs in the required matrices matched same-flags plain. The trace, pad-boundary and SWA rollback battery had 0 differing logits in 2,714 rows. The separate depth sweep had 0 in another 1,152. Six greedy probes matched Round 4, PPL reproduced 3.0530 prefill and 4.1979 / 4.2038 decode, and 1,108 backend checks passed.
-- The snapshot is `~/inkling-live-bin-p7-c71f680`. All nine hashes and the library search paths verified. The manual [deploy script](live/deploy-p7.sh) was syntax-checked and left unexecuted. Phase 7 touched no live service or container and made no remote repository changes.
-- [Full results, sources, commands and tradeoffs](RESULTS.md#phase-7-levers-1-2), [long matrix](p7/final3000/), [short matrix](p7/final384/), [GPU timelines](p7/final-profile/), [plain and correctness checks](p7/checks/), [snapshot manifest](p7/snapshot.sha256).
+- Fixed n3 gave 261.8 tok/s on long code and 239.3 on long prose. Short prose favored plain (209.8 vs 172.2). The target graphs consumed most of the round. Exactly one CUDA synchronization occurred in each of 1,800 measured steady fixed-n3 rounds. The serialized draft and target alone exceeded each requested whole-reply time budget at the observed acceptance. A five-row pack improved the isolated 32K scan but reduced served throughput.
+- Packing four query rows into one pass at each head matched single-token reductions for full and sliding attention. At initial depths 0 / 4K / 16K / 32K, separate rows cost 9.28 / 11.11 / 11.48 / 12.44 ms. Packed rows cost 9.38 / 10.87 / 11.21 / 12.09 ms. Device feature rows and draft IDs, schedulers cached by width and pinned graph inputs let the target verify before the host reads the draft. The target sampler determines the result, then the host applies the verified rollback boundary.
+- All 120 drafted replies and 124,560 generated token IDs in the required matrices matched same-flags plain. The trace, pad-boundary and SWA rollback battery had 0 differing logits in 2,714 rows. The separate depth sweep had 0 in another 1,024. Six greedy probes matched Round 4, PPL reproduced 3.0530 prefill and 4.1979 / 4.2038 decode, and 1,108 backend checks passed.
+- The snapshot is `~/inkling-live-bin-p7-59c71a9`. All nine hashes and the library search paths verified. The manual [deploy script](live/deploy-p7.sh) was syntax-checked and left unexecuted. Phase 7 touched no live service or container and made no remote repository changes.
+- [Full results, sources, commands and tradeoffs](RESULTS.md#phase-7-levers-1-2), [long matrix](p7/release/3000/), [short matrix](p7/release/384/), [GPU timelines](p7/release/profile/), [plain and correctness checks](p7/release/checks/), [snapshot manifest](p7/snapshot.sha256).
 
-The reversed-order controls caught a 0.26-0.90% default plain shortfall in `c71f680`. New inference build `59c71a9` selects the tested queued input path for single-row Q8 Inkling decode. Its median plain and MR/MMA throughput now exceeds Round 4 at every required depth without enabling Phase 7 flags. Both release correctness batteries passed, and all 30 long comparisons matched plain. Fixed n3 gave 287.4 / 277.3 / 277.4 tok/s on the three long edits. The short medians and final depth sweep are running on GPU1.
+Plain decode passed at all four required depths in default and MR/MMA modes. The final change automatically queues CUDA input copies for single-row Q8 Inkling attention. [Paired benchmarks](p7/release/bench/), [default checks](p7/release/checks-default/).
 
 # Phase 6 hand-off (keep current; newest status first)
 

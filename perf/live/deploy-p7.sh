@@ -8,7 +8,7 @@ unit=inkling-3090-experiment
 draft="$HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf"
 test -r "$Q2"
 test -r "$draft"
-snapshot="$HOME/inkling-live-bin-p7-c71f680"
+snapshot="$HOME/inkling-live-bin-p7-59c71a9"
 test -x "$snapshot/llama-server"
 (cd "$snapshot" && sha256sum -c "$repo/perf/p7/snapshot.sha256")
 if systemctl --user is-active --quiet "$unit"; then
