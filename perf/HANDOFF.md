@@ -12,7 +12,7 @@ GPU1 only. Starting tree `c8eefdf`, Round 4 inference baseline `399b61a`. The li
 
 - The follow-up moved the mask embedding to the GPU and shared the target fence with draft readback. CUDA API tracing recorded exactly one synchronization call in all 88 complete short-edit rounds on trial `24b9447` (`perf/p7/fence/gpu.rounds.txt`). The release integration is `c71f680`; validation runs on a private test port.
 
-- Final long matrix on `c71f680`: all 30 full messages and 90,000 drafted IDs matched plain. Fixed n3 won code and all three edits at 262.0 / 288.1 / 276.7 / 275.3 tok/s (code / edit / edit@16K / edit@32K). Adaptive n2 won prose at 244.4. The deploy script stages fixed n3. Short medians and the closing plain/depth A/B are in progress.
+- Final long matrix on `c71f680`: all 30 full messages and 90,000 drafted IDs matched plain. Fixed n3 won code and all three edits at 262.0 / 288.1 / 276.7 / 275.3 tok/s (code / edit / edit@16K / edit@32K). Adaptive n2 won prose at 244.4. The deploy script stages fixed n3. All five short prompts also matched plain in all three repeats for all six configurations. Fixed n3 reached 324.2 tok/s on short edit. The closing plain/depth A/B is in progress.
 
 # Phase 6 hand-off (keep current; newest status first)
 

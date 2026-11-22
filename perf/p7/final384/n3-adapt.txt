@@ -1,0 +1,5 @@
+n3-adapt       code      prompt     47   384 tok   232.0 tok/s    1320 chars  accepted/proposed 226/460  runs 231/232/232
+n3-adapt       edit      prompt   1025   384 tok   323.2 tok/s    1115 chars  accepted/proposed 280/303  runs 323/323/323
+n3-adapt       prose     prompt     36   384 tok   172.3 tok/s    1474 chars  accepted/proposed 170/617  runs 171/172/173
+n3-adapt       edit@16K  prompt  16044   384 tok   292.1 tok/s    1196 chars  accepted/proposed 277/312  runs 289/292/292
+n3-adapt       edit@32K  prompt  32045   384 tok   243.2 tok/s    1321 chars  accepted/proposed 264/347  runs 242/243/247

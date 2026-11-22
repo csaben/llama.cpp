@@ -1162,6 +1162,20 @@ Inference build `c71f680` on physical GPU1 (RTX 3090), one 64K slot. The staged 
 
 Each value is generated tokens per second. Each configuration had a fresh server. Plain-mr used the same target, flags, tensor placement, sampling and context as the drafted runs. The two deep prompts had 16,044 and 32,045 prompt tokens. All full messages and 90,000 drafted token IDs matched plain at 3,000 tokens. [Long replies and comparisons](p7/final3000/).
 
+**384 generated tokens, median of three requests**
+
+| Configuration | Code | Edit | Prose | Edit @ 16K | Edit @ 32K |
+|---|---:|---:|---:|---:|---:|
+| plain-mr | 210.0 | 200.3 | 210.0 | 184.1 | 170.9 |
+| n2 | 236.8 | 290.1 | 191.1 | 264.2 | 238.5 |
+| n3 | 233.7 | 324.2 | 172.9 | 290.2 | 250.8 |
+| n4 | 210.4 | 312.4 | 148.8 | 276.3 | 229.8 |
+| n2-adapt | 235.2 | 290.2 | 190.9 | 263.5 | 237.2 |
+| n3-adapt | 232.0 | 323.2 | 172.3 | 292.1 | 243.2 |
+| n4-adapt | 229.0 | 321.3 | 171.1 | 290.4 | 245.2 |
+
+Fixed n3 improved the short edit from 308.4 tok/s on Round 4 to 324.2 (+5.1%), or +4.3% against Round 4's staged adaptive n3. Fixed n3 also lost to plain on short prose (172.9 vs 210.0). Every repeat agreed with its other two runs and with same-flags plain. Together the two matrices exercised 120 drafted replies and 124,560 token IDs. Both lengths also reproduced all four historical Round 4 plain messages and token streams. [Short replies, repetitions and comparisons](p7/final384/).
+
 **3,000 generated tokens**
 
 | Configuration | Code | Edit | Prose | Edit @ 16K | Edit @ 32K |
@@ -1238,6 +1252,10 @@ In launch order, injection, draft and target medians were 0.114 / 0.820 / 10.137
 
 Nsight Systems 2024.6 with the installed CUDA 13.0 driver collected initialization events only. The API and CUDA-event traces above were collected with the repository probe. Benchmark tables use separate uninstrumented requests.
 
+### Plain decode and exactness checks
+
+On the release build, `r4_checks.sh` replayed 1,699 rows from the old failing trace. Mixed widths, pad-boundary prefixes, and SWA ring wraps supplied another 1,015 rows. All 2,714 matched single-token logits with maximum absolute difference zero. The trace's two historical emitted IDs that differed from its greedy argmax are present in both evaluations. The six CLI greedy outputs matched Round 4 byte for byte. Prefill PPL was 3.0530 with either attention setting. Decode PPL was 4.1979 on default attention and 4.2038 on MR/MMA, identical to Round 4. The backend passed all 1,108 selected operation tests. [Logit checks](p7/checks/rows.txt), [greedy comparisons](p7/checks/greedy.txt), [PPL and backend output](p7/checks/).
+
 ### Reproduction and staging
 
 Run from the repository root on physical GPU1. The process sees that card as CUDA0. The final inference commit is `c71f680`. The short run sorts each set of three requests by decode rate after checking all three full messages and token streams.
@@ -1255,6 +1273,18 @@ python3 perf/p6/r4_cmp.py /tmp/p7-long "${rows[@]}"
 SPEC_MAXT=384 SPEC_REPS=3 bash perf/p6/r4_spec.sh /tmp/p7-short "${rows[@]}"
 python3 perf/p6/r4_cmp.py /tmp/p7-short "${rows[@]}"
 CHECKS_OUT=/tmp/p7-checks bash perf/p6/r4_checks.sh
+```
+
+The depth sweep uses the checker built by `r4_checks.sh` and enough corpus tokens for the deepest prefix:
+
+```bash
+cat perf/ppl.txt perf/ppl.txt > /tmp/p7-depth.txt
+for depth in 0 4096 16384 32768; do
+    for pack in 0 1; do
+        MR_CTX=34816 MR_SIZES=4 MR_ROLLBACK=0 MR_RS_A=0 MR_RS=4 IK_MR=1 IK_MMA=3 IK_WINDOW_COLS=$pack \
+            LD_LIBRARY_PATH=build/bin build/bin/mr_check "$Q2" /tmp/p7-depth.txt "$depth" 32
+    done
+done
 ```
 
 To reproduce the CUDA fence and graph measurements with the same environment and a CUDA 12.8 development toolkit:
