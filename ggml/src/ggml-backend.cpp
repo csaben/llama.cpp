@@ -1187,6 +1187,7 @@ struct ggml_backend_sched_split {
 struct ggml_backend_sched {
     bool is_reset; // true if the scheduler has been reset since the last graph split
     bool is_alloc;
+    bool queue_inputs;
     ggml_backend_buffer_t upload_buffer;
     size_t upload_used;
 
@@ -1504,6 +1505,12 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
     graph->uid = ggml_graph_next_uid();
 
+    static const int queue_inputs = []() {
+        const char * env = getenv("IK_QUEUE_INPUTS");
+        return env ? (int) (atoi(env) != 0) : -1;
+    }();
+    sched->queue_inputs = queue_inputs == 1;
+
     // pass 1: assign backends to ops with pre-allocated inputs
     for (int i = 0; i < graph->n_leafs; i++) {
         struct ggml_tensor * leaf = graph->leafs[i];
@@ -1516,6 +1523,9 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
     for (int i = 0; i < graph->n_nodes; i++) {
         struct ggml_tensor * node = graph->nodes[i];
+        if (queue_inputs < 0 && node->op == GGML_OP_INKLING_ATTN && node->type == GGML_TYPE_Q8_1 && node->ne[1] == 1 && node->src[4]->type == GGML_TYPE_Q8_0) {
+            sched->queue_inputs = true;
+        }
         int * node_backend_id = &tensor_backend_id(node);
         // do not overwrite user assignments
         if (*node_backend_id == -1) {
@@ -2126,10 +2136,9 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
         }
     }
 
-    static const bool queue_inputs = getenv("IK_QUEUE_INPUTS") && atoi(getenv("IK_QUEUE_INPUTS"));
     constexpr size_t capacity = 4*1024*1024;
-    const size_t bytes = ggml_nbytes(input);
-    if (queue_inputs && ggml_backend_dev_type(input_backend->device) == GGML_BACKEND_DEVICE_TYPE_CPU &&
+    const size_t bytes = sched->queue_inputs ? ggml_nbytes(input) : 0;
+    if (sched->queue_inputs && ggml_backend_dev_type(input_backend->device) == GGML_BACKEND_DEVICE_TYPE_CPU &&
             !ggml_backend_sched_is_host_weight(input) && sched->n_backends == 2 && split_backend_id == 0 && sched->n_copies == 1 &&
             ggml_backend_buffer_is_host(input->buffer) && split_backend->iface.set_tensor_async && bytes <= capacity &&
             input_cpy->buffer->buft == ggml_backend_dev_buffer_type(split_backend->device) &&
