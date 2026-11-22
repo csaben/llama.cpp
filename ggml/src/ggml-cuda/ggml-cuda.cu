@@ -4682,6 +4682,28 @@ struct ik_gap_branch {
 };
 #endif
 
+static int ik_try_attention_visit(ggml_backend_cuda_context & ctx, ggml_cgraph * graph, int i) {
+    static const bool enabled = ggml_cuda_env_flag("IK_ATTN_VISIT") && !ggml_cuda_env_flag("IK_MR");
+    auto * attn = graph->nodes[i];
+    if (!enabled || !ctx.stream_context().concurrent_events.empty() || attn->op != GGML_OP_INKLING_ATTN ||
+            attn->src[4]->ne[2] != 256 || attn->type != GGML_TYPE_Q8_1 || !ggml_is_vector(attn) || attn->ne[0] != 3072 ||
+            !ggml_is_contiguous(attn) || !ggml_node_has_n_uses(graph, i, 1) || !ggml_cuda_info().devices[ctx.device].supports_cooperative_launch) {
+        return 0;
+    }
+    int j = i + 1;
+    while (j < graph->n_nodes && ggml_cuda_is_view_or_noop(graph->nodes[j])) { ++j; }
+    if (j == graph->n_nodes) { return 0; }
+    auto * mm = graph->nodes[j];
+    if (mm->op != GGML_OP_MUL_MAT || mm->src[1] != attn || !(mm->flags & GGML_TENSOR_FLAG_COMPUTE) || mm->src[0]->type != GGML_TYPE_IQ4_NL ||
+            !ggml_is_matrix(mm->src[0]) || !ggml_is_contiguous(mm->src[0]) || mm->src[0]->ne[0] != 3072 || mm->src[0]->ne[1] != 2304 ||
+            !ggml_is_vector(mm) || !ggml_is_contiguous(mm) || mm->type != GGML_TYPE_F32 || !mm->src[0]->buffer ||
+            mm->src[0]->buffer->buft != ggml_backend_cuda_buffer_type(ctx.device) || (uintptr_t) mm->src[0]->data % 16) { return 0; }
+    bool consumed = false;
+    ggml_cuda_op_inkling_attn(ctx, attn, mm, &consumed);
+    if (!consumed) { ggml_cuda_mul_mat_vec_q(ctx, mm->src[0], attn, nullptr, mm); }
+    return j - i;
+}
+
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i, int gap_mask) {
     GGML_UNUSED(gap_mask);
@@ -4692,6 +4714,10 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+    if (node->op == GGML_OP_INKLING_ATTN) {
+        const int extra = ik_try_attention_visit(*cuda_ctx, cgraph, i);
+        if (extra) { return extra; }
+    }
     static const bool proj_conv = ggml_cuda_env_flag("IK_PROJ_CONV") && !ggml_cuda_env_flag("IK_MR");
     if (proj_conv && node->op == GGML_OP_MUL_MAT && ggml_is_vector(node) && node->src[1]->type == GGML_TYPE_Q8_1 &&
             ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X && cuda_ctx->stream_context().concurrent_events.empty() &&
@@ -4744,6 +4770,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                 gap.start(*cuda_ctx, cgraph, j, gap_mask);
             }
 #endif
+            const int extra = ik_try_attention_visit(*cuda_ctx, cgraph, j);
+            if (extra) { return j + extra - i; }
             ggml_cuda_op_inkling_attn(*cuda_ctx, cgraph->nodes[j]);
             return j - i;
         }

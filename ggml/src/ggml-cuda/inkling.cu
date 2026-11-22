@@ -2371,7 +2371,7 @@ static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float 
 #define IK_A2_MIN_BLOCKS 1
 #endif
 template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
-static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in) {
+static __device__ __forceinline__ void ik_attn2_body(const ik_attn_args args_in) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
@@ -2999,6 +2999,142 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     IK_DBG_T(7);
 }
 
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
+static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in) {
+    ik_attn2_body<cache_t, q8_out, G, MMA, MR, HAS_TAPS, SHORT_SCAN>(args_in);
+}
+
+static __device__ __forceinline__ float ik_visit_dot(float sum, const block_iq4_nl * w, const block_q8_1 * x, int iqs) {
+    const ik_iq4_nl_w decoded = ik_iq4_nl_decode(w, 0, iqs);
+    const int * q = (const int *) x->qs + iqs;
+    int dot = 0;
+#pragma unroll
+    for (int j = 0; j < VDR_IQ4_NL_Q8_1_MMVQ; ++j) {
+        dot = ggml_cuda_dp4a(decoded.v[j].x, q[j], dot);
+        dot = ggml_cuda_dp4a(decoded.v[j].y, q[j + 4], dot);
+    }
+    return __fmaf_rn(__fmul_rn(decoded.d, __low2float(x->ds)), float(dot), sum);
+}
+
+template <int taps>
+static __global__ void __launch_bounds__(IK_A2_BLOCK) ik_attention_visit(const ik_attn_args a, const block_iq4_nl * weights,
+        float * out, int * sync, int tile_rows, int mode) {
+    if (blockIdx.x < 8) {
+        ik_attn2_body<block_q8_0, true, 3, true, false, taps, true>(a);
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            if (mode >= 3) { ik_st_release(sync + 2 + blockIdx.x, 1); }
+            ik_atomic_add_acq_rel(sync, 1);
+        }
+        return;
+    }
+    extern __shared__ __align__(16) char tile[];
+    constexpr int blocks = 3072/QK4_NL;
+    const int worker = blockIdx.x - 8, workers = gridDim.x - 8;
+    const int first = worker*tile_rows;
+    const int lane = threadIdx.x % WARP_SIZE, warp = threadIdx.x/WARP_SIZE;
+    const int bytes = tile_rows*blocks*sizeof(block_iq4_nl);
+    const char * src = (const char *) (weights + first*blocks);
+    if (mode == 1 || mode == 3) {
+        if (mode == 3) {
+            constexpr int head_bytes = 12*sizeof(block_iq4_nl);
+            // Head slices start on 8-byte boundaries. Copy aligned 4-byte words without crossing a head.
+            for (int r = 0; r < tile_rows; ++r) {
+                for (int i = lane*4; i < head_bytes; i += WARP_SIZE*4) {
+                    int off = r*blocks*sizeof(block_iq4_nl) + warp*head_bytes + i;
+#if defined(CP_ASYNC_AVAILABLE)
+                    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;" :: "r"(ggml_cuda_cvta_generic_to_shared(tile + off)), "l"(src + off));
+#endif
+                }
+            }
+        } else {
+            for (int i = threadIdx.x*16; i < bytes; i += IK_A2_BLOCK*16) {
+                cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(tile + i), src + i);
+            }
+        }
+        cp_async_commit_group();
+    } else if (mode == 2) {
+        for (int i = threadIdx.x*128; i < bytes; i += IK_A2_BLOCK*128) {
+            ggml_cuda_prefetch_l2(src + i);
+        }
+    }
+    if (mode >= 3) {
+        if (lane == 0) {
+            while (ik_ld_acquire(sync + 2 + warp) == 0) { __nanosleep(32); }
+        }
+        __syncwarp();
+    } else {
+        if (threadIdx.x == 0) {
+            while (ik_ld_acquire(sync) != 8) { __nanosleep(32); }
+        }
+    }
+    if (mode == 1 || mode == 3) { cp_async_wait_all(); __syncwarp(); }
+    if (mode < 3) { __syncthreads(); }
+    __shared__ float head_sum[24][8];
+    const block_q8_1 * x = (const block_q8_1 *) a.dst;
+    for (int start = first; start < 2304; start += workers*tile_rows) {
+        const block_iq4_nl * w = (mode == 1 || mode == 3) && start == first ? (const block_iq4_nl *) tile : weights + start*blocks;
+        if (mode >= 3) {
+            // Each warp owns the projection columns of one KV head. The producer releases just that head.
+            const int b = warp*12 + lane/2;
+            for (int r = 0; r < tile_rows; ++r) {
+                const float dot = lane < 24 ? vec_dot_iq4_nl_q8_1(w, x + b, r*blocks + b, 2*(lane%2)) : 0.0f;
+                const float sum = warp_reduce_sum(dot);
+                if (lane == 0) { head_sum[r][warp] = sum; }
+            }
+            __syncthreads();
+            for (int r = warp; r < tile_rows; r += 8) {
+                const float sum = warp_reduce_sum(lane < 8 ? head_sum[r][lane] : 0.0f);
+                if (lane == 0) { out[start + r] = sum; }
+            }
+            __syncthreads();
+            continue;
+        }
+        for (int r = warp; r < tile_rows; r += IK_A2_WARPS) {
+            float partial[4] = {};
+#pragma unroll
+            for (int base = 0; base < blocks; base += 64) {
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const int b = base + j*16 + lane/2;
+                    if (b < blocks) {
+                        partial[j] = ik_visit_dot(partial[j], w + r*blocks + b, x + b, 2*(lane%2));
+                    }
+                }
+            }
+            const float sum = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(partial[0], partial[1]), partial[2]), partial[3]));
+            if (lane == (start + r)%2) { out[start + r] = sum; }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0 && ik_atomic_add_acq_rel(sync + 1, 1) == workers - 1) {
+        sync[0] = sync[1] = 0;
+        if (mode >= 3) { for (int h = 0; h < 8; ++h) { sync[2 + h] = 0; } }
+    }
+}
+
+template<int taps>
+static void ik_launch_attention_visit(ggml_backend_cuda_context & ctx, ik_attn_args a, ggml_tensor * proj) {
+    static const int requested = getenv("IK_VISIT_ROWS") ? atoi(getenv("IK_VISIT_ROWS")) : 16;
+    int mode = getenv("IK_VISIT_MODE") ? atoi(getenv("IK_VISIT_MODE")) : 1;
+    static const int cap = getenv("IK_VISIT_BLOCKS") ? std::max(1, atoi(getenv("IK_VISIT_BLOCKS"))) : 1024;
+    int rows = requested == 8 ? 8 : requested == 24 ? 24 : 16;
+    auto kernel = ik_attention_visit<taps>;
+    size_t shared = mode == 1 || mode == 3 ? rows*(3072/QK4_NL)*sizeof(block_iq4_nl) : 0;
+    if (shared > 0) {
+        CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, int(shared)));
+    }
+    int active;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, kernel, IK_A2_BLOCK, shared));
+    int workers = std::min({active*ggml_cuda_info().devices[ctx.device].nsm - 8, 2304/rows, cap});
+    GGML_ASSERT(workers > 0);
+    ggml_cuda_pool_alloc<block_q8_1> scratch(ctx.pool(), 3072/QK8_1);
+    a.dst = scratch.get();
+    int * sync = ik_counters(ctx, 216, 10);
+    void * params[] = {&a, &proj->src[0]->data, &proj->data, &sync, &rows, &mode};
+    CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, dim3(workers + 8), dim3(IK_A2_BLOCK), params, shared, ctx.stream()));
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // inkling_attn_scan: the scan of a long Q8_0 cache as its own launch. A (cell, kv head) row is 136 bytes, so it lies
 // across two 128-byte lines that it shares with the rows of the neighbouring heads. With one block per kv head (the
@@ -3226,7 +3362,7 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
     }
 }
 
-void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * proj_out, bool * consumed) {
     const ggml_tensor * proj    = dst->src[0];
     const ggml_tensor * consts  = dst->src[1];
     ggml_tensor       * state   = dst->src[2];
@@ -3411,6 +3547,12 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     }
     const dim3 grid(a.n_head_kv, a.n_split, 1);
     if (fixed) {
+        if (short_scan && proj_out) {
+            if (a.has_taps) { ik_launch_attention_visit<1>(ctx, a, proj_out); }
+            else            { ik_launch_attention_visit<0>(ctx, a, proj_out); }
+            *consumed = true;
+            return;
+        }
         if (short_scan) {
             if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 1, true><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
             else            { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 0, true><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
