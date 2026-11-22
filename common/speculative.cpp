@@ -1543,6 +1543,7 @@ protected:
         float  last_margin[ADAPT_T_MAX] = {};
         int64_t   last_us = 0;
         llama_pos last_pos0 = -1;
+        bool   warmup = false;
         bool   from_history = false;
         int    history_steps = 0, history_accepted = 0, history_proposed = 0;
         int    weak_windows = 0;             // consecutive windows below the required rate
@@ -1622,9 +1623,11 @@ protected:
     // accounts the step that ended; false: this step is plain (the drafter stays off)
     bool adaptive_begin(llama_pos pos0) {
         const int64_t now = ggml_time_us();
-        const bool fresh = !adapt.last_valid || pos0 <= adapt.last_pos0 || pos0 - adapt.last_pos0 > params.n_max + 1 || now - adapt.last_us >= 250000;
+        const int max_accepted = cached_policy ? adapt.last_n : params.n_max;
+        const bool fresh = !adapt.last_valid || pos0 <= adapt.last_pos0 || pos0 - adapt.last_pos0 > max_accepted + 1 || now - adapt.last_us >= 250000;
         if (fresh) {
             // A pause invalidates the timing between these two steps.
+            adapt.warmup = cached_policy;
             adapt.off_left = 0;
             adapt.off_len  = cached_policy ? 1 : 8;
             adapt.weak_windows = 0;
@@ -1652,6 +1655,9 @@ protected:
                 const double gain = (1.0 + n_acc)*adaptive_cost(0)/adaptive_cost(t);
                 adapt.gain += 0.20*(gain - adapt.gain);
                 ++adapt.n_on;
+                if (adapt.n_on >= 4 && adapt.gain < 1.22) {
+                    adapt.warmup = false;
+                }
                 for (int b = 0; b < ADAPT_BINS; ++b) {
                     adapt.ok[b] *= 0.92;
                     adapt.tested[b] *= 0.92;
@@ -1679,7 +1685,7 @@ protected:
         adapt.last_n     = 0;
         // Sample plain steps as the context grows. Skip the first timing for each graph shape.
         if (fresh) {
-            adapt.plain_due = cached_policy ? 12 : 4;
+            adapt.plain_due = cached_policy ? 16 : 4;
         } else if (adapt.off_left == 0 && adapt.plain_due > 0 && --adapt.plain_due == 0) {
             adapt.plain_take = adapt.cost_n[0] < 2 ? 3 : 2;
             adapt.plain_due  = 192;
@@ -1725,6 +1731,10 @@ protected:
             }
         }
         if (cached_policy) {
+            const int packed = std::min(n, 3);
+            if (adapt.warmup && packed > 0 && packed >= params.n_min && *std::min_element(margin, margin + packed) >= 2.0f) {
+                best_k = packed;
+            }
             adapt.weak_windows = best*adaptive_cost(0) < 1.02 ? adapt.weak_windows + 1 : 0;
         } else {
             // drafting stays on while the best window of the last steps beats a plain step
@@ -1888,7 +1898,7 @@ public:
             auto & dp = dparams[0];
             if (cached_policy && dp.allow_device_draft && dp.prompt) {
                 // A repeated prefix can supply a verified window without running the model drafter.
-                const uint16_t match = adapt.history_steps >= 2 && adapt.history_accepted < 0.5*adapt.history_proposed ? 12 : 8;
+                const uint16_t match = adapt.history_steps >= 2 && adapt.history_accepted < 0.5*adapt.history_proposed ? 16 : 12;
                 auto continuation = common_ngram_simple_draft({ match, match }, *dp.prompt, dp.id_last);
                 const int limit = dp.n_max > 0 ? std::min(dp.n_max, params.n_max) : params.n_max;
                 const int width = std::min(limit, (int) continuation.size());
