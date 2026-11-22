@@ -612,12 +612,10 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
 }
 
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first) {
-    llama_synchronize(ctx);
+    llama_token id = llama_get_sampled_token_ith(ctx, idx);
 
     // start measuring sampling time after the llama_context synchronization in order to not measure any ongoing async operations
     const auto tm = gsmpl->tm();
-
-    llama_token id = LLAMA_TOKEN_NULL;
 
     auto & grmr  = gsmpl->grmr;
     auto & rbudget = gsmpl->rbudget;
@@ -629,8 +627,6 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     // Check if a backend sampler has already sampled a token in which case we
     // return that token id directly.
     {
-        id = llama_get_sampled_token_ith(ctx, idx);
-
         if (id != LLAMA_TOKEN_NULL) {
             LOG_DBG("%s: Backend sampler selected token: '%d'. Will not run any CPU samplers\n", __func__, id);
 

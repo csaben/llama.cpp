@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include "llama.h"
 #include "llama-ext.h"
 #include "llama-cparams.h"
@@ -60,6 +61,7 @@ struct llama_context {
 
     void synchronize(bool outputs = false);
     void synchronize_outputs();
+    void synchronize_picks();
 
     const llama_model   & get_model()   const;
     const llama_cparams & get_cparams() const;
@@ -513,6 +515,12 @@ private:
     mutable int64_t t_eval_us   = 0;
 
     mutable int64_t t_compute_start_us = 0;
+    void release_input_staging();
+    void finish_evaluation();
+    uint64_t evaluation_serial = 0;
+    uint64_t read_serial = 0;
+    std::shared_ptr<std::atomic<uint64_t>> picks_complete;
+    std::shared_ptr<std::atomic<uint64_t>> verified_picks;
     bool sampled_outputs_ready = false;
     mutable int64_t n_queued_tokens    = 0;
 

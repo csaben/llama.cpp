@@ -2535,6 +2535,10 @@ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sch
     return ggml_backend_sched_compute_splits(sched);
 }
 
+void ggml_backend_sched_reset_input_staging(ggml_backend_sched_t sched) {
+    sched->upload_used = 0;
+}
+
 void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     for (int i = 0; i < sched->n_backends; i++) {

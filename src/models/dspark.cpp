@@ -1056,7 +1056,7 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
 
     const int64_t nb = ubatch.n_seqs_unq;
     const int64_t block = n_tokens/nb;
-    auto * ids = ggml_cont_1d(ctx0, ggml_view_2d(ctx0, tokens, 1, nb, block*tokens->nb[0], 0), nb);
+    auto * ids = nb == 1 ? ggml_view_1d(ctx0, tokens, 1, 0) : ggml_cont_1d(ctx0, ggml_view_2d(ctx0, tokens, 1, nb, block*tokens->nb[0], 0), nb);
     auto * anchors = ggml_get_rows(ctx0, target->tok_embd, ids);
     anchors = ggml_mul(ctx0, ggml_rms_norm(ctx0, anchors, target->hparams.f_norm_rms_eps), target->tok_norm);
     auto * cur = ggml_reshape_3d(ctx0, anchors, n_embd, 1, nb);

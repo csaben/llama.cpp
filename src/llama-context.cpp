@@ -969,7 +969,34 @@ void llama_context::synchronize(bool outputs) {
     }
 
     ggml_backend_sched_synchronize(sched.get());
+    release_input_staging();
+    if (verified_picks) {
+        *verified_picks = read_serial;
+        verified_picks.reset();
+    }
+    sampled_outputs_ready = outputs;
+    finish_evaluation();
+}
 
+void llama_context::release_input_staging() {
+    ggml_backend_sched_reset_input_staging(sched.get());
+    for (const auto & entry : window_graphs) {
+        if (entry.second.sched) {
+            ggml_backend_sched_reset_input_staging(entry.second.sched.get());
+        }
+    }
+}
+
+void llama_context::synchronize_picks() {
+    if (picks_complete && *picks_complete == evaluation_serial) {
+        release_input_staging();
+        finish_evaluation();
+    } else {
+        synchronize();
+    }
+}
+
+void llama_context::finish_evaluation() {
     // FIXME: if multiple single tokens are evaluated without a synchronization,
     // the stats will be added to the prompt evaluation stats
     // this should only happen when using batch size 1 to evaluate a batch
@@ -993,7 +1020,6 @@ void llama_context::synchronize(bool outputs) {
         has_evaluated_once = true;
     }
 
-    sampled_outputs_ready = outputs;
     n_queued_tokens = 0;
     t_compute_start_us = 0;
 }
@@ -1937,6 +1963,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
 int llama_context::encode(const llama_batch_ext & batch_inp) {
     sampled_outputs_ready = false;
+    ++evaluation_serial;
     if (batch_inp.tokens.empty()) {
         LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
         return -1;
@@ -2198,6 +2225,7 @@ static FILE * ik_trace_file() {
 
 int llama_context::decode(const llama_batch_ext & batch_inp) {
     sampled_outputs_ready = false;
+    ++evaluation_serial;
     if (FILE * f = ik_trace_file()) {
         fprintf(f, "D %p %p %zu", (void *) this, (void *) memory.get(), batch_inp.tokens.size());
         for (const auto & t : batch_inp.tokens) {
@@ -2650,6 +2678,14 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
     if (layer_inp_dev && ev_layer_inp_written) {
         ggml_backend_event_record(ev_layer_inp_written.get(), layer_inp_backend);
+    }
+    if (write_draft && !picks_complete && model.hparams.dflash_variant == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2 && model.n_devices() == 1 && !cparams.pipeline_parallel) {
+        picks_complete = std::make_shared<std::atomic<uint64_t>>(0);
+    }
+    if (state_src && state_src != this && state_src->picks_complete && state_backend && state_src->ev_h_nextn_written_recorded) {
+        // The target stream waited on the event after the draft's device-to-host copy.
+        verified_picks = state_src->picks_complete;
+        read_serial = state_src->evaluation_serial;
     }
     if (write_h_nextn || write_draft) {
         ggml_backend_event_record(ev_h_nextn_written.get(), h_nextn_backend);
@@ -4855,7 +4891,7 @@ llama_memory_t llama_get_memory(const struct llama_context * ctx) {
 }
 
 float * llama_get_embeddings_nextn(llama_context * ctx) {
-    ctx->synchronize();
+    ctx->synchronize_picks();
 
     return ctx->get_embeddings_nextn();
 }
