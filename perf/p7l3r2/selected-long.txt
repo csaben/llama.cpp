@@ -1,0 +1,13 @@
+depth=4096 mode=0
+head-to-head 5.44049 ms
+graph prefix        48.0 visits/token    34.334 us/visit
+graph visit         48.0 visits/token    41.255 us/visit
+graph qkv           48.0 visits/token    16.138 us/visit
+graph attention     48.0 visits/token    18.260 us/visit
+graph output        48.0 visits/token     6.976 us/visit
+depth=4096 mode=1
+head-to-head 5.29066 ms
+staged scan+gate    48.0 visits/token    21.321 us/visit
+staged output       48.0 visits/token     6.929 us/visit
+three-stage visit   48.0 visits/token    39.112 us/visit
+staged qkv          48.0 visits/token    10.977 us/visit
