@@ -278,6 +278,26 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
         return;
     }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+    static const int cached=getenv("IK_STAGE_CACHE") ? atoi(getenv("IK_STAGE_CACHE")) : 0;
+    if (cached && !short_scan && (uintptr_t)a.k_cache%8==0 && (uintptr_t)a.v_cache%8==0) {
+        auto launch=[&](auto setting) {
+            constexpr int mode=decltype(setting)::value;
+            constexpr int smem=8*272*sizeof(uint2)*((mode&3)==3 ? 2 : 1);
+            const auto kernel=ik_dense_warp_roles<taps,false,!taps,0,false,(mode<<4)>;
+            static bool attr[GGML_CUDA_MAX_DEVICES]{};
+            if (!attr[ctx.device]) {
+                CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
+                attr[ctx.device]=true;
+            }
+            kernel<<<dim3(8,a.n_split),384,smem,ctx.stream()>>>(a,w,x,counters);
+        };
+        if (cached==1) { launch(std::integral_constant<int,1>{}); return; }
+        if (cached==2) { launch(std::integral_constant<int,2>{}); return; }
+        if (cached==3) { launch(std::integral_constant<int,3>{}); return; }
+        if (cached==5) { launch(std::integral_constant<int,5>{}); return; }
+        if (cached==6) { launch(std::integral_constant<int,6>{}); return; }
+        if (cached==7) { launch(std::integral_constant<int,7>{}); return; }
+    }
     static const int geometry=getenv("IK_GATE_THREADS") ? atoi(getenv("IK_GATE_THREADS")) : 0;
     if (geometry && short_scan) {
         static const int gates=getenv("IK_GEOMETRY_BLOCKS") ? std::min(48,std::max(1,atoi(getenv("IK_GEOMETRY_BLOCKS")))) : 8;

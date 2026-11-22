@@ -2848,6 +2848,50 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
     }
 }
 
+template<bool async>
+static __device__ __forceinline__ void ik_stage_cache_tile(const char * src, int64_t stride, int max_row, uint2 * tile) {
+    const int lane=threadIdx.x%32;
+#pragma unroll
+    for (int j=0;j<9;++j) {
+        const int i=32*j+lane;
+        if (i<272) {
+            const uint2 * from=(const uint2 *)(src+min(i/17,max_row)*stride)+i%17;
+            if constexpr (async) {
+#if defined(CP_ASYNC_AVAILABLE)
+                const unsigned to=ggml_cuda_cvta_generic_to_shared(tile+i);
+                asm volatile("cp.async.ca.shared.global [%0], [%1], 8;" :: "r"(to),"l"(from) : "memory");
+#else
+                tile[i]=*from;
+#endif
+            } else { tile[i]=*from; }
+        }
+    }
+}
+
+template<int G, int stage, bool late, bool first=false>
+static __device__ __forceinline__ void ik_mma_cached(const ik_attn_args & a, ik_mma_lane<G> & st, const float (* rel)[32],
+        const char * k, int64_t ks, const char * v, int64_t vs, int base, int max_row, int kt, int w1, int64_t index) {
+    if constexpr (stage==0) {
+        ik_mma_step<G,late,first>(a,st,rel,k,ks,v,vs,base,max_row,kt,w1,index);
+    } else {
+        extern __shared__ uint2 cache_tiles[];
+        constexpr int matrices=(stage&3)==3 ? 2 : 1;
+        uint2 * tile=cache_tiles+(threadIdx.x/32)*272*matrices;
+        const int r=kt-base, last=min(15,max_row-r);
+        k+=r*ks; v+=r*vs;
+        if constexpr (stage&1) { ik_stage_cache_tile<(stage&4)!=0>(k,ks,last,tile); k=(const char *)tile; ks=136; }
+        if constexpr (stage&2) {
+            uint2 * dest=tile+((stage&1) ? 272 : 0);
+            ik_stage_cache_tile<(stage&4)!=0>(v,vs,last,dest);
+            v=(const char *)dest; vs=136;
+        }
+        if constexpr (stage&4) { cp_async_commit_group(); cp_async_wait_all(); }
+        __syncwarp();
+        ik_mma_step<G,late,first>(a,st,rel,k,ks,v,vs,kt,last,kt,w1,index);
+        __syncwarp();
+    }
+}
+
 // the head's denominator over the lanes; the lane's 16 dims of the head tq to dst[HD]
 template <int G>
 static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float * dst) {
@@ -3359,11 +3403,11 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
                     if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
                         if constexpr (sched & 2) {
                             if (tile < IK_A2_WARPS) {
-                                ik_mma_step<G,(sched&1)!=0,true>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
+                                ik_mma_cached<G,(sched>>4),(sched&1)!=0,true>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
                                 continue;
                             }
                         }
-                        ik_mma_step<G,(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
+                        ik_mma_cached<G,(sched>>4),(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
                     }
                 }
             } else if constexpr (mask_tiles) {
@@ -3375,13 +3419,13 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 #pragma unroll
                     for (int j = 0; j < 2; ++j) {
                         if (mask & (0xffffu << (j*16))) {
-                            ik_mma_step<G,(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv-1, kt+j*16, w1, kv_idx);
+                            ik_mma_cached<G,(sched>>4),(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv-1, kt+j*16, w1, kv_idx);
                         }
                     }
                 }
             } else {
                 for (int kt = w0; kt < w1; kt += 16) {
-                    ik_mma_step<G,(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                    ik_mma_cached<G,(sched>>4),(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
                 }
             }
         }
