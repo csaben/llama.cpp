@@ -1414,6 +1414,34 @@ static __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(
     return d * sumi;
 }
 
+// vec_dot_iq4_nl_q8_1 in two steps, for kernels that take several activation columns per weight block: the weights are
+// looked up once, each column costs 4 dp4a. The same operations per column as vec_dot_iq4_nl_q8_1 (bit-identical).
+struct ik_iq4_nl_w {
+    int2  v[VDR_Q4_0_Q8_1_MMVQ];
+    float d;
+};
+static __device__ __forceinline__ ik_iq4_nl_w ik_iq4_nl_decode(const void * __restrict__ vbq, const int & kbx, const int & iqs) {
+    const block_iq4_nl * bq4 = (const block_iq4_nl *) vbq + kbx;
+    ik_iq4_nl_w w;
+#pragma unroll
+    for (int l = 0; l < VDR_Q4_0_Q8_1_MMVQ; ++l) {
+        w.v[l] = get_int_from_table_16(get_int_b2(bq4->qs, iqs + l), kvalues_iq4nl);
+    }
+    w.d = __half2float(bq4->d);
+    return w;
+}
+static __device__ __forceinline__ float ik_iq4_nl_dot(const ik_iq4_nl_w & w, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+    const int * q8 = (const int *) bq8_1->qs + iqs;
+    int sumi = 0;
+#pragma unroll
+    for (int l = 0; l < VDR_Q4_0_Q8_1_MMVQ; ++l) {
+        sumi = ggml_cuda_dp4a(w.v[l].x, q8[l + 0], sumi);
+        sumi = ggml_cuda_dp4a(w.v[l].y, q8[l + 4], sumi);
+    }
+    const float d = w.d * __low2float(bq8_1->ds);
+    return d * sumi;
+}
+
 #define VDR_IQ4_XS_Q8_1_MMVQ 4
 #define VDR_IQ4_XS_Q8_1_MMQ  4
 

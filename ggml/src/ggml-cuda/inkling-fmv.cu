@@ -91,6 +91,17 @@ static __global__ void ik_segmented_projection_rows(const void * weights, const 
             const int k = base + w*stride + threadIdx.x/lanes;
             if (k < blocks) {
                 const int iqs = (threadIdx.x % lanes)*vdr;
+                if constexpr (!q6) {
+                    // the weights are looked up once for all the tokens
+                    const ik_iq4_nl_w wd = ik_iq4_nl_decode(weights, row*blocks + k, iqs);
+#pragma unroll
+                    for (int t = 0; t < 8; ++t) {
+                        if (t < n_tok) {
+                            partial[t][w] += ik_iq4_nl_dot(wd, x + (col*n_tok + t)*(2304/QK8_1) + k*(qk/QK8_1), iqs);
+                        }
+                    }
+                    continue;
+                }
 #pragma unroll
                 for (int t = 0; t < 8; ++t) {
                     if (t < n_tok) {

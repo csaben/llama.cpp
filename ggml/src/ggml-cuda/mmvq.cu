@@ -1829,6 +1829,24 @@ static __global__ void ik_mmvq_mr(
         // x block quant index when casting the quants to int
         const int kqs = vdr * (tid % (qi/vdr));
 
+        if constexpr (type == GGML_TYPE_IQ4_NL) {
+            // the weights are looked up once for all the columns
+            ik_iq4_nl_w w[rows_per_cuda_block];
+#pragma unroll
+            for (int i = 0; i < rows_per_cuda_block; ++i) {
+                w[i] = ik_iq4_nl_decode(vx, kbx_offset + i*stride_row_x + kbx, kqs);
+            }
+#pragma unroll
+            for (int j = 0; j < NC; ++j) {
+                if (j < ncol) {
+#pragma unroll
+                    for (int i = 0; i < rows_per_cuda_block; ++i) {
+                        tmp[j][i] += ik_iq4_nl_dot(w[i], &vy[yo[j] + kby], kqs);
+                    }
+                }
+            }
+            continue;
+        }
 #pragma unroll
         for (int j = 0; j < NC; ++j) {
             if (j < ncol) {
