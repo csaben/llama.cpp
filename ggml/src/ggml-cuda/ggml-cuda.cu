@@ -4692,6 +4692,19 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+    static const bool proj_conv = ggml_cuda_env_flag("IK_PROJ_CONV") && !ggml_cuda_env_flag("IK_MR");
+    if (proj_conv && node->op == GGML_OP_MUL_MAT && ggml_is_vector(node) && node->src[1]->type == GGML_TYPE_Q8_1 &&
+            ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X && cuda_ctx->stream_context().concurrent_events.empty() &&
+            !(node->flags & GGML_TENSOR_FLAG_OUTPUT) && ggml_node_has_n_uses(cgraph, i, 1)) {
+        int j = i + 1;
+        while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j])) { ++j; }
+        if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_SHORTCONV_RES && cgraph->nodes[j]->src[2] == node &&
+                (cgraph->nodes[j]->flags & GGML_TENSOR_FLAG_COMPUTE) &&
+                ggml_cuda_inkling_projection_conv(*cuda_ctx, node, cgraph->nodes[j])) {
+            return j - i;
+        }
+    }
+
     static const bool resident_down = ggml_cuda_env_flag("IK_RESIDENT_DOWN") && !ggml_cuda_env_flag("IK_MR");
     if (resident_down && node->op == GGML_OP_GLU && ggml_get_glu_op(node) == GGML_GLU_OP_SITU &&
             i + 1 < cgraph->n_nodes && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X &&

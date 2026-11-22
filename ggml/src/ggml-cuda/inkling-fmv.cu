@@ -1101,3 +1101,99 @@ bool ggml_cuda_inkling_resident_down(ggml_backend_cuda_context & ctx, ggml_tenso
     }
     return true;
 }
+
+static __device__ __forceinline__ float ik_iq4_acc(float sum, const block_iq4_nl * w, const block_q8_1 * x, int iqs) {
+    const ik_iq4_nl_w decoded = ik_iq4_nl_decode(w, 0, iqs);
+    const int * q = (const int *) x->qs + iqs;
+    int dot = 0;
+#pragma unroll
+    for (int j = 0; j < VDR_IQ4_NL_Q8_1_MMVQ; ++j) {
+        dot = ggml_cuda_dp4a(decoded.v[j].x, q[j], dot);
+        dot = ggml_cuda_dp4a(decoded.v[j].y, q[j + 4], dot);
+    }
+    return __fmaf_rn(__fmul_rn(decoded.d, __low2float(x->ds)), float(dot), sum);
+}
+
+struct ik_projection_conv {
+    const float * past;
+    const float * taps;
+    const float * residual;
+    float * state;
+    const int32_t * ids;
+    int64_t past_cell;
+    float scale;
+};
+
+template<int rows_per_warp>
+static __global__ void ik_projection_conv_kernel(const block_iq4_nl * weights, const block_q8_1 * x, float * out, ik_projection_conv conv) {
+    constexpr int blocks = 3072/QK4_NL;
+    constexpr int lanes = QI4_NL/VDR_IQ4_NL_Q8_1_MMVQ;
+    const int first = rows_per_warp*(blockIdx.x*blockDim.y + threadIdx.y);
+    const int lane = threadIdx.x;
+    float partial[rows_per_warp][4] = {};
+#pragma unroll
+    for (int start = 0; start < blocks; start += 4*WARP_SIZE/lanes) {
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            const int b = start + w*WARP_SIZE/lanes + lane/lanes;
+            if (b < blocks) {
+#pragma unroll
+                for (int r = 0; r < rows_per_warp; ++r) {
+                    partial[r][w] = ik_iq4_acc(partial[r][w], weights + (first + r)*blocks + b, x + b, (lane%lanes)*VDR_IQ4_NL_Q8_1_MMVQ);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < rows_per_warp; ++r) {
+        const int row = first + r;
+        const float cur = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(partial[r][0],partial[r][1]),partial[r][2]),partial[r][3]));
+        if (lane == row%2) {
+            const float * past = conv.past + conv.ids[0]*conv.past_cell + 3*row;
+            const float * tap = conv.taps + 4*row;
+            const float a = past[0], b = past[1], c = past[2];
+            float sum = 0.0f;
+            sum += a*tap[0];
+            sum += b*tap[1];
+            sum += c*tap[2];
+            sum += cur*tap[3];
+            float y = (cur + sum)*conv.scale;
+            if (conv.residual) { y += conv.residual[row]; }
+            out[row] = y;
+            conv.state[3*row] = b;
+            conv.state[3*row + 1] = c;
+            conv.state[3*row + 2] = cur;
+        }
+    }
+}
+
+bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst) {
+    const auto * w = mm->src[0], * x = mm->src[1];
+    const auto * past = dst->src[0], * taps = dst->src[1], * residual = dst->src[4], * state = dst->src[5], * ids = dst->src[6];
+    if (!state || !ids || dst->src[2] != mm || dst->src[3] || ggml_get_op_params_i32(dst, 1) != 0 || state->ne[1] != 1 || ggml_nelements(ids) != 1 ||
+            !ggml_is_vector(dst) || dst->ne[0] != 2304 || !ggml_is_contiguous(dst) || dst->type != GGML_TYPE_F32 ||
+            !ggml_is_vector(x) || x->type != GGML_TYPE_Q8_1 || !ggml_is_contiguous(x) || x->ne[0] != 3072 ||
+            !ggml_is_matrix(w) || w->ne[0] != 3072 || w->ne[1] != 2304 || w->type != GGML_TYPE_IQ4_NL ||
+            !ggml_is_contiguous(w) || !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device) ||
+            past->type != GGML_TYPE_F32 || past->ne[0] != 3 || past->nb[1] != 3*sizeof(float) ||
+            taps->type != GGML_TYPE_F32 || taps->ne[0] != 4 || taps->nb[1] != 4*sizeof(float) || !ggml_is_contiguous(taps) ||
+            state->type != GGML_TYPE_F32 || state->nb[2] != 3*sizeof(float) || state->ne[0] != 3 || ids->type != GGML_TYPE_I32 ||
+            (residual && (residual->type != GGML_TYPE_F32 || !ggml_is_contiguous(residual)))) {
+        return false;
+    }
+    auto overlaps = [](const ggml_tensor * a, const ggml_tensor * b) {
+        return (uintptr_t) a->data < (uintptr_t) b->data + ggml_nbytes(b) && (uintptr_t) b->data < (uintptr_t) a->data + ggml_nbytes(a);
+    };
+    if (overlaps(dst, x) || overlaps(state, x) || overlaps(dst, w) || overlaps(state, w)) {
+        return false;
+    }
+    ik_projection_conv conv = {(const float *) past->data, (const float *) taps->data, residual ? (const float *) residual->data : nullptr,
+                               (float *) state->data, (const int32_t *) ids->data, int64_t(past->nb[2]/sizeof(float)), ggml_get_op_params_f32(dst, 0)};
+    static const int rows = getenv("IK_PROJ_CONV_ROWS") ? atoi(getenv("IK_PROJ_CONV_ROWS")) : 2;
+    if (rows == 1) {
+        ik_projection_conv_kernel<1><<<2304/4, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>((const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
+    } else {
+        ik_projection_conv_kernel<2><<<2304/8, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>((const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
+    }
+    return true;
+}
