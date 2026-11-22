@@ -67,7 +67,7 @@ kernels lost; a synthetic replay of all 193 matvecs with inputs up front and con
    Report ms/token. Also the same with the 193 separate launches inside one CUDA graph. The gap between the two is
    what a whole-token megakernel could win.
 2. If the single-kernel floor is well under 3.3 ms: build the **whole-token decode megakernel** incrementally
-   (Hazy Research "Look Ma, No Bubbles!"; Mirage persistent kernel / MPK, arXiv:2512.22219 if relevant; ThunderKittens
+   (Hazy Research "Look Ma, No Bubbles!"; the Mirage persistent-kernel compiler (verify the reference before citing it); ThunderKittens
    megakernels): an instruction stream of (matvec tile, glue op) tasks executed by resident blocks with
    per-task dependency counters, weights for task k+1..k+n prefetched while glue runs. Start with the dense chain of
    one visit, prove it beats the graph, then extend. Keep exactness or the PPL gate.
