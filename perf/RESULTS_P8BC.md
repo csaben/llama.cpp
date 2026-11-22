@@ -128,3 +128,20 @@ Each configuration below ran three bench samples and three uncached real tool re
 | 2,048 | 3,581 / 3,260 / 2,925 | 5.553 s | 3.0509 | 20,417 | 174.6 |
 
 At the same microbatch of 2,048 the saved B control measured 3,099 tok/s and 5.781 s client TTFT at 16K. Larger microbatches change numerical grouping. Each PPL matched its same-microbatch control and stayed within 0.07% of the 3.0530 target. The source changes keep the release microbatch at 512. [Same-configuration controls](p8bc/prefill/microbatch-summary.tsv).
+
+## Integrated DSpark first-token latency
+
+Cap six with guarded lookup, 64K slot, batch 2,048. Each cell is the median client TTFT for three uncached tool-call follow-ups using the same source bundle. Target and drafter share GPU 0. [All TTFT samples, reply rates and sampled VRAM](p8bc/prefill/draft-server.tsv).
+
+| Runtime | Target / draft microbatch | 4K | 16K | 32K | Sampled peak MiB |
+|---|---:|---:|---:|---:|---:|
+| Stream B | 512 / 512 | 1.806 s | 6.983 s | 14.928 s | 16,607 |
+| B + C | 512 / 512 | 1.576 s | 6.131 s | 13.377 s | 16,545 |
+| B + C | 1,024 / 1,024 | 1.504 s | 5.912 s | 13.130 s | 19,317 |
+| B + C | 2,048 / 512 | 1.468 s | 5.814 s | 13.045 s | 22,343 |
+
+With both microbatches at 2,048 the drafter failed a 3,421 MiB allocation during startup. The existing `--spec-draft-n-ubatch 512` option fits the 2,048-token target prefill on this card. It can be reproduced with `UB=2048 LLAMA_ARG_SPEC_DRAFT_N_UBATCH=512 DRAFT_WIDTH=6 perf/p8bc/ttft.sh final-split`. The 512 / 512 configuration is the one used for the full exactness checks. [Allocation result](p8bc/prefill/draft-2048-allocation.txt), [option](../common/arg.cpp), [server runner](p8bc/ttft.sh).
+
+Compute Sanitizer memcheck and synccheck each passed the two routed expert tests and the four-head relative-bias test with zero errors. [Sanitizer results](p8bc/prefill/sanitizer.txt).
+
+At target / draft microbatches 2,048 / 512, the agent replay and 32K edit passed separate same-flags plain comparisons at 384 and 3,000 emitted tokens. All four messages and 6,768 IDs matched. [Split-microbatch message and ID hashes](p8bc/prefill/split-served.tsv).

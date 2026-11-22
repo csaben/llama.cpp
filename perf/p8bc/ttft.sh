@@ -22,6 +22,7 @@ server=$!
 trap 'kill "$server" 2>/dev/null || :; wait "$server" || :' EXIT
 for ((i=0; i<120; i++)); do
     if curl -fsS --max-time 1 http://127.0.0.1:18432/health >/dev/null 2>&1; then break; fi
-    kill -0 "$server" && sleep 1
+    if ! kill -0 "$server" 2>/dev/null; then tail -10 "$out/server.log" >&2; exit 1; fi
+    sleep 1
 done
 python3 perf/p8bc/ttft.py | tee "$out/ttft.txt"
