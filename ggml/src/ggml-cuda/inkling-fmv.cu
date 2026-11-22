@@ -915,7 +915,7 @@ static __global__ void ik_q2_down_rows(const block_q2_0 * weights, const block_q
 }
 
 bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    static const bool enabled = getenv("IK_Q2_DOWN_ROWS") && atoi(getenv("IK_Q2_DOWN_ROWS")) == 2;
+    static const bool enabled = !getenv("IK_Q2_DOWN_ROWS") || atoi(getenv("IK_Q2_DOWN_ROWS")) == 2;
     const ggml_tensor * w = dst->src[0];
     const ggml_tensor * x = dst->src[1];
     const ggml_tensor * ids = dst->src[2];
