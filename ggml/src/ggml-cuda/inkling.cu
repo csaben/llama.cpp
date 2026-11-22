@@ -1550,6 +1550,7 @@ struct ik_attn_args {
     int     ext_scan; // the cells were scanned by inkling_attn_scan_kernel (parts 0 .. n_split - 2); this kernel adds the current cell
     int     dbg_skip; // timing experiments only (IK_ATTN_SKIP): 1 bias table, 2 attention loop, 4 Q/R phase
     // multi-row (speculative window) launches: row r of the window is blockIdx.z of the MR kernel
+    const int32_t * mr_kv_before;
     int     mr_rows;        // tokens of the window (1: the single-token kernel)
     int     mr_planes;      // rollback planes of the recurrent state written by the window (slot k: the state k tokens back)
     int     mr_plane_cells; // cells per plane
@@ -2391,26 +2392,23 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
             args_m.part     += (int64_t) row*args_in.mr_part_rs;
             args_m.counters += row*args_in.n_head_kv;
         }
-        // The cells the row would scan as a single token: the cache is padded to 256 cells past the last used one, and the
-        // later rows of the window may have pushed that pad up. When the row sees nothing in the extra pad, it takes the
-        // splits of the smaller cache, so its partial sums are grouped as in single-token decode.
-        const int cand = max(256, ((int) args_m.kv_idxs[0] + 256) & ~255);
-        if (cand < args_in.n_kv) {
-            int vis = 0;
-            for (int c = cand + (int) threadIdx.x; c < args_in.n_kv; c += IK_A2_BLOCK) {
-                const float mv = args_in.mask_f16 ? __half2float(((const half *) args_m.mask)[c]) : ((const float *) args_m.mask)[c];
-                vis |= mv != -INFINITY;
+        // Masked cells still count toward the padded cache size after an SWA wrap.
+        int row_kv = args_in.n_kv;
+        if (args_in.mr_kv_before) {
+            row_kv = args_in.mr_kv_before[args_in.has_taps ? 0 : 1];
+            for (int r = 0; r <= row; ++r) {
+                row_kv = max(row_kv, ((int) args_in.kv_idxs[r] + 256) & ~255);
             }
-            if (!__syncthreads_or(vis)) {
-                args_m.n_kv = cand;
-                if (args_in.mr_mma) {
-                    args_m.n_split = max(1, min(args_in.mr_mma_split, (cand + args_in.mr_mma_step - 1)/args_in.mr_mma_step));
-                } else {
-                    const int cps = args_in.mr_medium && cand > 512 && cand <= 2304 ? 128 : args_in.mr_cps;
-                    args_m.n_split = cand <= cps ? 1 : min(64, (cand + cps - 1)/cps);
-                }
-                args_m.kv_per_split = (cand + args_m.n_split - 1)/args_m.n_split;
+        }
+        if (row_kv < args_in.n_kv) {
+            args_m.n_kv = row_kv;
+            if (args_in.mr_mma) {
+                args_m.n_split = max(1, min(args_in.mr_mma_split, (row_kv + args_in.mr_mma_step - 1)/args_in.mr_mma_step));
+            } else {
+                const int cps = args_in.mr_medium && row_kv > 512 && row_kv <= 2304 ? 128 : args_in.mr_cps;
+                args_m.n_split = row_kv <= cps ? 1 : min(64, (row_kv + cps - 1)/cps);
             }
+            args_m.kv_per_split = (row_kv + args_m.n_split - 1)/args_m.n_split;
         }
         if ((int) blockIdx.y >= args_m.n_split) {
             return;
@@ -3276,6 +3274,7 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     GGML_ASSERT(a.n_extent <= IK_ATTN_MAX_EXTENT);
 
     const int n_rows = dst->ne[1];
+    a.mr_kv_before   = dst->src[10] ? (const int32_t *) dst->src[10]->data : nullptr;
     a.mr_rows        = n_rows;
     a.mr_planes      = n_rows > 1 ? (ggml_get_op_params_i32(dst, 14) & 0xff) : 1;
     a.mr_plane_cells = ggml_get_op_params_i32(dst, 15);

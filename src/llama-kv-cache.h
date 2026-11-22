@@ -418,6 +418,7 @@ public:
     //
 
     uint32_t get_n_kv() const;
+    uint32_t get_n_kv_before() const { return n_kv_before; }
     uint32_t get_n_kv_rows() const;
 
     ggml_type type_k() const;
@@ -479,6 +480,7 @@ private:
 
     // the index of the cur ubatch to process
     size_t i_cur = 0;
+    uint32_t n_kv_before = 0;
 
     slot_info_vec_t sinfos;
 

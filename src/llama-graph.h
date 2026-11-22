@@ -810,6 +810,7 @@ public:
 
     const uint32_t extent;
     const uint32_t extent_swa;
+    ggml_tensor * window_kv_before = nullptr; // base and SWA padded sizes before a verify window
 
     const llama_cparams cparams;
 

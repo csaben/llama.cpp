@@ -1403,6 +1403,11 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
 void llm_graph_input_mem_hybrid_iswa_rel::set_input(const llama_ubatch * ubatch) {
     const auto * attn_ctx = mctx->get_attn();
 
+    if (window_kv_before) {
+        const int32_t sizes[] = { (int32_t) attn_ctx->get_base()->get_n_kv_before(), (int32_t) attn_ctx->get_swa()->get_n_kv_before() };
+        ggml_backend_tensor_set(window_kv_before, sizes, 0, sizeof(sizes));
+    }
+
     // base tensors may not be allocated if there are no non-SWA attention layers
     if (inp_attn->self_k_idxs && inp_attn->self_k_idxs->buffer) {
         attn_ctx->get_base()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);

@@ -784,6 +784,11 @@ ggml_tensor * llama_model_inkling2::graph::control(ggml_tensor * cur, ggml_tenso
 
 ggml_tensor * llama_model_inkling2::graph::build_inputs() {
     inp  = build_inp_mem_hybrid_iswa_rel(hparams.n_relative_extent, hparams.n_swa);
+    if (mr) {
+        inp->window_kv_before = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 2);
+        ggml_set_input(inp->window_kv_before);
+        ggml_set_name(inp->window_kv_before, "window_kv_before");
+    }
     attn = inp->get_attn();
     recr = inp->get_recr();
 
@@ -1021,6 +1026,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                             hp.f_qk_clip, hp.f_relative_clip, hp.f_norm_rms_eps, hp.f_log_scale_alpha, (float) hp.n_log_scale_floor,
                             1.0f/sqrtf(n_embd_head), a_type);
                     if (mr) {
+                        cur->src[10] = inp->window_kv_before;
                         ik_set_param(cur, 14, mr_planes);
                         ik_set_param(cur, 15, mr_plane_cells);
                     }

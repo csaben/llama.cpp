@@ -3031,6 +3031,7 @@ bool llama_kv_cache_context::apply() {
         return true;
     }
 
+    n_kv_before = kv->get_n_kv(sinfos[i_cur]);
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
     n_kv      = kv->get_n_kv(sinfos[i_cur]);
     n_kv_rows = kv->get_n_kv_rows(ubatches[i_cur]);
