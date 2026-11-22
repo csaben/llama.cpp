@@ -1690,3 +1690,20 @@ On the 65,536-token slot, both settings completed three uncached 64,587-token to
 ### Prompt lookup choice
 
 Enable guarded prompt lookup and explicit adaptive DSpark, cap 6. In the off/on/on/off crossover, only the call that supplies history proposals and draft agreement was bypassed in the control library. The staged server, CUDA libraries, target/draft models, cap, graph cache and guard flags stayed fixed. Mean short agent throughput rose from 296.45 to 302.45 tok/s (+2.0%), long agent from 321.15 to 330.50 (+2.9%), long edit from 299.05 to 310.70 (+3.9%) and long prose from 275.70 to 306.30 (+11.1%). New code dropped 1.4% short and 0.9% long. All 64 drafted replies in the crossover matched the release-matrix plain full messages and IDs. [All eight rates](p8m/lookup/crossover.tsv), [loaded libraries](p8m/lookup/libraries.tsv), [control build](p8m/lookup_control.py), [runner](p8m/lookup.sh).
+
+### Reproducing the GPU1 measurements
+
+Run from the merged worktree with the SM86 Release build and CUDA 12.8. Set `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 P8_GPU=1 CHECKS_GPU=1` in the environment. Create `build/p8m` for scratch data. Run each GPU stage serially.
+
+- `P8_GPU=1 bash perf/p8bc/matrix.sh build/p8m/repeat-matrix` repeats the six matrices. `python3 perf/p8bc/summarize.py build/p8m/repeat-matrix` validates the matched controls and prints all rates and SHA-256 digests. The frozen-reference cross-check over the saved release evidence is `python3 perf/p8m/audit.py`.
+- `for stage in checks checks-default depth wide logits ops sync extra-ops; do bash perf/p8m/checks.sh "$stage" || break; done` reproduces the saved numerical and operator checks. These scripts write to their recorded output paths.
+- `perf/p8m/bench.sh LABEL LIBRARY_DIRECTORY` runs the two tg128 depth sweeps and prefill. Use the frozen stream A snapshot, then the merged runtime twice, then stream A again. `DRAFT_WIDTH=6 perf/p8m/ttft.sh LABEL` measures streamed TTFT and samples free VRAM. Set `TTFT_SIZES=64512` to repeat the near-full-slot replay, or `UB=2048 LLAMA_ARG_SPEC_DRAFT_N_UBATCH=512` to repeat the split.
+- `python3 perf/p8m/lookup_control.py` builds the isolated benchmark library inside `build/p8m`. `perf/p8m/lookup.sh 6 "$HOME/inkling-live-bin-p8m-f7f505c"` runs the paired lookup comparison. `perf/p8m/snapshot.sh "$HOME/inkling-live-bin-p8m-f7f505c" 6` repeats the staged-server probes on port 18433.
+
+### Staged Phase 8 merge release
+
+The nine-file runtime snapshot is `~/inkling-live-bin-p8m-f7f505c`, source tag `p8m-merged` (`f7f505c4776088f8973a228e5e9d0ea05f36301b`). The server and all eight libraries passed SHA-256 and the runtime loader resolved every project library inside the snapshot. Manifest SHA-256 is `e6da212756f771277a7083c4985ba3b742971127b530696e93f51bc76ab8794a`. [Checksums](p8m/snapshot.sha256), [loader resolution](p8m/snapshot-libraries.txt), [hash check](p8m/snapshot-check.txt).
+
+Four independent 64K-slot staged servers ran five repeats each on edit, prose and agent. Both drafted configurations matched all 30 replies and 11,520 IDs against plain before and after. The staged plain outputs also matched the merged matrix. Release medians were 352.0 / 225.0 / 304.4 tok/s on edit / prose / agent. The server logged accepted history windows with lookup enabled. [Snapshot probes](p8m/snapshot-probes/).
+
+The manual deployment script selects physical GPU1, one 65,536-token slot, Q8 KV, backend sampling, folded 32K DSpark, explicit adaptive cap 6 with guarded prompt lookup, logical batch 2,048 and 512-token target and draft microbatches. It verifies the manifest before stopping the service, and calls the Phase 5 restore script on startup or health failure. The script passed `bash -n` and was left unexecuted. [Manual deployment](live/deploy-p8m.sh), [Phase 5 fallback](live/restore-p5.sh).

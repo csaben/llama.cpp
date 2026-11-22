@@ -1,0 +1,3 @@
+release        edit      prompt   1025   384 tok   352.0 tok/s    1115 chars  accepted/proposed 291/298  runs 349/350/352/353/359
+release        prose     prompt     36   384 tok   225.0 tok/s    1474 chars  accepted/proposed 129/188  runs 223/225/225/225/226
+release        agent     prompt   2025   384 tok   304.4 tok/s    1284 chars  accepted/proposed 268/295  runs 300/303/304/305/305

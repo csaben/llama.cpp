@@ -1,0 +1,3 @@
+plain-after    edit      prompt   1025   384 tok   220.6 tok/s    1115 chars  runs 221/221/221/221/221
+plain-after    prose     prompt     36   384 tok   224.2 tok/s    1474 chars  runs 224/224/224/224/224
+plain-after    agent     prompt   2025   384 tok   217.4 tok/s    1284 chars  runs 217/217/217/217/217
