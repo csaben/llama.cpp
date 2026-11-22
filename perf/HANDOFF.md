@@ -6,6 +6,8 @@ The default battery passed all 2,714 logit rows and 1,108 operator cases. Six gr
 
 The first current-margin policy reached 206.2 tok/s on short prose at cap 3, below 211.5 plain. The release-preset battery also passed all 2,714 rows, six greedy files, PPL and 1,108 operator cases. Both depth-scan layouts matched all 1,024 rows. The merged and frozen Phase 7 libraries agreed byte for byte on 88 full-vocabulary FP32 rows. [Release-preset checks](p7b/checks/), [depth sweep](p7b/depths.txt), [paired binaries and logit hashes](p7b/combined/). Request-local calibration and short standby intervals recovered 215.5 tok/s on short prose, 323.0 on short edit and 290.3 / 277.4 on 3,000-token edits at 1K / 16K with cap 3. Messages and IDs matched the plain references. Cap 4 was within 1 tok/s of plain on short prose, so its repeatability is the remaining policy check before running the release matrix. [Policy trials](p7b/policy-trials/).
 
+The release candidate checks current draft margins, resets acceptance bins and timing on every request, and uses the existing token-history matcher when a long suffix has a known continuation. An eight-token match trial reached 343.9 / 339.7 on short edit and 214.4 / 214.6 on short prose at caps 3 / 4. A new same-GPU plain control reached 210.5 on prose. These six code/edit/prose streams were exact. The release matrix and separate prose fixtures still need to run on the rebuilt binary.
+
 # Phase 7 hand-off
 
 The staged build is `59c71a9`, local tag `p7-release-edit-324tok`, on branch `inkling-3090`. All measurements used physical GPU1 (RTX 3090). The release uses a fixed three-token draft, four-row MMA verification, a folded 32K shortlist, GPU-resident embedding tables and one 64K slot.

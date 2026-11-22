@@ -1482,7 +1482,9 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             device_draft = llama_set_ctx_state_src(this->params.ctx_tgt, this->params.ctx_dft);
             const char * policy = getenv("LLAMA_DSPARK_POLICY");
             const char * graphs = getenv("LLAMA_DSPARK_GRAPHS");
-            cached_policy = device_draft && graphs && atoi(graphs) && policy && atoi(policy);
+            const bool use_policy = policy ? atoi(policy) != 0 : adapt.on;
+            cached_policy = device_draft && graphs && atoi(graphs) && use_policy;
+            adapt.on = adapt.on || cached_policy;
             if (!device_draft) {
                 llama_set_ctx_state_src(this->params.ctx_tgt, nullptr);
             }
@@ -1528,18 +1530,8 @@ protected:
         }
     }
 
-    // Window policy (LLAMA_DSPARK_ADAPTIVE=1, one sequence; round 3). After basalt's draft policy (MIT,
-    // https://github.com/jesdga95/basalt src/spec/draft_policy.cpp: a round's cost by window size learned online, the
-    // chance of a draft calibrated per confidence bin, the window that maximizes expected tokens per ms); the idea
-    // only, no code copied. The output does not depend on any of this: the target verifies every token.
-    //
-    // A step is the time between two draft() calls. Its kind t: 0 = plain (the drafter did not run), t >= 1 = the
-    // drafter ran and t - 1 drafts were verified (a window of t rows). cost(t) is the decayed mean time of the steps of
-    // kind t (a kind not measured yet: the nearest measured one scaled by a prior shape). chance(margin) is the measured
-    // acceptance of drafts by the bin of their top-2 margin. Each drafted step verifies the prefix of the drafts
-    // that maximizes E[tokens] / cost. While the best window does not beat a plain step, the drafter is switched off
-    // for a stretch (8 steps, doubling to 64 while a probe still shows no gain); the features of plain steps are kept
-    // on the host and injected into the drafter in one batch before the next probe (see process()).
+    // Window selection follows basalt's expected tokens per millisecond (MIT, https://github.com/jesdga95/basalt).
+    // Kind 0 skips the drafter. Kind t > 0 runs it and verifies t - 1 candidates.
     static constexpr int ADAPT_T_MAX = 9;
     static constexpr int ADAPT_BINS  = 8;
     struct adaptive_state {
@@ -1551,20 +1543,18 @@ protected:
         float  last_margin[ADAPT_T_MAX] = {};
         int64_t   last_us = 0;
         llama_pos last_pos0 = -1;
-        double pos_ok[ADAPT_T_MAX] = {}, pos_tested[ADAPT_T_MAX] = {};
+        bool   from_history = false;
+        int    history_steps = 0, history_accepted = 0, history_proposed = 0;
+        int    weak_windows = 0;             // consecutive windows below the required rate
         double cost[ADAPT_T_MAX + 1] = {};   // ms of a step by kind (decayed mean)
         int    cost_n[ADAPT_T_MAX + 1] = {}; // steps of this kind seen (the first is a warm-up and not counted in cost)
-        double ok[ADAPT_BINS], tested[ADAPT_BINS];
-        double gain = 1.0;                   // smoothed (best drafted rate) / (plain rate) while drafting
+        double ok[ADAPT_BINS] = {}, tested[ADAPT_BINS] = {};
+        double gain = 1.0;                   // smoothed drafted rate relative to plain
         int    n_on = 0;                     // drafted steps since drafting was switched on
         bool   was_off = false;              // the next drafted step is a probe after an off stretch
         int    off_left = 0, off_len = 8;
         int    plain_due = 4, plain_take = 0; // drafted steps until the plain rate is measured again, plain steps to take for it
         int    steps[ADAPT_T_MAX + 1] = {};
-        adaptive_state() {
-            std::fill(ok, ok + ADAPT_BINS, 0.0);
-            std::fill(tested, tested + ADAPT_BINS, 0.0);
-        }
     } adapt;
 
     // cost of a step of kind t in units of a plain step, before any measurement (windows: perf/p6/mr_check on the
@@ -1572,7 +1562,7 @@ protected:
     double adaptive_shape(int t) const {
         if (cached_policy) {
             // Relative round costs for cached shapes on the 3090, including injection and draft.
-            static const double cached[] = { 1.0, 1.20, 1.67, 1.99, 2.35, 2.87 };
+            static const double cached[] = { 1.0, 1.20, 1.57, 1.89, 2.22, 2.64 };
             if (t < (int) (sizeof(cached)/sizeof(cached[0]))) {
                 return cached[t];
             }
@@ -1583,6 +1573,17 @@ protected:
 
     double adaptive_cost(int t) const {
         t = std::min(t, ADAPT_T_MAX);
+        if (cached_policy) {
+            const double plain = adapt.cost_n[0] >= 2 ? adapt.cost[0] : 4.8;
+            const double prior = plain*adaptive_shape(t);
+            if (t == 0 || adapt.cost_n[t] < 2) {
+                return prior;
+            }
+            // A rarely used width can still include the cost of capturing its graph.
+            const double sample = std::clamp(adapt.cost[t], 0.85*prior, 1.20*prior);
+            const int count = std::min(12, adapt.cost_n[t] - 1);
+            return (16*prior + count*sample)/(16 + count);
+        }
         if (adapt.cost_n[t] >= 2) {
             return adapt.cost[t];
         }
@@ -1609,8 +1610,11 @@ protected:
     }
 
     double adaptive_chance(float margin) const {
-        // before a bin has data: a little below the stated confidence, worth 6 tested drafts
         const int b = adaptive_bin(margin);
+        if (cached_policy) {
+            const double prior = 1.0/(1.0 + exp(1.55 - 0.71*margin));
+            return (adapt.ok[b] + 16.0*prior)/(adapt.tested[b] + 16.0);
+        }
         const double p = 1.0/(1.0 + exp(-(double) margin));
         return (adapt.ok[b] + 6.0*0.9*p)/(adapt.tested[b] + 6.0);
     }
@@ -1620,12 +1624,17 @@ protected:
         const int64_t now = ggml_time_us();
         const bool fresh = !adapt.last_valid || pos0 <= adapt.last_pos0 || pos0 - adapt.last_pos0 > params.n_max + 1 || now - adapt.last_us >= 250000;
         if (fresh) {
-            // another request (or a pause): keep what was learned about costs and chances, start with drafting on
+            // A pause invalidates the timing between these two steps.
             adapt.off_left = 0;
-            adapt.off_len  = 8;
+            adapt.off_len  = cached_policy ? 1 : 8;
+            adapt.weak_windows = 0;
             adapt.gain     = 1.0;
             adapt.n_on     = 0;
             adapt.was_off  = false;
+        } else if (adapt.from_history) {
+            adapt.history_steps++;
+            adapt.history_proposed += adapt.last_n;
+            adapt.history_accepted += (int) (pos0 - adapt.last_pos0) - 1;
         } else {
             const int    t  = std::min(adapt.last_t, ADAPT_T_MAX);
             const double ms = (double) (now - adapt.last_us)/1000.0;
@@ -1639,22 +1648,38 @@ protected:
                 adapt.cost_n[t]++;
             }
             const int n_acc = (int) (pos0 - adapt.last_pos0) - 1;
+            if (cached_policy && t > 0) {
+                const double gain = (1.0 + n_acc)*adaptive_cost(0)/adaptive_cost(t);
+                adapt.gain += 0.20*(gain - adapt.gain);
+                ++adapt.n_on;
+                for (int b = 0; b < ADAPT_BINS; ++b) {
+                    adapt.ok[b] *= 0.92;
+                    adapt.tested[b] *= 0.92;
+                }
+                if (adapt.n_on >= 4 && t == 1 && adapt.gain < 1.0) {
+                    adapt.off_left = adapt.off_len;
+                    adapt.off_len = adapt.weak_windows >= 3 ? std::min(8, 2*adapt.off_len) : 1;
+                    adapt.n_on = 0;
+                    adapt.weak_windows = 0;
+                } else if (n_acc > 0) {
+                    adapt.off_len = 1;
+                }
+            }
+            const double decay = cached_policy ? 1.0 : 0.98;
             for (int i = 0; i < adapt.last_n && i <= n_acc; ++i) {
-                adapt.pos_ok[i] = 0.97*adapt.pos_ok[i] + (i < n_acc);
-                adapt.pos_tested[i] = 0.97*adapt.pos_tested[i] + 1.0;
                 const int b = adaptive_bin(adapt.last_margin[i]);
-                adapt.ok[b]     = 0.98*adapt.ok[b] + (i < n_acc ? 1.0 : 0.0);
-                adapt.tested[b] = 0.98*adapt.tested[b] + 1.0;
+                adapt.ok[b]     = decay*adapt.ok[b] + (i < n_acc ? 1.0 : 0.0);
+                adapt.tested[b] = decay*adapt.tested[b] + 1.0;
             }
         }
+        adapt.from_history = false;
         adapt.last_valid = true;
         adapt.last_pos0  = pos0;
         adapt.last_us    = now;
         adapt.last_n     = 0;
-        // the plain rate must be known and current: two plain steps a few steps into a request and after every 192
-        // drafted steps (the cost of a plain step grows with the context)
+        // Sample plain steps as the context grows. Skip the first timing for each graph shape.
         if (fresh) {
-            adapt.plain_due = 4;
+            adapt.plain_due = cached_policy ? 12 : 4;
         } else if (adapt.off_left == 0 && adapt.plain_due > 0 && --adapt.plain_due == 0) {
             adapt.plain_take = adapt.cost_n[0] < 2 ? 3 : 2;
             adapt.plain_due  = 192;
@@ -1677,49 +1702,57 @@ protected:
     int adaptive_window(const float * margin, int n) {
         n = std::min(n, ADAPT_T_MAX - 1);
         double e = 1.0, all = 1.0;
-        double best = 1.0/adaptive_cost(1), best_drafted = 0.0;
-        int    best_k = 0;
+        double best = (cached_policy ? 1.005 : 1.0)/adaptive_cost(1), best_drafted = 0.0;
+        int best_k = 0;
         for (int k = 1; k <= n; ++k) {
-            double chance = adaptive_chance(margin[k - 1]);
-            if (cached_policy) {
-                // Before this draft finishes, use recent acceptance at the same position.
-                chance = (adapt.pos_ok[k - 1] + 6.0*chance)/(adapt.pos_tested[k - 1] + 6.0);
+            // Wider than the packed four-row verifier needs sustained gains before its graph pays.
+            const bool wide_ready = k <= 3 || (adapt.gain > 1.15 && adapt.n_on >= 6);
+            if (cached_policy && (margin[k - 1] < 0.4f || !wide_ready)) {
+                break;
             }
-            all *= chance;
-            e   += all;
-            // another window size than the last one rebuilds the target graph (about 1 ms on the host)
-            const double r = e/(adaptive_cost(k + 1) + (!cached_policy && adapt.last_window != 0 && adapt.last_window != k + 1 ? 1.0 : 0.0));
-            best_drafted = std::max(best_drafted, r);
-            if (r > best) {
-                best   = r;
+            all *= adaptive_chance(margin[k - 1]);
+            e += all;
+            const double rebuild = !cached_policy && adapt.last_window != 0 && adapt.last_window != k + 1 ? 1.0 : 0.0;
+            const double rate = e/(adaptive_cost(k + 1) + rebuild);
+            if (cached_policy && k < params.n_min) {
+                continue;
+            }
+            best_drafted = std::max(best_drafted, rate);
+            const double edge = cached_policy && k > 3 ? 1.035 : 1.0;
+            if (rate > best*edge) {
+                best = rate;
                 best_k = k;
             }
         }
-        // drafting stays on while the best window of the last steps beats a plain step
-        const double gain = std::max(best_drafted, best_k > 0 ? best : 0.0)*adaptive_cost(0);
-        const bool   probe = adapt.n_on == 0 && adapt.was_off;
-        adapt.was_off = false;
-        adapt.gain = adapt.n_on == 0 ? gain : 0.8*adapt.gain + 0.2*gain;
-        adapt.n_on++;
-        if (probe ? adapt.gain < 1.08 : (adapt.n_on >= 3 && adapt.gain < 1.02)) {
-            adapt.off_left = adapt.off_len;
-            adapt.off_len  = probe ? std::min(64, 2*adapt.off_len) : 8;
-            adapt.n_on     = 0;
-            adapt.was_off  = true;
-            if (best*adaptive_cost(0) < 1.0) {
-                best_k = 0; // not even this window pays
+        if (cached_policy) {
+            adapt.weak_windows = best*adaptive_cost(0) < 1.02 ? adapt.weak_windows + 1 : 0;
+        } else {
+            // drafting stays on while the best window of the last steps beats a plain step
+            const double gain = std::max(best_drafted, best_k > 0 ? best : 0.0)*adaptive_cost(0);
+            const bool   probe = adapt.n_on == 0 && adapt.was_off;
+            adapt.was_off = false;
+            adapt.gain = adapt.n_on == 0 ? gain : 0.8*adapt.gain + 0.2*gain;
+            adapt.n_on++;
+            if (probe ? adapt.gain < 1.08 : (adapt.n_on >= 3 && adapt.gain < 1.02)) {
+                adapt.off_left = adapt.off_len;
+                adapt.off_len  = probe ? std::min(64, 2*adapt.off_len) : 8;
+                adapt.n_on     = 0;
+                adapt.was_off  = true;
+                if (best*adaptive_cost(0) < 1.0) {
+                    best_k = 0; // not even this window pays
+                }
+            } else if (probe) {
+                adapt.off_len = 8;
             }
-        } else if (probe) {
-            adapt.off_len = 8;
-        }
-        // a size whose cost is only guessed is tried a few times when its drafts are likely accepted
-        if (best_k < n && adapt.off_left == 0 && adapt.cost_n[std::min(best_k + 2, ADAPT_T_MAX)] < 4) {
-            double joint = 1.0;
-            for (int i = 0; i <= best_k; ++i) {
-                joint *= adaptive_chance(margin[i]);
-            }
-            if (joint >= 0.8) {
-                ++best_k;
+            // a size whose cost is only guessed is tried a few times when its drafts are likely accepted
+            if (best_k < n && adapt.off_left == 0 && adapt.cost_n[std::min(best_k + 2, ADAPT_T_MAX)] < 4) {
+                double joint = 1.0;
+                for (int i = 0; i <= best_k; ++i) {
+                    joint *= adaptive_chance(margin[i]);
+                }
+                if (joint >= 0.8) {
+                    ++best_k;
+                }
             }
         }
         adapt.last_t = best_k + 1;
@@ -1813,6 +1846,16 @@ protected:
 
 public:
 
+    void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+        common_speculative_impl_draft_dflash::begin(seq_id, prompt);
+        if (seq_id == 0 && cached_policy) {
+            const bool never = adapt.never;
+            adapt = {};
+            adapt.on = true;
+            adapt.never = never;
+        }
+    }
+
     bool process(const common_batch & batch_in) override {
         if (pending_ids) {
             const float * picks = llama_get_embeddings_nextn(params.ctx_dft);
@@ -1841,6 +1884,21 @@ public:
         if (adapt.on && n_seq == 1 && dparams[0].drafting) {
             if (adapt.never || !adaptive_begin(dparams[0].pos0)) {
                 return; // a plain step
+            }
+            auto & dp = dparams[0];
+            if (cached_policy && dp.allow_device_draft && dp.prompt) {
+                // A repeated prefix can supply a verified window without running the model drafter.
+                const uint16_t match = adapt.history_steps >= 2 && adapt.history_accepted < 0.5*adapt.history_proposed ? 12 : 8;
+                auto continuation = common_ngram_simple_draft({ match, match }, *dp.prompt, dp.id_last);
+                const int limit = dp.n_max > 0 ? std::min(dp.n_max, params.n_max) : params.n_max;
+                const int width = std::min(limit, (int) continuation.size());
+                if (width > 0 && width >= params.n_min) {
+                    continuation.resize(width);
+                    *dp.result = std::move(continuation);
+                    adapt.last_n = width;
+                    adapt.from_history = true;
+                    return;
+                }
             }
             const int64_t t_prof = common_spec_prof_on() ? ggml_time_us() : 0;
             if (!flush_pending(dparams[0].pos0)) {
@@ -1902,8 +1960,9 @@ public:
             return;
         }
         auto & first = dparams[0];
-        if (device_draft && first.allow_device_draft) {
-            const int n = std::min(params.n_max, first.n_max);
+        // The cached policy reads this round's margins and token IDs together below.
+        if (device_draft && first.allow_device_draft && !cached_policy) {
+            const int n = first.n_max > 0 ? std::min(params.n_max, first.n_max) : params.n_max;
             const int width = adapt.on ? adaptive_window(previous_margins, n) : n;
             first.result->assign(width, first.id_last);
             first.device_draft = width > 0;
@@ -1936,6 +1995,7 @@ public:
             const float * conf = params.p_min > 0.0f && !has_rnn_context ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
             // the margin of the top logit over the second that p_min asks of a draft position (Inkling2 drafter)
             const float margin_min = has_rnn_context && params.p_min > 0.0f && params.p_min < 1.0f ? logf(params.p_min/(1.0f - params.p_min)) : -INFINITY;
+            const float * picks = pick ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
             float margins[ADAPT_T_MAX] = {};
             // bonus-anchor drafts read the mask positions only, like DFlash
             for (int32_t i = i_draft_beg; i < i_draft_beg + params.n_max; ++i) {
@@ -1948,7 +2008,6 @@ public:
                 if (pick) {
                     int32_t tok;
                     float   margin;
-                    const float * picks = llama_get_embeddings_nextn(ctx_dft);
                     std::memcpy(&tok,    picks + 2*(i - i_draft_beg),     sizeof(tok));
                     std::memcpy(&margin, picks + 2*(i - i_draft_beg) + 1, sizeof(margin));
                     if (margin < margin_min) {
@@ -2003,7 +2062,11 @@ public:
                 if (!pick) {
                     std::fill(margins, margins + ADAPT_T_MAX, 20.0f);
                 }
-                result.resize(adaptive_window(margins, (int) result.size()));
+                int n = (int) result.size();
+                if (cached_policy && dp.n_max > 0) {
+                    n = std::min(n, dp.n_max);
+                }
+                result.resize(adaptive_window(margins, n));
             }
 
             if (result.size() < (size_t) params.n_min) {
@@ -2022,6 +2085,9 @@ public:
             llama_set_embeddings_layer_inp_dev(params.ctx_tgt, false);
         }
         if (adapt.on && getenv("LLAMA_DSPARK_ADAPTIVE_LOG")) {
+            if (cached_policy) {
+                fprintf(stderr, "dspark history: %d windows, %d/%d accepted\n", adapt.history_steps, adapt.history_accepted, adapt.history_proposed);
+            }
             fprintf(stderr, "dspark policy: gain %.2f, steps by kind:", adapt.gain);
             for (int t = 0; t <= ADAPT_T_MAX; ++t) { fprintf(stderr, " %d", adapt.steps[t]); }
             fprintf(stderr, "\n  cost ms:");
