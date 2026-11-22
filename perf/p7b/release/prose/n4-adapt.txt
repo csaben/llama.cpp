@@ -1,0 +1,3 @@
+n4-adapt       letter    prompt     40   384 tok   211.1 tok/s    1446 chars  accepted/proposed 133/203  runs 209/211/211
+n4-adapt       science   prompt     38   384 tok   231.4 tok/s    1590 chars  accepted/proposed 164/206  runs 231/231/235
+n4-adapt       scene     prompt     44   384 tok   219.1 tok/s    1461 chars  accepted/proposed 148/215  runs 219/219/220
