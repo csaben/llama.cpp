@@ -1,5 +1,11 @@
 # Phase 6 hand-off (keep current; newest status first)
 
+## Round 4 status (in progress)
+
+The old edit trace reproduces the failure at target input position 2561 after rollback to 2561. Of 1699 kept rows, 163 differ, maximum absolute logit error 8.97. The first changed output is generated index 1688 (zero-based), absolute position 2713, plain ID 159542 vs drafted 155282. At position 2561 the SWA ring still occupies 1536 cells and writes cell 1025. The window kernel infers the single-row extent from visible cells and can drop a fully masked, occupied tail. With the true padded high-water mark the same 1699/1699 rows match byte-for-byte (max error 0). GPU1 reserved, phase 5 stopped.
+
+Replay from repo root after sourcing `perf/p5env.sh`: `IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=3 MR_CTX=16384 MR_TRACE=/path/to/n3.trace LD_LIBRARY_PATH=$PWD/build/bin build/bin/mr_check "$Q2" perf/ppl.txt`. Old trace is under the brief's scratchpad. Next: confirm zero differing rows, then full 3000/384-token matrix and restore phase 5.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.

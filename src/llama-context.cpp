@@ -2170,7 +2170,23 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
     return false; // all sequences use backend sampling
 }
 
+// IK_TRACE=<file>: every decode call (context, positions, tokens, output flags) and every seq_rm / clear / state load of a
+// memory, one line each; perf/p6/mr_check replays such a file (MR_TRACE) to compare a server's step sequence against
+// single-token decode
+static FILE * ik_trace_file() {
+    static FILE * f = getenv("IK_TRACE") ? fopen(getenv("IK_TRACE"), "w") : nullptr;
+    return f;
+}
+
 int llama_context::decode(const llama_batch_ext & batch_inp) {
+    if (FILE * f = ik_trace_file()) {
+        fprintf(f, "D %p %p %zu", (void *) this, (void *) memory.get(), batch_inp.tokens.size());
+        for (const auto & t : batch_inp.tokens) {
+            fprintf(f, " %d:%d:%d", (int) t.pos[0], (int) t.id, (int) t.output);
+        }
+        fprintf(f, "\n");
+        fflush(f);
+    }
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
         return encode(batch_inp);
@@ -4884,6 +4900,9 @@ void llama_memory_clear(llama_memory_t mem, bool data) {
         return;
     }
 
+    if (FILE * f = ik_trace_file()) {
+        fprintf(f, "C %p %d\n", (void *) mem, (int) data);
+    }
     mem->clear(data);
 }
 
@@ -4896,7 +4915,11 @@ bool llama_memory_seq_rm(
         return true;
     }
 
-    return mem->seq_rm(seq_id, p0, p1);
+    const bool ok = mem->seq_rm(seq_id, p0, p1);
+    if (FILE * f = ik_trace_file()) {
+        fprintf(f, "R %p %d %d %d %d\n", (void *) mem, (int) seq_id, (int) p0, (int) p1, (int) ok);
+    }
+    return ok;
 }
 
 void llama_memory_seq_cp(
@@ -5036,11 +5059,13 @@ size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, ll
 }
 
 size_t llama_state_seq_get_data_ext(llama_context * ctx, uint8_t * dst, size_t size, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    if (FILE * f = ik_trace_file()) { fprintf(f, "S %p %zu %d\n", (void *) ctx, size, (int) flags); }
     ctx->synchronize();
 
     return ctx->state_seq_get_data(seq_id, dst, size, flags);
 }
 size_t llama_state_seq_set_data_ext(llama_context * ctx, const uint8_t * src, size_t size, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    if (FILE * f = ik_trace_file()) { fprintf(f, "L %p %zu %d\n", (void *) ctx, size, (int) flags); }
     ctx->synchronize();
 
     return ctx->state_seq_set_data(seq_id, src, size, flags);

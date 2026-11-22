@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # Speculative-decoding probe (phase 5): the same prompts of three kinds (new code, an edit of given code, prose) plus an
 # edit deep in a 16K-token context, through a fresh server per configuration. Prints decode tok/s and, for a drafter,
-# accepted/proposed draft tokens. Temperature 0, seed 1, prompt cache off, 384 tokens per reply.
+# accepted/proposed draft tokens. Temperature 0, seed 1, prompt cache off, SPEC_MAXT (default 384) tokens per reply.
 # usage: MODEL=... GPU=1 [SPEC_OUT=dir] perf/spec_probe.py <label> [--no-long] [-- extra llama-server args]
+# SPEC_OUT keeps the FULL message of every reply as <label>.<kind>.json (all fields: Inkling reasons first, so a short
+# reply is entirely in reasoning_content and content is empty; rounds 1-3 saved only content and compared empty files).
+# Compare with perf/p6/r4_cmp.py, which refuses empty messages. SPEC_KINDS=code,edit limits the prompts,
+# SPEC_REPS=n repeats each request (median rate; all n messages must be equal), SPEC_PROBS=1 also saves the tokens with
+# their top-3 log-probabilities as <label>.<kind>.probs.json, SPEC_CTX sets -c (default 32768).
 import glob, json, os, subprocess, sys, time, urllib.request
 args = sys.argv[1:]
 label = args[0]
@@ -19,7 +24,7 @@ PROMPTS = [
 def post(path, body):
     return json.load(urllib.request.urlopen(urllib.request.Request(URL + path, json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=1800))
 M = os.path.expanduser(os.environ["MODEL"])
-cmd = [os.path.join(ROOT, "build/bin/llama-server"), "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", "32768",
+cmd = [os.path.join(ROOT, "build/bin/llama-server"), "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", os.environ.get("SPEC_CTX", "32768"),
        "-np", "1", "--port", "8041", "--host", "127.0.0.1"] + extra
 proc = subprocess.Popen(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=os.environ.get("GPU", "1")), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
@@ -30,6 +35,8 @@ try:
             urllib.request.urlopen(URL + "/health", timeout=1); break
         except Exception:
             time.sleep(0.5)
+    kinds = os.environ.get("SPEC_KINDS", "code,edit,prose,edit@16K").split(",")
+    no_long = no_long or "edit@16K" not in kinds
     if not no_long:
         files = sorted(glob.glob(os.path.join(ROOT, "src", "llama-*.cpp")))
         text = "".join(f"\n// ===== {os.path.basename(f)} =====\n" + open(f, errors="ignore").read() for f in files)
@@ -37,17 +44,29 @@ try:
         doc = post("/detokenize", {"tokens": toks[:16000]})["content"]
         PROMPTS.append(("edit@16K", doc + "\n\nCopy the first function defined in the source above exactly, then add a one-line comment above each of its statements. Output only the code."))
     for kind, p in PROMPTS:
-        body = {"model": "x", "messages": [{"role": "user", "content": p}], "max_tokens": 384, "temperature": 0, "seed": 1, "cache_prompt": False}
+        if kind not in kinds:
+            continue
+        body = {"model": "x", "messages": [{"role": "user", "content": p}], "max_tokens": int(os.environ.get("SPEC_MAXT", "384")), "temperature": 0, "seed": 1, "cache_prompt": False}
+        if os.environ.get("SPEC_PROBS"):
+            body.update({"logprobs": True, "top_logprobs": 3})
         # SPEC_REPS=n: the request n times; the median run is reported, all rates are listed
         runs = [post("/v1/chat/completions", body) for _ in range(int(os.environ.get("SPEC_REPS", "1")))]
         runs.sort(key=lambda x: x["timings"]["predicted_per_second"])
         r = runs[len(runs)//2]
         t = r["timings"]
-        if os.environ.get("SPEC_OUT"):  # keep the reply, to compare drafted against plain output
+        msg = r["choices"][0]["message"]
+        chars = sum(len(v) for k, v in msg.items() if isinstance(v, str) and k != "role")
+        if not chars:
+            raise ValueError(f"{label} {kind}: empty reply")
+        if any(x["choices"][0]["message"] != msg for x in runs):
+            raise ValueError(f"{label} {kind}: repeats differ")
+        if os.environ.get("SPEC_OUT"):  # keep the whole message, to compare drafted against plain output
             os.makedirs(os.environ["SPEC_OUT"], exist_ok=True)
-            open(os.path.join(os.environ["SPEC_OUT"], f"{label}.{kind}.txt"), "w").write(r["choices"][0]["message"].get("content") or "")
+            json.dump(msg, open(os.path.join(os.environ["SPEC_OUT"], f"{label}.{kind}.json"), "w"), sort_keys=True)
+            if os.environ.get("SPEC_PROBS"):
+                json.dump(r["choices"][0].get("logprobs"), open(os.path.join(os.environ["SPEC_OUT"], f"{label}.{kind}.probs.json"), "w"))
         acc = f"  accepted/proposed {t.get('draft_n_accepted')}/{t.get('draft_n')}" if t.get("draft_n") else ""
         allr = "  runs " + "/".join(f"{x['timings']['predicted_per_second']:.0f}" for x in runs) if len(runs) > 1 else ""
-        print(f"{label:14s} {kind:9s} prompt {t['prompt_n']:6d}  {t['predicted_n']:4d} tok  {t['predicted_per_second']:6.1f} tok/s{acc}{allr}", flush=True)
+        print(f"{label:14s} {kind:9s} prompt {t['prompt_n']:6d}  {t['predicted_n']:4d} tok  {t['predicted_per_second']:6.1f} tok/s  {chars:6d} chars{acc}{allr}", flush=True)
 finally:
     proc.terminate(); proc.wait()
