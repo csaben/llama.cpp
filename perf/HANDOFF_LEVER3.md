@@ -1,10 +1,12 @@
 # GPU0 Phase 7 handoff
 
-## Round 4 release validation
+## Round 4
 
-The built default is `5d1f9e0` (`p7l3r4-default-vector`). The same four CUDA files form a single local code commit `ab2ad69` directly on the Round 3 final commit. Select that commit with tag `p7l3r4-release-source`. The default targets the 82-SM GA10x plain decoder. Set `IK_GLUE_FAST=0` to restore the Round 3 schedule. [Build and model identity](p7l3r4/final/environment.txt), [ranked latency tables](RESULTS_LEVER3.md#kernel-latency-and-logical-traffic), [screening results](p7l3r4/screenings.md)
+**Local release commit `ab2ad69`, tagged `p7l3r4-release-233tok`, applies directly to Round 3.** Its four CUDA files match the measured build `5d1f9e0` (`p7l3r4-selected-233tok`). The full branch history, measurements and handoff are tagged `p7l3r4-final-233tok`. The improvements run by default on the eligible 82-SM GA10x decoder. Set `IK_GLUE_FAST=0` for the Round 3 control. [Source and reproduction](RESULTS_LEVER3.md#reproducing-the-release-measurements), [GPU and model identity](p7l3r4/final/environment.txt)
 
-At 06:46 EST, the release had matched all 88 reference logit rows and 128 additional rows from interleaved sequences. PPL matched at 3.0530/4.1979, all 2,834 DSpark rows agreed, and all 3,988 backend cases passed. The default four-depth run reached 233.36/213.68/200.00/183.89 tok/s, against 215.92/198.04/186.24/171.00 for the fresh 16264c6 control. Per-depth temperature-matched crossovers are running. [Default throughput](p7l3r4/final/official-on.txt), [reference](p7l3r4/final/official-base.txt). [Exactness and backend evidence](RESULTS_LEVER3.md#exactness-and-backend-checks)
+The default measured **233.36 / 213.68 / 200.00 / 183.89 tok/s** at prefixes 0 / 4096 / 16384 / 32768. The same-binary, temperature-matched gains were **3.98% / 3.12% / 2.60% / 2.96%**. The depth-zero target of 300 tok/s still needs 0.952 ms/token. Gate/attention and controller down saved 79.31 and 46.75 us/token at zero, with 514 steady launches. [Throughput and original control](RESULTS_LEVER3.md#plain-decode-throughput), [16 paired trials](p7l3r4/final/paired.md), [per-kernel changes](p7l3r4/final/kernel-deltas.md), [ranked starting table](p7l3r4/latency-single.md)
+
+PPL matched the reference at 3.0530 for prefill and 4.1979 for decode. All 88 standard logit rows, 128 interleaved-sequence rows and 2,834 DSpark rows matched exactly. CUDA passed 3,988 backend cases. The final benchmark finished at 07:07:52 EST on November 22, 2026. [Quality evidence](RESULTS_LEVER3.md#exactness-and-backend-checks), [validation timeline](p7l3r4/final/validation.txt), [experiment details](RESULTS_LEVER3.md#experiments-on-the-ranked-kernels)
 
 ## Round 3
 

@@ -319,6 +319,21 @@ At `p7l3r3-router-width`, enable `IK_DEPENDENCY_FUSION=1` first. `IK_CONTROLLED_
 
 ## Round 4 on GPU0
 
+### Plain decode throughput
+
+The default reached **233.36 tok/s at depth zero** on GPU0. Compared with the Round 3 schedule in the same release binary, the gain was 3.98% at zero and 2.60-3.12% across the three longer prefixes. The original `16264c6` control and the default each ran all four depths in one invocation of the requested three-repeat tg128 benchmark. The Round 3 retest was measured at the start of this round. [Default benchmark](p7l3r4/final/official-on.txt), [fresh original control](p7l3r4/final/official-base.txt), [Round 3 retest](p7l3r4/round3.txt)
+
+| Prefix | 16264c6 | Round 3 retest | Round 4 | Gain over 16264c6 | Paired off | Paired on | Paired gain |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 215.92 | 225.06 | 233.36 | +8.08% | 224.34 | 233.27 | +3.98% |
+| 4096 | 198.04 | 206.84 | 213.68 | +7.90% | 207.52 | 214.00 | +3.12% |
+| 16384 | 186.24 | 194.27 | 200.00 | +7.39% | 194.46 | 199.52 | +2.60% |
+| 32768 | 171.00 | 178.57 | 183.89 | +7.54% | 179.44 | 184.75 | +2.96% |
+
+All rates are tok/s. For each depth the release binary ran with Round 4 off, on, on and off. Every process started at 63 C and measured three repetitions. The final 32K process completed at 07:07:52 EST on November 22, 2026. The selected binary was built from `5d1f9e0`. The local code-only release tag is `p7l3r4-release-233tok` (`ab2ad69`), and the complete results tag is `p7l3r4-final-233tok`. [All 16 crossover trials](p7l3r4/final/paired.md), [validation timeline](p7l3r4/final/validation.txt), [GPU and build](p7l3r4/final/environment.txt)
+
+At 233.36 tok/s the measured token time is 4.285 ms. Reaching 300 tok/s requires a further 0.952 ms/token. For scale, the positive excess remaining in all profiled non-matvec families at zero sums to 0.486 ms/token under the traffic model. [Final per-kernel accounting](p7l3r4/final/kernel-deltas.md), [floor model](p7l3r4/latency.py)
+
 ### Kernel latency and logical traffic
 
 The first generated token at depth 0 took 562 kernel launches, including 48 clears of the 19,968-float recurrent state rows. The first token after a 16,384-token prefix and the following steady-state tokens at both depths took 514 launches. Each table groups identical kernel templates and grid/block dimensions. It reports calls per token, mean and total duration, logical bytes, modeled minimum time and signed excess. The single-step tables retain the measured variation among visits within that token. [First token at each depth](p7l3r4/latency-first.md), [65th token](p7l3r4/latency-single.md), [average of generation indices 8-127](p7l3r4/latency-mean.md), [state clear](../src/llama-graph.cpp), [observed graph shapes](p7l3r4/shapes.txt)
