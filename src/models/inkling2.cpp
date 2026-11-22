@@ -1043,13 +1043,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                         cur = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd);
                         cb(cur, "attn_out_leaf", il);
                     } else {
-                        ggml_tensor * gated = cur;
                         cur = convolve(mr_mark(build_lora_mm(layer.wo, cur)), layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa, residual);
-                        static const bool keep_gated = getenv("IK_PROJ_CONV_PIN") && atoi(getenv("IK_PROJ_CONV_PIN"));
-                        if (keep_gated && n_tokens == 1 && gated->type == GGML_TYPE_Q8_1 && cur->op == GGML_OP_SHORTCONV_RES &&
-                                !(getenv("IK_MR") && atoi(getenv("IK_MR")))) {
-                            cur->src[7] = gated;
-                        }
                     }
                     cb(cur, "attn_out", il);
                     goto attn_done;

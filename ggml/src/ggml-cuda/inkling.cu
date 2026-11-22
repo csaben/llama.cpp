@@ -2,8 +2,6 @@
 #include "inkling-common.cuh"
 #include "vecdotq.cuh"
 #include "cp-async.cuh"
-#include "unary.cuh"
-#include "ggml-cuda.h"
 
 #include <cmath>
 
@@ -123,61 +121,7 @@ void ggml_cuda_op_l2_clip(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 // res_mix: softmax-weighted mix of RMS-normalized states, one block per (token, query); optional RMS norm of the result
 // (scaled by nw) and F32 or Q8_1 output. query == nullptr: no mix, the (normalized) first state.
 
-struct ik_inline_prefetch {
-    const char * w;
-    int bytes;
-    int blocks;
-};
-
-static ik_inline_prefetch ik_make_prefetch(const ggml_tensor * w) {
-    static const int kib = std::min(6144, std::max(1, getenv("IK_INLINE_KIB") ? atoi(getenv("IK_INLINE_KIB")) : 512));
-    static const int blocks = std::min(512, std::max(1, getenv("IK_INLINE_BLOCKS") ? atoi(getenv("IK_INLINE_BLOCKS")) : 64));
-    return w ? ik_inline_prefetch{(const char *) w->data, int(std::min(ggml_nbytes(w), size_t(kib*1024))), blocks} : ik_inline_prefetch{};
-}
-
-static __device__ void ik_prefetch_tile(ik_inline_prefetch p, int block, int count) {
-    for (int i = (block*blockDim.x + threadIdx.x)*128; i < p.bytes; i += 128*count*blockDim.x) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(GGML_USE_HIP)
-        asm volatile("prefetch.global.L2::evict_last [%0];" :: "l"(p.w + i));
-#else
-        ggml_cuda_prefetch_l2(p.w + i);
-#endif
-    }
-}
-
-static __global__ void ik_situ_prefetch(const float * gate, const float * up, int gs, int us, block_q8_1 * x, const int32_t * ids,
-        float beta, float lb, size_t stride, ik_inline_prefetch pf) {
-    const int slot = blockIdx.y;
-    if (blockIdx.x >= 5) {
-        const int expert = ids[slot];
-        if ((unsigned) expert < 128) {
-            pf.w += expert*stride;
-            ik_prefetch_tile(pf, blockIdx.x - 5, gridDim.x - 5);
-        }
-        return;
-    }
-    const int i = blockIdx.x*256 + threadIdx.x;
-    if (i < 1152) {
-        const float v = ggml_cuda_op_situ_single(gate[slot*gs + i], up[slot*us + i], beta, lb);
-        ik_warp_store_q8_1(v, x + slot*36 + i/32, threadIdx.x%32, true);
-    }
-}
-
-bool ggml_cuda_situ_prefetch(ggml_backend_cuda_context & ctx, ggml_tensor * op, ggml_tensor * down) {
-    const auto * g = op->src[0], * u = op->src[1], * w = down->src[0], * ids = down->src[2];
-    if (!g || !u || g->type != GGML_TYPE_F32 || u->type != GGML_TYPE_F32 || g->nb[0] != 4 || u->nb[0] != 4 || g->nb[1] > INT_MAX || u->nb[1] > INT_MAX ||
-            !ggml_are_same_shape(g, u) || !ggml_are_same_shape(g, op) || !ggml_is_matrix(op) || op->ne[0] != 1152 || op->ne[1] != 8 ||
-            op->type != GGML_TYPE_Q8_1 || !ggml_is_contiguous(op) || ids->type != GGML_TYPE_I32 || !ggml_is_vector(ids) || ids->ne[0] != 8 || !ggml_is_contiguous(ids) ||
-            w->ne[2] != 128 || w->ne[3] != 1 || !ggml_is_contiguous(w) || !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device)) { return false; }
-    auto pf = ik_make_prefetch(w);
-    pf.bytes = int(std::min(w->nb[2], size_t(pf.bytes/8)));
-    ik_situ_prefetch<<<dim3(5 + (pf.blocks + 7)/8, 8), 256, 0, ctx.stream()>>>((const float *) g->data, (const float *) u->data,
-        g->nb[1]/4, u->nb[1]/4, (block_q8_1 *) op->data, (const int32_t *) ids->data, ggml_get_op_params_f32(op, 2), ggml_get_op_params_f32(op, 3), w->nb[2], pf);
-    return true;
-}
-
 struct ik_res_mix_norm {
-    ik_inline_prefetch pf;
     const float * nw;     // nullptr: no norm
     int64_t       nw_nb1; // bytes per query (0: shared)
     float         eps;
@@ -323,10 +267,6 @@ template <int block_size, bool q8, int NS = 0>
 static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
         const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
         const ik_res_mix_norm norm) {
-    if (blockIdx.x >= n_tok) {
-        ik_prefetch_tile(norm.pf, (blockIdx.x - n_tok)*gridDim.y + blockIdx.y, norm.pf.blocks*gridDim.y);
-        return;
-    }
     const int n_states = NS ? NS : state_count;
     constexpr int n_warps = block_size/WARP_SIZE;
 
@@ -470,7 +410,7 @@ bool ggml_cuda_supports_res_mix(const ggml_tensor * node) {
     return count >= 1 && count <= IK_MAX_STATES;
 }
 
-void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_tensor * next_w) {
+void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * query = dst->src[0];
 
     const bool has_norm = ggml_get_op_params_i32(dst, 3) != 0;
@@ -499,7 +439,6 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst, co
     GGML_ASSERT(ggml_is_contiguous(dst));
 
     ik_res_mix_norm norm;
-    norm.pf = ik_make_prefetch(next_w);
     norm.nw     = norm_w ? (const float *) norm_w->data : nullptr;
     norm.nw_nb1 = norm_w && ggml_nrows(norm_w) > 1 ? norm_w->nb[1] : 0;
     norm.eps    = norm_eps;
@@ -527,7 +466,7 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst, co
                 static const bool specialize = getenv("IK_MIX_SPECIALIZE") && atoi(getenv("IK_MIX_SPECIALIZE")) != 0;
                 auto launch_mix = [&](auto state_count) {
                     constexpr int ns = decltype(state_count)::value;
-                    res_mix_f32_vec4<640, kQ8, ns><<<dim3(n_tok + norm.pf.blocks, n_q), 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
+                    res_mix_f32_vec4<640, kQ8, ns><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
                             n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
                 };
                 switch (specialize && (n_tok == 1 || (ik_mr_enabled() && n_tok <= 8)) ? n_states : 0) {
@@ -559,7 +498,6 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst, co
 // the thread of token n_t - 1 - k also stores the inputs it saw into state slot k
 
 struct ik_shortconv_args {
-    ik_inline_prefetch pf;
     const float * past; const float * w; const float * cur; const float * taps; const float * res;
     const int32_t * ids;
     float * dst; float * state;
@@ -620,10 +558,6 @@ static __device__ __forceinline__ float shortconv_res_one(const ik_shortconv_arg
 // one thread per (channel, token)
 template <int d_conv, bool has_taps>
 static __global__ void shortconv_res_f32(const ik_shortconv_args args) {
-    if (args.pf.blocks && blockIdx.x >= gridDim.x - args.pf.blocks) {
-        ik_prefetch_tile(args.pf, blockIdx.x - (gridDim.x - args.pf.blocks), args.pf.blocks);
-        return;
-    }
     const int64_t idx = (int64_t) blockIdx.x*blockDim.x + threadIdx.x;
     const int64_t n_tok = (int64_t) args.n_t*args.n_s;
     if (idx >= n_tok*args.n_chan) {
@@ -706,7 +640,7 @@ static __global__ void shortconv_res_rows_f32(const ik_shortconv_args args) {
     }
 }
 
-void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * dst, const ggml_tensor * next_w) {
+void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * past  = dst->src[0];
     const ggml_tensor * w     = dst->src[1];
     const ggml_tensor * cur   = dst->src[2];
@@ -716,7 +650,6 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
     const ggml_tensor * ids   = dst->src[6];
 
     ik_shortconv_args args;
-    args.pf = ik_make_prefetch(next_w);
     memcpy(&args.scale,          (const float *)   dst->op_params + 0, sizeof(float));
     memcpy(&args.post,           (const int32_t *) dst->op_params + 1, sizeof(int32_t));
     int32_t n_heads_post = 1;
@@ -776,7 +709,7 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
         } else {
             const int block_size = 256;
             const int64_t nblocks = (n_tok*args.n_chan + block_size - 1)/block_size;
-            shortconv_res_f32<kDC, kTaps><<<nblocks + args.pf.blocks, block_size, 0, stream>>>(args);
+            shortconv_res_f32<kDC, kTaps><<<nblocks, block_size, 0, stream>>>(args);
         }
     };
 
@@ -1382,8 +1315,9 @@ static void loop_ctrl_apply2_launch(ggml_backend_cuda_context & ctx, const float
 
 // Four rank-64 output rows per warp. Each eight-lane group loads two
 // contiguous four-element vectors per lane, keeping the full-warp sum order.
-static __device__ __forceinline__ float ik_apply8_value(const float * cur, const float * msg, const float * d,
-        const half * wg, const half * wf, int i, int n, size_t cur_stride, size_t msg_stride) {
+static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, const float * d,
+        const half * wg, const half * wf, float * y, int n, size_t cur_stride, size_t msg_stride) {
+    const int i = blockIdx.x*32 + threadIdx.x/8;
     const int lane = threadIdx.x % 8;
     const int b = blockIdx.y;
     const int row = b*n + i;
@@ -1406,69 +1340,7 @@ static __device__ __forceinline__ float ik_apply8_value(const float * cur, const
         const float c = cur[b*cur_stride+i], m = msg[b*msg_stride+i];
         const float gain = tanhf((gv[0]+gv[2])+(gv[1]+gv[3]));
         const float forget = tanhf((fv[0]+fv[2])+(fv[1]+fv[3]));
-        return (c-forget*c) + gain*m;
-    }
-    return 0.0f;
-}
-
-static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, const float * d,
-        const half * wg, const half * wf, float * y, int n, size_t cur_stride, size_t msg_stride) {
-    const int i = blockIdx.x*32 + threadIdx.x/8;
-    const float v = ik_apply8_value(cur, msg, d, wg, wf, i, n, cur_stride, msg_stride);
-    if (threadIdx.x%8 == 0) { y[blockIdx.y*n + i] = v; }
-}
-
-static __global__ void ik_ctrl_norm_visit(const float * cur, const float * msg, const float * d, const half * wg, const half * wf,
-        const float * nw, size_t cur_stride, size_t msg_stride, size_t nw_stride, float eps, block_q8_1 * out, float * partial, int * signals) {
-    const int ib = blockIdx.y;
-    const int base = blockIdx.x*32;
-    const int channel = base + threadIdx.x/8;
-    const int lane = threadIdx.x%WARP_SIZE;
-    __shared__ float values[3][32];
-    __shared__ float squares[32];
-    __shared__ int last;
-    float ss = 0.0f;
-#pragma unroll
-    for (int group = 0; group < 3; ++group) {
-        int i = channel + 1024*group;
-        if (i < 2304) {
-            const float y = ik_apply8_value(cur, msg, d, wg, wf, i, 2304, cur_stride, msg_stride);
-            if (threadIdx.x%8 == 0) {
-                values[group][threadIdx.x/8] = y;
-                ss = __fmaf_rn(y, y, ss);
-            }
-        }
-    }
-    if (threadIdx.x%8 == 0) { squares[threadIdx.x/8] = ss; }
-    __syncthreads();
-    if (threadIdx.x < 32) {
-        const float v = warp_reduce_sum(squares[lane]);
-        if (lane == 0) { partial[32*ib + blockIdx.x] = v; }
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        ik_atomic_add_acq_rel(signals + 2*ib, 1);
-        while (ik_ld_acquire(signals + 2*ib) != 32) { __nanosleep(32); }
-    }
-    __syncthreads();
-    if (threadIdx.x < 32) {
-        const float total = warp_reduce_sum(partial[32*ib + lane]);
-        const float scale = rsqrtf(total/2304.0f + eps);
-#pragma unroll
-        for (int group = 0; group < 3; ++group) {
-            int i = base + 1024*group + lane;
-            if (i < 2304) {
-                ik_warp_store_q8_1(values[group][lane]*scale*nw[ib*nw_stride + i], out + (ib*2304 + i)/32, lane, true);
-            }
-        }
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        last = ik_atomic_add_acq_rel(signals + 2*ib + 1, 1) == 31;
-        if (last) {
-            signals[2*ib] = 0;
-            signals[2*ib + 1] = 0;
-        }
+        y[row] = (c-forget*c) + gain*m;
     }
 }
 
@@ -1564,25 +1436,6 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
             nw ? (const float *) nw->data : nullptr, nw_nb1, dst->data, eps, counters)
     static const bool group8 = getenv("IK_CTRL_APPLY8") && atoi(getenv("IK_CTRL_APPLY8"));
     const bool mr_rows = ik_mr_enabled() && n_tok > 1 && n_tok <= 8;
-    static const bool norm_visit = getenv("IK_CTRL_NORM_VISIT") && atoi(getenv("IK_CTRL_NORM_VISIT"));
-    if (norm_visit && group8 && q8 && nw && !ik_mr_enabled() && n_tok == 1 && n == 2304 && B > 0 && B <= 3 &&
-            rank == 64 && wg->type == GGML_TYPE_F16 && wf->type == GGML_TYPE_F16 && ((uintptr_t) d->data % 16) == 0 &&
-            ((uintptr_t) wg->data % 8) == 0 && ((uintptr_t) wf->data % 8) == 0 &&
-            ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X && ggml_cuda_info().devices[ctx.device].supports_cooperative_launch) {
-        ggml_cuda_pool_alloc<float> part(ctx.pool(), 32*B);
-        float * partial = part.get();
-        int * signals = ik_counters(ctx, 232, 2*B);
-        size_t cs = cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float), ms = msg->nb[2]/sizeof(float);
-        size_t ns = ggml_nrows(nw) == 1 ? 0 : nw->nb[1]/sizeof(float);
-        const void * cv = cur->data, * mv = msg->data, * dv = d->data, * gv = wg->data, * fv = wf->data, * nv = nw->data;
-        void * args[] = {&cv, &mv, &dv, &gv, &fv, &nv, &cs, &ms, &ns, &eps, &dst->data, &partial, &signals};
-        int active;
-        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, ik_ctrl_norm_visit, 256, 0));
-        if (active*ggml_cuda_info().devices[ctx.device].nsm >= 32*B) {
-            CUDA_CHECK(cudaLaunchCooperativeKernel((void *) ik_ctrl_norm_visit, dim3(32, B), dim3(256), args, 0, ctx.stream()));
-            return;
-        }
-    }
     if (mr_rows && group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n % 32 == 0 &&
             (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 && (uintptr_t) wf->data % 8 == 0) {
         ik_ctrl_apply8_rows<<<dim3(n/32, B, n_tok), 256, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
@@ -2518,7 +2371,7 @@ static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float 
 #define IK_A2_MIN_BLOCKS 1
 #endif
 template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
-static __device__ __forceinline__ void ik_attn2_body(const ik_attn_args args_in) {
+static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
@@ -3146,142 +2999,6 @@ static __device__ __forceinline__ void ik_attn2_body(const ik_attn_args args_in)
     IK_DBG_T(7);
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
-static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in) {
-    ik_attn2_body<cache_t, q8_out, G, MMA, MR, HAS_TAPS, SHORT_SCAN>(args_in);
-}
-
-static __device__ __forceinline__ float ik_visit_dot(float sum, const block_iq4_nl * w, const block_q8_1 * x, int iqs) {
-    const ik_iq4_nl_w decoded = ik_iq4_nl_decode(w, 0, iqs);
-    const int * q = (const int *) x->qs + iqs;
-    int dot = 0;
-#pragma unroll
-    for (int j = 0; j < VDR_IQ4_NL_Q8_1_MMVQ; ++j) {
-        dot = ggml_cuda_dp4a(decoded.v[j].x, q[j], dot);
-        dot = ggml_cuda_dp4a(decoded.v[j].y, q[j + 4], dot);
-    }
-    return __fmaf_rn(__fmul_rn(decoded.d, __low2float(x->ds)), float(dot), sum);
-}
-
-template <int taps>
-static __global__ void __launch_bounds__(IK_A2_BLOCK) ik_attention_visit(const ik_attn_args a, const block_iq4_nl * weights,
-        float * out, int * sync, int tile_rows, int mode) {
-    if (blockIdx.x < 8) {
-        ik_attn2_body<block_q8_0, true, 3, true, false, taps, true>(a);
-        __syncthreads();
-        if (threadIdx.x == 0) {
-            if (mode >= 3) { ik_st_release(sync + 2 + blockIdx.x, 1); }
-            ik_atomic_add_acq_rel(sync, 1);
-        }
-        return;
-    }
-    extern __shared__ __align__(16) char tile[];
-    constexpr int blocks = 3072/QK4_NL;
-    const int worker = blockIdx.x - 8, workers = gridDim.x - 8;
-    const int first = worker*tile_rows;
-    const int lane = threadIdx.x % WARP_SIZE, warp = threadIdx.x/WARP_SIZE;
-    const int bytes = tile_rows*blocks*sizeof(block_iq4_nl);
-    const char * src = (const char *) (weights + first*blocks);
-    if (mode == 1 || mode == 3) {
-        if (mode == 3) {
-            constexpr int head_bytes = 12*sizeof(block_iq4_nl);
-            // Head slices start on 8-byte boundaries. Copy aligned 4-byte words without crossing a head.
-            for (int r = 0; r < tile_rows; ++r) {
-                for (int i = lane*4; i < head_bytes; i += WARP_SIZE*4) {
-                    int off = r*blocks*sizeof(block_iq4_nl) + warp*head_bytes + i;
-#if defined(CP_ASYNC_AVAILABLE)
-                    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;" :: "r"(ggml_cuda_cvta_generic_to_shared(tile + off)), "l"(src + off));
-#endif
-                }
-            }
-        } else {
-            for (int i = threadIdx.x*16; i < bytes; i += IK_A2_BLOCK*16) {
-                cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(tile + i), src + i);
-            }
-        }
-        cp_async_commit_group();
-    } else if (mode == 2) {
-        for (int i = threadIdx.x*128; i < bytes; i += IK_A2_BLOCK*128) {
-            ggml_cuda_prefetch_l2(src + i);
-        }
-    }
-    if (mode >= 3) {
-        if (lane == 0) {
-            while (ik_ld_acquire(sync + 2 + warp) == 0) { __nanosleep(32); }
-        }
-        __syncwarp();
-    } else {
-        if (threadIdx.x == 0) {
-            while (ik_ld_acquire(sync) != 8) { __nanosleep(32); }
-        }
-    }
-    if (mode == 1 || mode == 3) { cp_async_wait_all(); __syncwarp(); }
-    if (mode < 3) { __syncthreads(); }
-    __shared__ float head_sum[24][8];
-    const block_q8_1 * x = (const block_q8_1 *) a.dst;
-    for (int start = first; start < 2304; start += workers*tile_rows) {
-        const block_iq4_nl * w = (mode == 1 || mode == 3) && start == first ? (const block_iq4_nl *) tile : weights + start*blocks;
-        if (mode >= 3) {
-            // Each warp owns the projection columns of one KV head. The producer releases just that head.
-            const int b = warp*12 + lane/2;
-            for (int r = 0; r < tile_rows; ++r) {
-                const float dot = lane < 24 ? vec_dot_iq4_nl_q8_1(w, x + b, r*blocks + b, 2*(lane%2)) : 0.0f;
-                const float sum = warp_reduce_sum(dot);
-                if (lane == 0) { head_sum[r][warp] = sum; }
-            }
-            __syncthreads();
-            for (int r = warp; r < tile_rows; r += 8) {
-                const float sum = warp_reduce_sum(lane < 8 ? head_sum[r][lane] : 0.0f);
-                if (lane == 0) { out[start + r] = sum; }
-            }
-            __syncthreads();
-            continue;
-        }
-        for (int r = warp; r < tile_rows; r += IK_A2_WARPS) {
-            float partial[4] = {};
-#pragma unroll
-            for (int base = 0; base < blocks; base += 64) {
-#pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    const int b = base + j*16 + lane/2;
-                    if (b < blocks) {
-                        partial[j] = ik_visit_dot(partial[j], w + r*blocks + b, x + b, 2*(lane%2));
-                    }
-                }
-            }
-            const float sum = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(partial[0], partial[1]), partial[2]), partial[3]));
-            if (lane == (start + r)%2) { out[start + r] = sum; }
-        }
-    }
-    __syncthreads();
-    if (threadIdx.x == 0 && ik_atomic_add_acq_rel(sync + 1, 1) == workers - 1) {
-        sync[0] = sync[1] = 0;
-        if (mode >= 3) { for (int h = 0; h < 8; ++h) { sync[2 + h] = 0; } }
-    }
-}
-
-template<int taps>
-static void ik_launch_attention_visit(ggml_backend_cuda_context & ctx, ik_attn_args a, ggml_tensor * proj) {
-    static const int requested = getenv("IK_VISIT_ROWS") ? atoi(getenv("IK_VISIT_ROWS")) : 16;
-    int mode = getenv("IK_VISIT_MODE") ? atoi(getenv("IK_VISIT_MODE")) : 1;
-    static const int cap = getenv("IK_VISIT_BLOCKS") ? std::max(1, atoi(getenv("IK_VISIT_BLOCKS"))) : 1024;
-    int rows = requested == 8 ? 8 : requested == 24 ? 24 : 16;
-    auto kernel = ik_attention_visit<taps>;
-    size_t shared = mode == 1 || mode == 3 ? rows*(3072/QK4_NL)*sizeof(block_iq4_nl) : 0;
-    if (shared > 0) {
-        CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, int(shared)));
-    }
-    int active;
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, kernel, IK_A2_BLOCK, shared));
-    int workers = std::min({active*ggml_cuda_info().devices[ctx.device].nsm - 8, 2304/rows, cap});
-    GGML_ASSERT(workers > 0);
-    ggml_cuda_pool_alloc<block_q8_1> scratch(ctx.pool(), 3072/QK8_1);
-    a.dst = scratch.get();
-    int * sync = ik_counters(ctx, 216, 10);
-    void * params[] = {&a, &proj->src[0]->data, &proj->data, &sync, &rows, &mode};
-    CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, dim3(workers + 8), dim3(IK_A2_BLOCK), params, shared, ctx.stream()));
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // inkling_attn_scan: the scan of a long Q8_0 cache as its own launch. A (cell, kv head) row is 136 bytes, so it lies
 // across two 128-byte lines that it shares with the rows of the neighbouring heads. With one block per kv head (the
@@ -3509,7 +3226,7 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
     }
 }
 
-void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * proj_out, bool * consumed) {
+void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * proj    = dst->src[0];
     const ggml_tensor * consts  = dst->src[1];
     ggml_tensor       * state   = dst->src[2];
@@ -3694,12 +3411,6 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     }
     const dim3 grid(a.n_head_kv, a.n_split, 1);
     if (fixed) {
-        if (short_scan && proj_out) {
-            if (a.has_taps) { ik_launch_attention_visit<1>(ctx, a, proj_out); }
-            else            { ik_launch_attention_visit<0>(ctx, a, proj_out); }
-            *consumed = true;
-            return;
-        }
         if (short_scan) {
             if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 1, true><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
             else            { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 0, true><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }

@@ -1430,7 +1430,7 @@ static __device__ __forceinline__ ik_iq4_nl_w ik_iq4_nl_decode(const void * __re
     w.d = __half2float(bq4->d);
     return w;
 }
-static __device__ __forceinline__ float ik_iq4_nl_dot(const ik_iq4_nl_w & w, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+static __device__ __forceinline__ int ik_iq4_nl_sumi(const ik_iq4_nl_w & w, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
     const int * q8 = (const int *) bq8_1->qs + iqs;
     int sumi = 0;
 #pragma unroll
@@ -1438,6 +1438,11 @@ static __device__ __forceinline__ float ik_iq4_nl_dot(const ik_iq4_nl_w & w, con
         sumi = ggml_cuda_dp4a(w.v[l].x, q8[l + 0], sumi);
         sumi = ggml_cuda_dp4a(w.v[l].y, q8[l + 4], sumi);
     }
+    return sumi;
+}
+
+static __device__ __forceinline__ float ik_iq4_nl_dot(const ik_iq4_nl_w & w, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+    const int sumi = ik_iq4_nl_sumi(w, bq8_1, iqs);
     const float d = w.d * __low2float(bq8_1->ds);
     return d * sumi;
 }

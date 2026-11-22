@@ -10,8 +10,6 @@
 // the kernel is replayable from a CUDA graph.
 
 #include "inkling.cuh"
-#include "cp-async.cuh"
-#include "unary.cuh"
 #include "ggml-cuda.h"
 #include "inkling-common.cuh"
 #include "vecdotq.cuh"
@@ -952,168 +950,6 @@ bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     return true;
 }
 
-// Each slot has a SITU producer and a queue of two-row down-projection tiles.
-// The workers fetch the first tile while the producer quantizes the activation.
-template <int warps, bool stage>
-static __global__ void ik_resident_down(const block_q2_0 * weights, const float * gate, const float * up,
-        int gate_stride, int up_stride, float beta, float lb, const int32_t * ids, float * out, block_q8_1 * activation, int * counters, bool all) {
-    constexpr int width = 1152;
-    constexpr int blocks = width/QK2_0;
-    constexpr int tile_rows = 2*warps;
-    constexpr int tile_bytes = tile_rows*blocks*sizeof(block_q2_0);
-    const int slot = blockIdx.y;
-    const int tid = threadIdx.x;
-    const int lane = tid % WARP_SIZE;
-    const int warp = tid/WARP_SIZE;
-    activation += slot*(width/QK8_1);
-    int * flag = counters + 2*slot;
-    if (blockIdx.x == 0) {
-        for (int j = tid; j < width; j += warps*WARP_SIZE) {
-            float v = ggml_cuda_op_situ_single(gate[slot*gate_stride + j], up[slot*up_stride + j], beta, lb);
-            ik_warp_store_q8_1(v, activation + j/QK8_1, lane, true);
-        }
-        __syncthreads();
-        if (tid == 0) {
-            __threadfence();
-            if (all) { ik_atomic_add_acq_rel(counters + 16, 1); }
-            else { ik_st_relaxed(flag, 1); }
-        }
-        return;
-    }
-
-    const int workers = gridDim.x - 1;
-    const int tile = blockIdx.x - 1;
-    weights += ids[slot]*2304*blocks;
-    __shared__ __align__(16) char tiles[stage ? 2*tile_bytes : 1];
-    auto fetch = [&](int t, int page) {
-        const char * src = (const char *) weights + t*tile_bytes;
-        for (int i = tid*16; i < tile_bytes; i += warps*WARP_SIZE*16) {
-            cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(tiles + page*tile_bytes + i), src + i);
-        }
-        cp_async_commit_group();
-    };
-    if constexpr (stage) {
-        fetch(tile, 0);
-    }
-    if (all) {
-        if (tid == 0) { while (ik_ld_acquire(counters + 16) != 8) { __nanosleep(32); } }
-        __syncthreads();
-    } else {
-        ik_wait_flag(flag);
-    }
-    __shared__ block_q8_1 x[width/QK8_1];
-    for (int j = tid; j < int(sizeof(x)/sizeof(int)); j += warps*WARP_SIZE) {
-        ((int *) x)[j] = ((const int *) activation)[j];
-    }
-    __syncthreads();
-    int page = 0;
-    for (int t = tile; t < 2304/tile_rows; t += workers) {
-        const block_q2_0 * w = weights + t*tile_rows*blocks;
-        if constexpr (stage) {
-            cp_async_wait_all();
-            __syncthreads();
-            if (t + workers < 2304/tile_rows) {
-                fetch(t + workers, page ^ 1);
-            }
-            w = (const block_q2_0 *) (tiles + page*tile_bytes);
-        }
-        const int row = 2*warp;
-        float sums[2] = {};
-#pragma unroll
-        for (int start = 0; start < blocks*QI2_0; start += WARP_SIZE) {
-            int b = (start + lane)/QI2_0;
-            if (b < blocks) {
-#pragma unroll
-                for (int r = 0; r < 2; ++r) {
-                    float v = vec_dot_q2_0_q8_1(w, x + b*(QK2_0/QK8_1), (row + r)*blocks + b, lane % QI2_0);
-                    sums[r] = __fadd_rn(sums[r], v);
-                }
-            }
-        }
-#pragma unroll
-        for (int r = 0; r < 2; ++r) {
-            float v = warp_reduce_sum(sums[r]);
-            if (lane == (row + r)%4) {
-                out[slot*2304 + t*tile_rows + row + r] = v;
-            }
-        }
-        if constexpr (stage) {
-            __syncthreads();
-            page ^= 1;
-        }
-    }
-    __syncthreads();
-    if (all) { flag = counters + 16; }
-    if (tid == 0 && ik_atomic_add_acq_rel(flag + 1, 1) == (all ? workers*8 : workers) - 1) {
-        flag[0] = 0;
-        flag[1] = 0;
-    }
-}
-
-template <int warps, bool stage>
-static void ik_launch_resident_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int desired) {
-    const auto * situ = dst->src[1];
-    const void * w = dst->src[0]->data, * gate = situ->src[0]->data, * up = situ->src[1]->data;
-    int gs = situ->src[0]->nb[1]/sizeof(float), us = situ->src[1]->nb[1]/sizeof(float);
-    float beta = ggml_get_op_params_f32(situ, 2), lb = ggml_get_op_params_f32(situ, 3);
-    const void * ids = dst->src[2]->data;
-    void * out = dst->data;
-    ggml_cuda_pool_alloc<block_q8_1> scratch(ctx.pool(), 8*(1152/QK8_1));
-    auto * x = scratch.get();
-    int * counters = ik_counters(ctx, 192, 18);
-    auto overlaps = [&](const ggml_tensor * src) {
-        return (uintptr_t) src->data < (uintptr_t) dst->data + ggml_nbytes(dst) &&
-               (uintptr_t) dst->data < (uintptr_t) src->data + ggml_nbytes(src);
-    };
-    bool all = overlaps(situ->src[0]) || overlaps(situ->src[1]);
-    auto kernel = ik_resident_down<warps, stage>;
-    int active;
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, kernel, warps*WARP_SIZE, 0));
-    const int workers = std::min({desired, active*ggml_cuda_info().devices[ctx.device].nsm/8 - 1, 2304/(2*warps)});
-    GGML_ASSERT(workers > 0);
-    void * args[] = { &w, &gate, &up, &gs, &us, &beta, &lb, &ids, &out, &x, &counters, &all };
-    CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, dim3(workers + 1, 8), warps*WARP_SIZE, args, 0, ctx.stream()));
-}
-
-bool ggml_cuda_inkling_resident_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const auto * w = dst->src[0], * situ = dst->src[1], * ids = dst->src[2];
-    const auto * gate = situ->src[0], * up = situ->src[1];
-    if (!gate || !up || gate->type != GGML_TYPE_F32 || up->type != GGML_TYPE_F32 || !ggml_are_same_shape(gate, up) ||
-            !ggml_are_same_shape(gate, situ) || !ggml_is_matrix(situ) || !ggml_is_contiguous_1(gate) || !ggml_is_contiguous_1(up) ||
-            gate->nb[0] != sizeof(float) || up->nb[0] != sizeof(float) || gate->nb[1] > INT_MAX || up->nb[1] > INT_MAX ||
-            gate->nb[1] % sizeof(float) || up->nb[1] % sizeof(float) || situ->ne[0] != 1152 || situ->ne[1] != 8 ||
-            situ->type != GGML_TYPE_Q8_1 || w->type != GGML_TYPE_Q2_0 || w->ne[0] != 1152 || w->ne[1] != 2304 ||
-            w->ne[2] != 128 || w->ne[3] != 1 || !ggml_is_contiguous(w) || (uintptr_t) w->data % 16 ||
-            !ggml_is_matrix(dst) || dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst) ||
-            !ggml_is_vector(ids) || ids->ne[0] != 8 || ids->type != GGML_TYPE_I32 || !ggml_is_contiguous(ids) ||
-            !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device)) {
-        return false;
-    }
-    static const int workers = getenv("IK_RD_WORKERS") ? std::max(1, atoi(getenv("IK_RD_WORKERS"))) : 32;
-    static const int warps = getenv("IK_RD_WARPS") ? atoi(getenv("IK_RD_WARPS")) : 4;
-    static const bool stage = !getenv("IK_RD_STAGE") || atoi(getenv("IK_RD_STAGE")) != 0;
-    if (warps == 8) {
-        if (stage) { ik_launch_resident_down<8, true>(ctx, dst, workers); }
-        else       { ik_launch_resident_down<8, false>(ctx, dst, workers); }
-    } else {
-        if (stage) { ik_launch_resident_down<4, true>(ctx, dst, workers); }
-        else       { ik_launch_resident_down<4, false>(ctx, dst, workers); }
-    }
-    return true;
-}
-
-static __device__ __forceinline__ float ik_iq4_acc(float sum, const block_iq4_nl * w, const block_q8_1 * x, int iqs) {
-    const ik_iq4_nl_w decoded = ik_iq4_nl_decode(w, 0, iqs);
-    const int * q = (const int *) x->qs + iqs;
-    int dot = 0;
-#pragma unroll
-    for (int j = 0; j < VDR_IQ4_NL_Q8_1_MMVQ; ++j) {
-        dot = ggml_cuda_dp4a(decoded.v[j].x, q[j], dot);
-        dot = ggml_cuda_dp4a(decoded.v[j].y, q[j + 4], dot);
-    }
-    return __fmaf_rn(__fmul_rn(decoded.d, __low2float(x->ds)), float(dot), sum);
-}
-
 struct ik_projection_conv {
     const float * past;
     const float * taps;
@@ -1124,103 +960,45 @@ struct ik_projection_conv {
     float scale;
 };
 
-template<int rows_per_warp>
 static __global__ void ik_projection_conv_kernel(const block_iq4_nl * weights, const block_q8_1 * x, float * out, ik_projection_conv conv) {
     constexpr int blocks = 3072/QK4_NL;
     constexpr int lanes = QI4_NL/VDR_IQ4_NL_Q8_1_MMVQ;
-    const int first = rows_per_warp*(blockIdx.x*blockDim.y + threadIdx.y);
+    const int row = blockIdx.x*blockDim.y + threadIdx.y;
     const int lane = threadIdx.x;
-    float partial[rows_per_warp][4] = {};
+    const int iqs = (lane%lanes)*VDR_IQ4_NL_Q8_1_MMVQ;
+
+    // Match the four warp partials and the writer lane of Ampere's two-row MMVQ.
+    float partial[4] = {};
 #pragma unroll
     for (int start = 0; start < blocks; start += 4*WARP_SIZE/lanes) {
 #pragma unroll
         for (int w = 0; w < 4; ++w) {
             const int b = start + w*WARP_SIZE/lanes + lane/lanes;
             if (b < blocks) {
-#pragma unroll
-                for (int r = 0; r < rows_per_warp; ++r) {
-                    partial[r][w] = ik_iq4_acc(partial[r][w], weights + (first + r)*blocks + b, x + b, (lane%lanes)*VDR_IQ4_NL_Q8_1_MMVQ);
-                }
+                const ik_iq4_nl_w wd = ik_iq4_nl_decode(weights, row*blocks + b, iqs);
+                const int dot = ik_iq4_nl_sumi(wd, x + b, iqs);
+                partial[w] = __fmaf_rn(__fmul_rn(wd.d, __low2float(x[b].ds)), float(dot), partial[w]);
             }
         }
     }
-#pragma unroll
-    for (int r = 0; r < rows_per_warp; ++r) {
-        const int row = first + r;
-        const float cur = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(partial[r][0],partial[r][1]),partial[r][2]),partial[r][3]));
-        if (lane == row%2) {
-            const float * past = conv.past + conv.ids[0]*conv.past_cell + 3*row;
-            const float * tap = conv.taps + 4*row;
-            const float a = past[0], b = past[1], c = past[2];
-            float sum = 0.0f;
-            sum += a*tap[0];
-            sum += b*tap[1];
-            sum += c*tap[2];
-            sum += cur*tap[3];
-            float y = (cur + sum)*conv.scale;
-            if (conv.residual) { y += conv.residual[row]; }
-            out[row] = y;
-            conv.state[3*row] = b;
-            conv.state[3*row + 1] = c;
-            conv.state[3*row + 2] = cur;
+    const float cur = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(partial[0], partial[1]), partial[2]), partial[3]));
+    if (lane == row%2) {
+        const float * past = conv.past + conv.ids[0]*conv.past_cell + 3*row;
+        const float * tap = conv.taps + 4*row;
+        const float a = past[0], b = past[1], c = past[2];
+        float sum = 0.0f;
+        sum += a*tap[0];
+        sum += b*tap[1];
+        sum += c*tap[2];
+        sum += cur*tap[3];
+        float y = (cur + sum)*conv.scale;
+        if (conv.residual) {
+            y += conv.residual[row];
         }
-    }
-}
-
-template<int rows>
-static __global__ void ik_projection_conv_cta(const block_iq4_nl * weights, const block_q8_1 * x, float * out, ik_projection_conv conv) {
-    const int lane = threadIdx.x, warp = threadIdx.y, first = blockIdx.x*rows;
-    const int tid = WARP_SIZE*warp + lane;
-    const int my_row = first + lane;
-    float a = 0, b = 0, c = 0, residual = 0;
-    float4 taps{};
-    if (warp == 0 && lane < rows) {
-        const volatile float * past = conv.past + conv.ids[0]*conv.past_cell + 3*my_row;
-        a = past[0];
-        b = past[1];
-        c = past[2];
-        taps = ((const float4 *) conv.taps)[my_row];
-        residual = conv.residual ? conv.residual[my_row] : 0.0f;
-    }
-    constexpr int blocks = 3072/QK4_NL;
-    float acc[rows] = {};
-#pragma unroll
-    for (int i = 0; i < blocks; i += 64) {
-        const int k = i + tid/2;
-        if (k < blocks) {
-#pragma unroll
-            for (int r = 0; r < rows; ++r) {
-                acc[r] = ik_iq4_acc(acc[r], weights + (first+r)*blocks + k, x + k, 2*(lane%2));
-            }
-        }
-    }
-    __shared__ float part[3][rows][WARP_SIZE];
-    if (warp > 0) {
-#pragma unroll
-        for (int r = 0; r < rows; ++r) { part[warp-1][r][lane] = acc[r]; }
-    }
-    __syncthreads();
-    if (warp == 0) {
-#pragma unroll
-        for (int r = 0; r < rows; ++r) {
-            float sum = __fadd_rn(__fadd_rn(__fadd_rn(acc[r], part[0][r][lane]), part[1][r][lane]), part[2][r][lane]);
-            sum = warp_reduce_sum(sum);
-            // The two-row reference writes from lane row%2. Move that lane's rounded result to the writer.
-            sum = __shfl_sync(0xffffffff, sum, (first+r)%2);
-            if (lane == r) {
-                float v = 0;
-                v += a*taps.x;
-                v += b*taps.y;
-                v += c*taps.z;
-                v += sum*taps.w;
-                float y = (sum + v)*conv.scale;
-                if (conv.residual) { y += residual; }
-                out[my_row] = y;
-                conv.state[3*my_row] = b;
-                conv.state[3*my_row + 1] = c;
-                conv.state[3*my_row + 2] = sum;
-            }
-        }
+        out[row] = y;
+        conv.state[3*row] = b;
+        conv.state[3*row + 1] = c;
+        conv.state[3*row + 2] = cur;
     }
 }
 
@@ -1232,9 +1010,9 @@ bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const gg
             !ggml_is_vector(x) || x->type != GGML_TYPE_Q8_1 || !ggml_is_contiguous(x) || x->ne[0] != 3072 ||
             !ggml_is_matrix(w) || w->ne[0] != 3072 || w->ne[1] != 2304 || w->type != GGML_TYPE_IQ4_NL ||
             !ggml_is_contiguous(w) || !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device) ||
-            past->type != GGML_TYPE_F32 || past->ne[0] != 3 || past->nb[1] != 3*sizeof(float) ||
+            past->type != GGML_TYPE_F32 || past->ne[0] != 3 || past->ne[1] != 2304 || past->nb[0] != sizeof(float) || past->nb[2] % sizeof(float) || past->nb[1] != 3*sizeof(float) ||
             taps->type != GGML_TYPE_F32 || taps->ne[0] != 4 || taps->nb[1] != 4*sizeof(float) || !ggml_is_contiguous(taps) ||
-            state->type != GGML_TYPE_F32 || state->nb[2] != 3*sizeof(float) || state->ne[0] != 3 || ids->type != GGML_TYPE_I32 ||
+            state->type != GGML_TYPE_F32 || state->nb[0] != sizeof(float) || state->ne[2] != 2304 || state->nb[2] != 3*sizeof(float) || state->ne[0] != 3 || ids->type != GGML_TYPE_I32 ||
             (residual && (residual->type != GGML_TYPE_F32 || !ggml_is_contiguous(residual)))) {
         return false;
     }
@@ -1246,78 +1024,7 @@ bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const gg
     }
     ik_projection_conv conv = {(const float *) past->data, (const float *) taps->data, residual ? (const float *) residual->data : nullptr,
                                (float *) state->data, (const int32_t *) ids->data, int64_t(past->nb[2]/sizeof(float)), ggml_get_op_params_f32(dst, 0)};
-    static const int rows = getenv("IK_PROJ_CONV_ROWS") ? atoi(getenv("IK_PROJ_CONV_ROWS")) : 2;
-    static const int cta = getenv("IK_PROJ_CONV_CTA") ? atoi(getenv("IK_PROJ_CONV_CTA")) : 0;
-    if (cta && ((uintptr_t) conv.taps % 16) == 0) {
-        auto launch = [&](auto count) {
-            ik_projection_conv_cta<decltype(count)::value><<<2304/count, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
-                    (const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
-        };
-        if (cta == 1) { launch(std::integral_constant<int, 1>{}); }
-        else if (cta == 2) { launch(std::integral_constant<int, 2>{}); }
-        else if (cta == 4) { launch(std::integral_constant<int, 4>{}); }
-        else { launch(std::integral_constant<int, 8>{}); }
-        return true;
-    }
-    if (rows == 1) {
-        ik_projection_conv_kernel<1><<<2304/4, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>((const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
-    } else {
-        ik_projection_conv_kernel<2><<<2304/8, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>((const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
-    }
-    return true;
-}
-
-template<int warps>
-static __global__ void ik_up_quant(const block_q2_K * weights, const block_q8_1 * x, const int32_t * ids, block_q8_1 * out, float beta, float lb) {
-    const int slot = blockIdx.y;
-    const int first = blockIdx.x*32;
-    const int warp = threadIdx.x/WARP_SIZE, lane = threadIdx.x%WARP_SIZE;
-    const int base = (2304*ids[slot] + first)*9;
-    __shared__ float value[32];
-    constexpr int group = 32/warps;
-    float gs[group] = {}, us[group] = {};
-#pragma unroll
-    for (int i = 0; i < 72; i += 32) {
-        const int k = (i + lane)/8;
-        if (k < 9) {
-#pragma unroll
-            for (int j = 0; j < group; ++j) {
-                int b = base + (warp*group + j)*9 + k;
-                gs[j] = __fadd_rn(gs[j], vec_dot_q2_K_q8_1(weights, x + k*8, b, 2*(lane%8)));
-                us[j] = __fadd_rn(us[j], vec_dot_q2_K_q8_1(weights, x + k*8, b + 1152*9, 2*(lane%8)));
-            }
-        }
-    }
-#pragma unroll
-    for (int j = 0; j < group; ++j) {
-        const int row = warp*group + j;
-        const float gate = warp_reduce_sum(gs[j]), up = warp_reduce_sum(us[j]);
-        if (lane == row%4) { value[row] = ggml_cuda_op_situ_single(gate, up, beta, lb); }
-    }
-    __syncthreads();
-    if (warp == 0) { ik_warp_store_q8_1(value[lane], out + slot*36 + blockIdx.x, lane, true); }
-}
-
-bool ggml_cuda_inkling_up_quant(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * situ) {
-    const auto * w = mm->src[0], * x = mm->src[1], * ids = mm->src[2];
-    const auto * gate = situ->src[0], * up = situ->src[1];
-    if (!gate || !up || gate->view_src != mm || up->view_src != mm || gate->view_offs || up->view_offs != 1152*sizeof(float) ||
-            !ggml_are_same_shape(gate, up) || gate->nb[1] != 2304*sizeof(float) || up->nb[1] != gate->nb[1] ||
-            w->type != GGML_TYPE_Q2_K || w->ne[0] != 2304 || w->ne[1] != 2304 || w->ne[2] != 128 || w->ne[3] != 1 ||
-            !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device) ||
-            x->type != GGML_TYPE_Q8_1 || !ggml_is_vector(x) || ids->type != GGML_TYPE_I32 || !ggml_is_vector(ids) || ids->ne[0] != 8 ||
-            situ->type != GGML_TYPE_Q8_1 || situ->ne[0] != 1152 || situ->ne[1] != 8 || !ggml_is_matrix(situ) ||
-            !ggml_is_contiguous(w) || !ggml_is_contiguous(x) || !ggml_is_contiguous(ids) || !ggml_is_contiguous(situ)) {
-        return false;
-    }
-    auto launch = [&](auto warps) {
-        ik_up_quant<decltype(warps)::value><<<dim3(36, 8), WARP_SIZE*warps, 0, ctx.stream()>>>((const block_q2_K *) w->data, (const block_q8_1 *) x->data, (const int32_t *) ids->data,
-                (block_q8_1 *) situ->data, ggml_get_op_params_f32(situ, 2), ggml_get_op_params_f32(situ, 3));
-    };
-    static const int warps = getenv("IK_UP_QUANT") ? atoi(getenv("IK_UP_QUANT")) : 0;
-    if (warps == 4) { launch(std::integral_constant<int, 4>{}); }
-    else if (warps == 16) { launch(std::integral_constant<int, 16>{}); }
-    else if (warps == 32) { launch(std::integral_constant<int, 32>{}); }
-    else { launch(std::integral_constant<int, 8>{}); }
+    ik_projection_conv_kernel<<<2304/4, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
+            (const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
     return true;
 }
