@@ -1,0 +1,10 @@
+r3-tail--4.sqlite kernels/token 538 (control 584)
+ik_tail_mix: 46 sites/token, graph 6.064, fused 6.426 us/site
+r3-tail-1.sqlite kernels/token 538 (control 584)
+ik_tail_mix: 46 sites/token, graph 6.064, fused 8.324 us/site
+r3-tail-4.sqlite kernels/token 538 (control 584)
+ik_tail_mix: 46 sites/token, graph 6.064, fused 6.491 us/site
+r3-mixdown-1.sqlite kernels/token 538 (control 584)
+ik_mix_down: 46 sites/token, graph 7.668, fused 6.683 us/site
+r3-selected-final.sqlite kernels/token 514 (control 584)
+ik_mix_down: 46 sites/token, graph 7.668, fused 6.827 us/site
