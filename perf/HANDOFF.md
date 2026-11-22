@@ -10,6 +10,8 @@ At `dca9008`, natural-stop n3 and plain-mr match on all four messages. Code/edit
 
 In flight: `bash perf/p6/r4_spec.sh perf/p6/r4_3000` (fixed-length requests, backend sampling, GPU1). Short table: `SPEC_MAXT=384 SPEC_REPS=3 bash perf/p6/r4_spec.sh perf/p6/r4_384`. Check both against plain-mr. The original no-backend-sampling plain result at char 214 reproduces in a separate short run; the server uses identical target prompt batches in both modes.
 
+The fixed-length harness also collects the accepted token IDs through the server's existing verbose response (`return_tokens=true`). This checks the full tail after the parser finishes prose and edit@16K. `SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py perf/p6/r4_3000 plain-mr n2 n3 n4 n2-adapt n3-adapt n4-adapt` compares both representations. Plain without the window math flags produces different strings on the long prompts; it is a separate speed reference. Use `bash perf/p6/r4_checks.sh` for the trace, boundary checks, bench, PPL, greedy probes and backend ops.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.

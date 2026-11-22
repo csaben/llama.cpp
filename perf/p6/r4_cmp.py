@@ -35,6 +35,13 @@ for kind in kinds:
     ref, expected = read(args.reference, kind)
     for label in args.labels:
         data, actual = read(label, kind)
+        ids_ref = base / f"{args.reference}.{kind}.ids"
+        if ids_ref.exists() or os.environ.get("SPEC_REQUIRE_IDS"):
+            ids = (base / f"{label}.{kind}.ids").read_bytes()
+            want = ids_ref.read_bytes()
+            if not want or len(want) % 4 or want != ids:
+                print(f"{label:12s} {kind:9s} different or empty token IDs")
+                bad = True
         if ref == data:
             print(f"{label:12s} {kind:9s} identical ({len(data)} bytes)")
             continue

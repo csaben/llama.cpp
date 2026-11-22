@@ -8,7 +8,7 @@
 # Compare with perf/p6/r4_cmp.py, which refuses empty messages. SPEC_KINDS=code,edit limits the prompts,
 # SPEC_REPS=n repeats each request (median rate; all n messages must be equal), SPEC_PROBS=1 also saves the tokens with
 # their top-3 log-probabilities as <label>.<kind>.probs.json, SPEC_CTX sets -c (default 32768).
-import glob, json, os, subprocess, sys, time, urllib.request
+import glob, json, os, struct, subprocess, sys, time, urllib.request
 args = sys.argv[1:]
 label = args[0]
 extra = args[args.index("--") + 1:] if "--" in args else []
@@ -48,7 +48,7 @@ try:
             continue
         body = {"model": "x", "messages": [{"role": "user", "content": p}], "max_tokens": int(os.environ.get("SPEC_MAXT", "384")), "temperature": 0, "seed": 1, "cache_prompt": False}
         if os.environ.get("SPEC_FIXED_LENGTH") == "1":
-            body["ignore_eos"] = True
+            body.update(ignore_eos=True, return_tokens=True, verbose=True)
         if os.environ.get("SPEC_PROBS"):
             body.update({"logprobs": True, "top_logprobs": 3})
         # SPEC_REPS=n: the request n times; the median run is reported, all rates are listed
@@ -58,6 +58,15 @@ try:
         runs.sort(key=lambda x: x["timings"]["predicted_per_second"])
         r = runs[len(runs)//2]
         t = r["timings"]
+        if body.get("return_tokens"):
+            ids = r["__verbose"]["tokens"]
+            if len(ids) != body["max_tokens"] or any(x["__verbose"]["tokens"] != ids for x in runs):
+                raise ValueError(f"{label} {kind}: missing or differing output token IDs")
+            if os.environ.get("SPEC_OUT"):
+                os.makedirs(os.environ["SPEC_OUT"], exist_ok=True)
+                path = os.path.join(os.environ["SPEC_OUT"], f"{label}.{kind}.ids")
+                with open(path, "wb") as f:
+                    f.write(struct.pack(f"<{len(ids)}i", *ids))
         msg = r["choices"][0]["message"]
         chars = sum(len(v) for k, v in msg.items() if isinstance(v, str) and k != "role")
         if not chars:
