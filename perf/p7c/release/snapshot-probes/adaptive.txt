@@ -1,0 +1,2 @@
+adaptive       edit      prompt   1025   384 tok   348.3 tok/s    1115 chars  accepted/proposed 274/281  runs 348/348/348/348/349
+adaptive       prose     prompt     36   384 tok   219.7 tok/s    1474 chars  accepted/proposed 129/190  runs 219/219/220/220/221

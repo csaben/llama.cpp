@@ -1,0 +1,6 @@
+off          edit      identical (1228 bytes)
+adaptive     edit      identical (1228 bytes)
+plain-b      edit      identical (1228 bytes)
+off          prose     identical (1569 bytes)
+adaptive     prose     identical (1569 bytes)
+plain-b      prose     identical (1569 bytes)

@@ -1,0 +1,2 @@
+plain-b        edit      prompt   1025   384 tok   201.6 tok/s    1115 chars  runs 202/202/202/202/202
+plain-b        prose     prompt     36   384 tok   209.8 tok/s    1474 chars  runs 210/210/210/210/210

@@ -1517,10 +1517,58 @@ Tiling the draft shortlist reduction lowered the fixed-n3 draft graph from 0.806
 
 ### Part B combined release
 
-The lever 3 unit was inactive at 07:10 EST. Merge `401460d` includes `p7l3r4-final-233tok` (`954dd4a`) and the Part A IQ4_NL verifier. The two conflicting attention files were reconciled so that packed verify still uses per-row masks, KV indices and staging, and scalar gate/attention can use the Round 4 scan and barrier schedule. Proof is in progress.
+The lever 3 unit was inactive at 07:10 EST. Merge `401460d` includes `p7l3r4-final-233tok` (`954dd4a`) and the Part A IQ4_NL verifier. The two conflicting attention files were reconciled so that packed verify still uses per-row masks, KV indices and staging, and scalar gate/attention can use the Round 4 scan and barrier schedule.
 
 The combined binary reports source `401460d`. Both default and release-flag batteries passed on physical GPU0. Each had zero logit differences over 2,714 rows, six byte-identical greedy outputs against Phase 7b, and 1,108/1,108 supported CUDA cases. Prefill PPL was 3.0530 and decode PPL was 4.1979 for plain and 4.2038 for plain with the multi-row verifier. [Default checks](p7c/release/checks-default/), [release-flag checks](p7c/release/checks/).
 
 At all four depths, the 1,024 additional verifier rows had zero differences with packed columns on and off. All 88 full-vocabulary FP32 rows matched frozen Phase 7b byte for byte, as did 128 rows over two interleaved sequences with the new scalar schedule enabled or disabled. Compute Sanitizer reported zero synchronization errors at prefixes 113 and 1,129. All 3,988 cases in lever 3's broader CUDA operator battery passed. GPU0 work ended at 07:26 EST. [Depths](p7c/release/depths.txt), [full logits](p7c/release/full-logits.txt), [interleaving](p7c/release/sequences.txt), [synchronization](p7c/release/synccheck.txt), [expanded operator tests](p7c/release/expanded-ops/).
 
 The combined 384-token matrices matched all 165 guarded replies. Every configuration median beat its same-flags plain control. The smallest gains were 2.6% in the five main prompts and 3.4% on the five additional prose prompts.
+
+### Combined throughput and release decision
+
+Each cell reports decode tok/s at 384 / 3,000 generated tokens. The main short matrix uses three repeats per cell and the additional prose uses five. Each long cell is one uncached request. All servers used the same release flags, greedy backend sampling and a 64K slot.
+
+| Guarded setting | code | edit | prose | edit@16K | edit@32K |
+|---|---:|---:|---:|---:|---:|
+| plain-mr | 212.3 / 201.0 | 201.9 / 196.9 | 211.4 / 201.1 | 183.7 / 183.3 | 171.0 / 169.8 |
+| n2 | 250.1 / 261.9 | 317.7 / 286.0 | 218.9 / 277.4 | 270.4 / 274.1 | 244.5 / 272.9 |
+| n3 | 253.4 / 276.7 | 349.2 / 305.8 | 217.0 / 296.1 | 294.2 / 299.7 | 257.6 / 302.1 |
+| n4 | 253.2 / 276.5 | 340.3 / 298.9 | 219.3 / 288.3 | 292.0 / 291.1 | 250.8 / 288.2 |
+| n2-adapt | 250.1 / 261.7 | 318.7 / 285.4 | 219.1 / 276.8 | 271.2 / 274.7 | 240.7 / 272.4 |
+| n3-adapt | 252.2 / 276.8 | 342.6 / 305.1 | 219.9 / 295.6 | 294.0 / 300.0 | 258.7 / 302.2 |
+| n4-adapt | 253.4 / 276.3 | 341.5 / 298.8 | 220.7 / 288.2 | 291.9 / 291.1 | 250.9 / 288.2 |
+
+The smallest gains over same-flags plain were 2.6% short (n3, prose) and 30.2% long (n2-adapt, code). All 120 drafted replies and 124,560 token IDs matched. [Short matrix](p7c/release/384/), [long matrix](p7c/release/3000/).
+
+| Additional prose | letter | science | scene | review | dialogue |
+|---|---:|---:|---:|---:|---:|
+| plain-mr | 210.7 / 200.8 | 210.5 / 200.5 | 210.4 / 200.5 | 210.4 / 200.4 | 210.3 / 200.4 |
+| n2-adapt | 220.4 / 314.2 | 239.1 / 319.0 | 225.7 / 251.5 | 222.5 / 303.4 | 219.2 / 268.4 |
+| n3-adapt | 217.9 / 346.7 | 242.8 / 354.4 | 228.1 / 259.9 | 225.6 / 331.3 | 221.0 / 284.4 |
+| n4-adapt | 218.1 / 339.3 | 242.6 / 345.8 | 227.4 / 257.1 | 225.8 / 324.9 | 220.8 / 276.0 |
+
+All 90 drafted replies and 73,800 IDs matched plain. The smallest gains were 3.4% short and 25.4% long. [Five-repeat prose](p7c/release/prose/), [long prose](p7c/release/prose-3000/).
+
+| Forced fixed width | code | edit | prose | edit@16K | edit@32K |
+|---|---:|---:|---:|---:|---:|
+| plain-mr | 210.8 / 200.9 | 200.4 / 197.0 | 209.9 / 200.8 | 183.9 / 182.7 | 170.8 / 170.0 |
+| n2 | 243.1 / 260.6 | 297.6 / 278.4 | 195.9 / 251.4 | 269.9 / 261.1 | 242.7 / 256.6 |
+| n3 | 241.5 / 270.3 | 334.2 / 297.0 | 178.4 / 246.9 | 297.9 / 285.0 | 257.3 / 284.8 |
+| n4 | 211.0 / 238.4 | 311.5 / 273.9 | 148.3 / 217.2 | 275.5 / 261.6 | 228.7 / 268.3 |
+
+These controls set `LLAMA_DSPARK_POLICY=0` and leave explicit adaptation unset. All 60 drafted replies and 62,280 IDs matched. The short low-acceptance prose rates show the cost of forcing every draft through verification. [Fixed short controls](p7c/release/fixed-384/), [fixed long controls](p7c/release/fixed-3000/).
+
+| Plain tg128, GPU1 | 0 | 4,096 | 16,384 | 32,768 |
+|---|---:|---:|---:|---:|
+| Frozen Phase 7b | 228.10 | 209.03 | 196.46 | 181.97 |
+| Merged Phase 7c | 238.75 | 217.80 | 204.52 | 189.11 |
+| Change (%) | 4.67 | 4.20 | 4.11 | 3.92 |
+
+Each rate averages the two process means from an old/new/new/old crossover with three repetitions per depth. All four runs used the same benchmark driver, switching its runtime libraries between the frozen snapshot and the merged build. [Paired plain benchmarks](p7c/release/bench/).
+
+The policy-off tables use fresh plain servers started with `LLAMA_DSPARK_POLICY=0`. Their full messages and IDs also matched the guarded plain controls. Across the two budgets, six guarded main configurations, three fixed-width controls and three additional-prose configurations, all 270 drafted replies and 260,640 IDs matched their controls.
+
+At 07:54 EST the combined release was staged and independently probed at `~/inkling-live-bin-p7c-401460d`. All nine SHA-256 checks passed and all eight project libraries resolved inside that directory. SHA-256 of the manifest is `5b1acbf077fb327dcecf7ec8c97f56c10b2ee2192694206f7c9b2e8e30a7a18c`. The staged server itself matched the release matrix on all 20 drafted snapshot requests (7,680 IDs), tested between two five-repeat plain controls. On edit / prose, plain before and after measured 202.3 / 210.6 and 201.6 / 209.8 tok/s. Guarded cap 3 with adaptation unset measured 349.5 / 220.0, and the explicit adaptive preset measured 348.3 / 219.7. [Snapshot probes](p7c/release/snapshot-probes/), [manifest](p7c/snapshot.sha256), [version](p7c/snapshot-version.txt), [library resolution](p7c/snapshot-libraries.txt).
+
+The manual deploy script uses physical GPU1, one 64K slot, the original folded 32K drafter, guarded adaptive cap 3 and `restore-p5.sh` on startup or health failure. Its syntax and parameters were checked. Deployment was left to the orchestrator. Reproduce the core matrices using the Phase 7b reproduction commands above, with output under a fresh directory. For forced fixed controls set `LLAMA_DSPARK_POLICY=0`, leave `LLAMA_DSPARK_ADAPTIVE` unset, and run `plain-mr n2 n3 n4`. For additional prose set `SPEC_PROMPTS_FILE=perf/p7b/prose-prompts.json`, `SPEC_KINDS=letter,science,scene,review,dialogue`, and run `plain-mr n2-adapt n3-adapt n4-adapt` with five short repeats and one long repeat. [Manual deploy script](live/deploy-p7c.sh), [Phase 5 fallback](live/restore-p5.sh).

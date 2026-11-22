@@ -1,8 +1,18 @@
 # Phase 7c hand-off
 
-07:39 EST. The lever 3 unit was inactive at 07:10. Combined source `401460d` (`p7c-merged`) merges `p7l3r4-final-233tok` (`954dd4a`), including round 3, with `p7c-verify-windows` (`69443c6`). The merge retains both the four-row packed verifier and the new plain decoder schedule. GPU1 is assigned to the served matrices and paired benchmarks. Both default and release-flag batteries have passed on GPU0. Each matched 2,714 rollback/boundary rows, six greedy outputs, and frozen PPL, with 1,108/1,108 CUDA operator cases. All 1,024 depth rows and 88 cross-build full-vocabulary rows matched, as did 128 interleaved rows. Expanded backend coverage passed 3,988 cases and both synchronization checks were clean. GPU0 work ended at 07:26 EST. All 165 guarded short replies, including five additional prose prompts, are exact and every configuration median beat same-flags plain. All 45 guarded 3,000-token replies also matched plain. The staged preset measured 276.8 / 305.1 / 295.6 / 300.0 / 302.2 tok/s on code, edit, prose, edit at 16K and edit at 32K. Forced fixed-width controls and the paired four-depth benchmark are pending. Phase 7b remains the release pending verification. The release decision is due at 08:50 and the report at 09:00.
+**Staged and verified at 07:54 EST, local release tag `p7c-release`.** Source `401460d` (`p7c-merged`) includes `p7c-verify-windows` and lever 3 rounds 3-4 through `p7l3r4-final-233tok` (`954dd4a`). The snapshot is `~/inkling-live-bin-p7c-401460d`. All nine files passed their SHA-256 checks. The manual deploy script was syntax-checked and left unexecuted. It selects physical GPU1, one 64K slot and guarded adaptive cap 3, and falls back to Phase 5 on startup or health failure. [Deploy script](live/deploy-p7c.sh), [manifest](p7c/snapshot.sha256), [release results](RESULTS.md#phase-7c).
 
-Part A improved cap-3 throughput on all five prompts at 384 and 3,000 tokens. The two clean candidate passes matched plain on 40 replies and 41,520 IDs. The Part A rollback, greedy, PPL and operator battery passed. [Part A results](RESULTS.md#phase-7c).
+| GPU1 decode tok/s | Plain 384 | Cap 3, 384 | Plain 3,000 | Cap 3, 3,000 |
+|---|---:|---:|---:|---:|
+| Code | 212.3 | 252.2 | 201.0 | 276.8 |
+| Edit | 201.9 | 342.6 | 196.9 | 305.1 |
+| Prose | 211.4 | 219.9 | 201.1 | 295.6 |
+| Edit at 16K | 183.7 | 294.0 | 183.3 | 300.0 |
+| Edit at 32K | 171.0 | 258.7 | 169.8 | 302.2 |
+
+All 270 drafted matrix replies and 260,640 token IDs matched same-flags plain. Every guarded configuration beat its plain control at both lengths. Forced-width short prose was slower than plain. Independent snapshot probes matched another 20 drafted replies and 7,680 IDs. Plain decode in the paired frozen/merged benchmark improved 3.9-4.7% at 0/4K/16K/32K. [Matrices and crossover](RESULTS.md#combined-throughput-and-release-decision), [staged-server probes](p7c/release/snapshot-probes/).
+
+Both default and release-flag batteries matched all 2,714 rollback/boundary rows, six greedy outputs and PPL, and passed 1,108/1,108 CUDA cases apiece. Another 1,024 depth rows, 88 full-vocabulary rows and 128 interleaved rows matched. The expanded suite passed 3,988/3,988 operator cases and both synchronization checks were clean. GPU0 work ended at 07:26 EST. All commits and tags are local.
 
 # Phase 7b hand-off
 
