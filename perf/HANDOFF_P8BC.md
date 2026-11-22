@@ -19,3 +19,5 @@ Run from the root of this worktree. Source `perf/p8bc/env.sh` before any GPU com
 - The saved B control libraries for this build are in `build/p8-b-final/`. To reproduce them, build `p8b-final` with the same flags and save `libggml-cuda.so.1`, `libllama.so.1` and `libllama-common.so.1` from that build. A C benchmark label beginning with `control` selects those libraries. Raw profiles, benchmark JSON, timings and server logs are in `build/p8-prefill/`. Compact evidence is in [perf/p8bc/prefill](p8bc/prefill/).
 
 The first combined C run reproduced prefill PPL 3.0530 and reached 3,302 / 3,017 / 2,720 prompt tok/s. The 4K trace saved 181 ms of GPU kernel work at the same launch count. [Final profiles](RESULTS_P8BC.md#stream-c-quality-and-profiles).
+
+The B/C/C/B crossover measured +13.5% / +12.4% / +11.6% throughput at 4K / 16K / 32K. Client TTFT fell from 6.827 to 6.008 seconds at 16K. All tests used microbatch 512. CUDA operation, bitwise-logit and integrated output validation follow this crossover. [Paired results](RESULTS_P8BC.md#stream-c-release-crossover).

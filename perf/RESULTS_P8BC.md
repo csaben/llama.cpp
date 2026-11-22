@@ -100,3 +100,15 @@ The integer Q2_K path keeps 16 packed words and 16 scale/min pairs per row, then
 ## Stream C quality and profiles
 
 The combined 512-microbatch build at `p8c-bias` reproduced prefill PPL 3.0530 +/- 0.06532 on the eight WikiText chunks. Its first three-run throughput means were 3,302 / 3,017 / 2,720 prompt tok/s. At 4K, Nsight recorded 1,199 ms of GPU kernel work against 1,380 ms at baseline, with 19,840 launches in both. The four-head kernel took 50 versus 92 ms. [PPL and final Nsight captures](p8bc/prefill/final/), [per-category times at all lengths](p8bc/prefill/kernels.tsv).
+
+## Stream C release crossover
+
+GPU 0 ran B / C / C / B at the same batch 2,048 and microbatch 512. Each process ran three llama-bench samples and a fresh 64K server with three uncached tool requests per length. Throughput is the mean of process means. TTFT is the mean of process medians. The source files and chat template gave the same 4,171 / 16,459 / 32,843 actual tokens in every process. [All samples](p8bc/prefill/paired.tsv), [replay](p8bc/ttft.py).
+
+| Prompt | B prompt tok/s | C prompt tok/s | Change | B client TTFT | C client TTFT | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| 4K | 2,906 | 3,298 | +13.5% | 1.757 s | 1.541 s | -12.3% |
+| 16K | 2,683 | 3,015 | +12.4% | 6.827 s | 6.008 s | -12.0% |
+| 32K | 2,437 | 2,719 | +11.6% | 14.630 s | 13.071 s | -10.7% |
+
+The 16K profile saved 562 ms in Q2_K experts, 30 ms in Q2_0 experts and 141 ms in relative bias. Dense IQ4 MMQ and FlashAttention were within 2% of the original kernel times. [Nsight category totals](p8bc/prefill/kernels.tsv).
