@@ -1662,3 +1662,21 @@ The staged server identifies as `f7f505c`. The separately linked benchmark print
 All 1,024 depth rows (four-row windows) and 1,456 randomized mixed-width rows (widths 2-7) matched single-token decode with zero maximum error, through 32K with packed columns on and off. The 432 full-vocabulary FP32 rows matched frozen p7c byte-for-byte and reproduced all archived p8a digests. They cover 200,058 logits per row at scalar and MR/MMA settings, including interleaved sequences. [Depths](p8m/checks/depths.txt), [mixed-width rollback](p8m/checks/wide.txt), [full-row SHA-256](p8m/checks/full-logits.txt).
 
 The expanded CUDA operator groups passed 4,232 distinct cases (3,779 matrix / routed-matrix, 162 Inkling glue and attention, 5 SITU, 273 CONCAT and 13 relative bias). The 44 targeted CONCAT cases also passed in the Phase 8a subset. All four filtered glue synchronization runs and all four routed-matrix / relative-bias memcheck and synccheck runs reported zero errors. [Core groups](p8m/checks/ops.txt), [extra groups](p8m/checks/extra-ops.txt), [glue synccheck](p8m/checks/synccheck.txt), [prefill sanitizer](p8m/checks/extra-sanitizer.txt).
+
+### Merged prefill and plain decode
+
+GPU1 ran frozen A / merged / merged / frozen A, three samples per depth in each process. Each entry averages the two process means. The benchmark executable was the same for both runtimes. Prefill used batch 2,048, microbatch 512, Q8 KV and MR/MMA. [All benchmark JSON samples](p8m/bench/), [runner](p8m/bench.sh).
+
+| Prompt tokens | Stream A prefill tok/s | Merged prefill tok/s | Change |
+|---:|---:|---:|---:|
+| 4,096 | 3,005.7 | 3,463.1 | +15.2% |
+| 16,384 | 2,779.8 | 3,151.1 | +13.4% |
+
+| Plain tg128 tok/s | 0 | 4,096 | 16,384 | 32,768 |
+|---|---:|---:|---:|---:|
+| Default stream A | 241.30 | 221.68 | 207.24 | 191.10 |
+| Default merged | 240.02 | 220.36 | 206.43 | 191.04 |
+| Default change | -0.53% | -0.59% | -0.39% | -0.03% |
+| MR/MMA stream A | 229.27 | 217.54 | 203.96 | 188.65 |
+| MR/MMA merged | 228.88 | 217.20 | 203.77 | 188.32 |
+| MR/MMA change | -0.17% | -0.16% | -0.09% | -0.17% |
