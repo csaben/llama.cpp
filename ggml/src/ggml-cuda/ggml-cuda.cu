@@ -4631,6 +4631,30 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+    static const int route_visit = ggml_cuda_env_int("IK_ROUTE_VISIT", 0);
+    if (route_visit > 0 && node->op == GGML_OP_INKLING_ROUTER && !ggml_cuda_env_flag("IK_MR") &&
+            cuda_ctx->stream_context().concurrent_events.empty() && ggml_is_vector(node) && node->ne[0] == 2304 &&
+            ggml_get_op_params_i32(node, 10) == 0 && ggml_get_op_params_i32(node, 3) == 8 &&
+            ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X &&
+            ggml_cuda_info().devices[cuda_ctx->device].nsm == 82) {
+        int j = i + 1;
+        while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j])) { ++j; }
+        const int states = ggml_get_op_params_i32(node, 6);
+        if (j < cgraph->n_nodes && states >= 1 && states <= 5) {
+            ggml_tensor * up = cgraph->nodes[j];
+            if (up->op == GGML_OP_MUL_MAT_ID && (up->flags & GGML_TENSOR_FLAG_COMPUTE) &&
+                    up->ne[0] == 2304 && up->ne[1] == 8 && ggml_is_matrix(up) && up->type == GGML_TYPE_F32 && ggml_is_contiguous(up) &&
+                    up->src[0]->type == GGML_TYPE_Q2_K && up->src[0]->ne[0] == 2304 && up->src[0]->ne[2] == 128 &&
+                    ggml_is_contiguous(up->src[0]) && up->src[0]->buffer && ggml_backend_buffer_get_type(up->src[0]->buffer) == ggml_backend_cuda_buffer_type(cuda_ctx->device) &&
+                    node->src[2 + states]->ne[1] == 128 && node->src[4 + states] && up->src[1]->data == node->src[4 + states]->data &&
+                    up->src[1]->type == GGML_TYPE_Q8_1 && ggml_is_vector(up->src[1]) && ggml_is_contiguous(up->src[1]) &&
+                    up->src[2]->data == node->src[3 + states]->data && ggml_nelements(up->src[2]) == 8 && ggml_is_contiguous(up->src[2])) {
+                ggml_cuda_op_inkling_router(*cuda_ctx, node, up);
+                return j - i;
+            }
+        }
+    }
+
     if (node->op == GGML_OP_MUL_MAT && cuda_ctx->stream_context().concurrent_events.empty()) {
         const int attn = ik_attention_projection_end(*cuda_ctx, cgraph, i);
         if (attn > i && ggml_cuda_inkling_project_attention(*cuda_ctx, cgraph->nodes[attn])) {
