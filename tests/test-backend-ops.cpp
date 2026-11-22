@@ -12850,6 +12850,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_rel_bias(16, 8, 3, 100, 20000, type_mask, type_out));
         }
     }
+    test_cases.emplace_back(new test_rel_bias(16, 8, 129, 1025, 1024));
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 1));
     test_cases.emplace_back(new test_loop_ctrl_down(2304, 64, 5));
     test_cases.emplace_back(new test_loop_ctrl_down(100, 7, 3));
