@@ -1,0 +1,24 @@
+depth=0 IK_WINDOW_COLS=0
+window of 4: 8.73 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 0..127) after a 0-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+depth=0 IK_WINDOW_COLS=1
+window of 4: 8.85 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 0..127) after a 0-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+depth=4096 IK_WINDOW_COLS=0
+window of 4: 10.60 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 4096..4223) after a 4096-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+depth=4096 IK_WINDOW_COLS=1
+window of 4: 10.41 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 4096..4223) after a 4096-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+depth=16384 IK_WINDOW_COLS=0
+window of 4: 11.01 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 16384..16511) after a 16384-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+depth=16384 IK_WINDOW_COLS=1
+window of 4: 10.77 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 16384..16511) after a 16384-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+depth=32768 IK_WINDOW_COLS=0
+window of 4: 12.07 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 32768..32895) after a 32768-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+depth=32768 IK_WINDOW_COLS=1
+window of 4: 11.68 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 32768..32895) after a 32768-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
