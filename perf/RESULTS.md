@@ -1364,3 +1364,11 @@ The entries are median decode tok/s over three independent 384-token requests pe
 | Fixed 3 | 233.4 | 324.0 | 172.6 | 289.2 | 250.1 |
 | Fixed 4 | 209.5 | 310.8 | 148.3 | 275.9 | 228.4 |
 | Previous adaptive 3 | 230.4 | 322.9 | 172.5 | 291.6 | 245.8 |
+
+### Request-local policy
+
+The cached, single-sequence DSpark path starts each request with empty timing and acceptance statistics. It measures the time between draft calls and derives the number of accepted tokens from the committed target position. A new graph's first timing is discarded. The short-window cost priors on GPU1, in units of a plain step, are 1.00 for plain, 1.20 for a draft with no proposed tokens, and 1.57 / 1.89 / 2.22 / 2.64 for verifying one through four proposals. Measurements update the costs for the current request. A few plain steps supply the local time scale during warm-up and as the context grows.
+
+The policy reads the current draft's token IDs and top-two logit margins together. It estimates conditional acceptance in eight confidence bins, decays the observations by 0.92 per paid draft round, and counts only the prefix tested through the first rejection. It scores each candidate width by expected committed tokens divided by window time. A top-two margin below 0.4 ends the candidate prefix. Opening a window wider than the packed four-row verifier requires sustained gains and an incremental rate advantage. After a paid draft offers no useful prefix and recent verified throughput falls below plain, the next steps use plain decode. Repeated weak windows extend the interval up to eight steps, then the policy probes again. The target verifies and commits every output token.
+
+For a repeated eight-token suffix, the existing history matcher can supply a continuation before the GPU drafter runs. If fewer than half the proposed history tokens were accepted over at least two completed history windows, the matcher requires twelve matching tokens. The measured cost and acceptance of history guesses are kept out of the model-draft bins. This matters on edits that reproduce parts of the input. The final preset uses the original folded 32K shortlist. [Implementation](../common/speculative.cpp), [history matcher](../common/ngram-map.cpp), [policy trials](p7b/policy-trials/).
