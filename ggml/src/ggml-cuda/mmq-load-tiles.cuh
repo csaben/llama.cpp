@@ -577,7 +577,11 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     constexpr int sram_stride = ggml_cuda_mmq_get_sram_stride(type, J, fallback, GGML_PREC_Q8);
     int   * x_qs = (int   *)  x_tile;
+#if defined(TURING_MMA_AVAILABLE) && __CUDA_ARCH__ == GGML_CUDA_CC_AMPERE_GA10X
+    half2 * x_dm = (half2 *) (x_qs + QI2_K);
+#else
     half2 * x_dm = (half2 *) (x_qs + 2*MMQ_TILE_NE_K);
+#endif
 #else
     constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_Q2_K, I);
     int   * x_qs = (int   *)  x_tile;
@@ -600,6 +604,9 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
 
         const int x_ql_0 = get_int_b2(bxi->qs, kqsx);
 
+#if defined(TURING_MMA_AVAILABLE) && __CUDA_ARCH__ == GGML_CUDA_CC_AMPERE_GA10X
+        x_qs[i*sram_stride + kqsx] = x_ql_0;
+#else
 #pragma unroll
         for (int l = 0; l < QR2_K; ++l) {
             const int k = (kqsx/8)*32 + l*8 + kqsx % 8;
@@ -612,6 +619,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
             x_qs[i*(2*MMQ_TILE_NE_K + 1) + k] = x_qs_k;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
         }
+#endif
 
         const int sc_m = bxi->scales[kqsx];
 #ifdef FAST_FP16_AVAILABLE

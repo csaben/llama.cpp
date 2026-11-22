@@ -126,6 +126,7 @@ enum ggml_cuda_mmq_sram_layout {
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0,
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1,
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K,
+    GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K_PACKED,
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q3_K,
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q6_K,
     GGML_CUDA_MMQ_SRAM_LAYOUT_FP4,   // MXFP4 and NVFP4 on Blackwell.
@@ -140,6 +141,8 @@ static constexpr __host__ __device__ int ggml_cuda_mmq_get_sram_stride(ggml_cuda
             return 2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_1 + 4;
         case GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K:
             return 2*MMQ_TILE_NE_K + MMQ_TILE_NE_K         + 4;
+        case GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K_PACKED:
+            return 2*QI2_K + 4;
         case GGML_CUDA_MMQ_SRAM_LAYOUT_Q3_K:
             return 2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/2       + 4;
         case GGML_CUDA_MMQ_SRAM_LAYOUT_Q6_K:
@@ -156,6 +159,7 @@ static constexpr __host__ __device__ int ggml_cuda_mmq_get_sram_stride(ggml_cuda
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0)  % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1)  % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K)  % 8 == 4, "Wrong padding.");
+static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K_PACKED) % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q3_K)  % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q6_K)  % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_FP4)   % 8 == 4, "Wrong padding.");
@@ -230,6 +234,14 @@ struct ggml_cuda_mmq_config {
 
 #undef CASE
 
+static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config_ga10x(ggml_type type, int J, bool fallback) {
+    auto config = ggml_cuda_mmq_get_config_ampere(type, J, fallback);
+    if (type == GGML_TYPE_Q2_K) {
+        config.sram_layout = GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K_PACKED;
+    }
+    return config;
+}
+
 static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(const ggml_type type, const int J, const bool fallback, const int cc, const ggml_prec prec_src1) {
     if (GGML_CUDA_CC_IS_AMD(cc)) {
         if (GGML_CUDA_CC_IS_GCN(cc)) {
@@ -258,6 +270,9 @@ static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(const ggml_type ty
             return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
         }
         return ggml_cuda_mmq_get_config_blackwell(type, J, fallback);
+    }
+    if (ggml_cuda_highest_compiled_arch(cc) == GGML_CUDA_CC_AMPERE_GA10X) {
+        return ggml_cuda_mmq_get_config_ga10x(type, J, fallback);
     }
     if (ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) {
         return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
@@ -292,6 +307,8 @@ static constexpr __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(ggml_t
         return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
     }
     return ggml_cuda_mmq_get_config_blackwell(type, J, fallback);
+#elif defined(TURING_MMA_AVAILABLE) && __CUDA_ARCH__ == GGML_CUDA_CC_AMPERE_GA10X
+    return ggml_cuda_mmq_get_config_ga10x(type, J, fallback);
 #elif !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
     return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
 #elif !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A
