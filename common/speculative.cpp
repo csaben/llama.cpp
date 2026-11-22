@@ -1456,7 +1456,8 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
         LOG_INF("%s: - sample_from_anchor=%s\n", __func__, sample_from_anchor ? "true" : "false");
 
         const char * dev = getenv("LLAMA_DSPARK_DEV");
-        const bool dev_anchor = has_rnn_context && pick && n_seq == 1 && (int) llama_n_ubatch(this->params.ctx_dft) >= block_size &&
+        const bool dev_anchor = has_rnn_context && pick && n_seq == 1 &&
+                (int) llama_n_ubatch(this->params.ctx_dft) >= block_size && (int) llama_n_ubatch(this->params.ctx_tgt) >= block_size &&
                 dev && atoi(dev) != 0;
         init({
             /* .n_draft_max      = */ sample_from_anchor ? block_size : block_size - 1,
@@ -1475,7 +1476,8 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             }
         }
         const char * round = getenv("LLAMA_DSPARK_ROUND");
-        if (dev_anchor && use_dev_features && round && atoi(round) && this->params.p_min == 0 && head_n < block_size - 1) {
+        if (dev_anchor && use_dev_features && round && atoi(round) && this->params.p_min == 0 && head_n <= ADAPT_T_MAX && head_n < block_size - 1 &&
+                llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(this->params.ctx_tgt))) <= (1 << 24)) {
             std::fill(std::begin(previous_margins), std::end(previous_margins), 4.0f);
             device_draft = llama_set_ctx_state_src(this->params.ctx_tgt, this->params.ctx_dft);
             const char * policy = getenv("LLAMA_DSPARK_POLICY");
@@ -3987,6 +3989,7 @@ void common_speculative_draft(common_speculative * spec) {
         for (auto & dp : dparams) {
             GGML_ASSERT(!dp.drafting || dp.result->empty());
 
+            dp.allow_device_draft &= spec->impls.size() == 1;
             if (dp.drafting) {
                 n_drafting++;
             }

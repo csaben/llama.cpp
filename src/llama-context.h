@@ -58,7 +58,7 @@ struct llama_context {
     //   - etc.
     void sched_reserve();
 
-    void synchronize();
+    void synchronize(bool outputs = false);
     void synchronize_outputs();
 
     const llama_model   & get_model()   const;
@@ -513,6 +513,7 @@ private:
     mutable int64_t t_eval_us   = 0;
 
     mutable int64_t t_compute_start_us = 0;
+    bool sampled_outputs_ready = false;
     mutable int64_t n_queued_tokens    = 0;
 
     mutable int32_t n_p_eval = 0; // number of tokens in eval calls for the prompt (with batch size > 1)

@@ -963,7 +963,7 @@ void llama_context::sched_reserve() {
             __func__, (t_end_us - t_start_us)/1000.0, ggml_backend_sched_get_n_copies(sched.get()));
 }
 
-void llama_context::synchronize() {
+void llama_context::synchronize(bool outputs) {
     if (!sched) {
         return;
     }
@@ -993,13 +993,14 @@ void llama_context::synchronize() {
         has_evaluated_once = true;
     }
 
+    sampled_outputs_ready = outputs;
     n_queued_tokens = 0;
     t_compute_start_us = 0;
 }
 
 void llama_context::synchronize_outputs() {
-    if (n_queued_tokens > 0) {
-        synchronize();
+    if (!cparams.ctx_state_src || !sampled_outputs_ready) {
+        synchronize(true);
     }
 }
 
@@ -1935,6 +1936,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 }
 
 int llama_context::encode(const llama_batch_ext & batch_inp) {
+    sampled_outputs_ready = false;
     if (batch_inp.tokens.empty()) {
         LLAMA_LOG_ERROR("%s: n_tokens == 0\n", __func__);
         return -1;
@@ -2195,6 +2197,7 @@ static FILE * ik_trace_file() {
 }
 
 int llama_context::decode(const llama_batch_ext & batch_inp) {
+    sampled_outputs_ready = false;
     if (FILE * f = ik_trace_file()) {
         fprintf(f, "D %p %p %zu", (void *) this, (void *) memory.get(), batch_inp.tokens.size());
         for (const auto & t : batch_inp.tokens) {
@@ -4766,7 +4769,7 @@ bool llama_get_causal_attn(const llama_context * ctx) {
 }
 
 void llama_synchronize(llama_context * ctx) {
-    ctx->synchronize();
+    ctx->synchronize(true);
 }
 
 float * llama_get_logits(llama_context * ctx) {

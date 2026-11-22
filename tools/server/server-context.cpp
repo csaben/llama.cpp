@@ -3856,7 +3856,13 @@ private:
                             slot.spec_ckpt.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                         }
 
-                        slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
+                        const llama_tokens * history;
+                        if (slot.prompt.tokens.has_mtmd) {
+                            slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
+                            history = &slot.spec_prompt;
+                        } else {
+                            history = &slot.prompt.tokens.get_tokens();
+                        }
 
                         const bool spec_reject = slot.use_spec_rejection();
 
@@ -3865,7 +3871,7 @@ private:
                             /* .n_max    = */ n_draft_max,
                             /* .pos0     = */ slot.prompt.tokens.pos_next(),
                             /* .id_last  = */ slot.sampled,
-                            /* .prompt   = */ &slot.spec_prompt,
+                            /* .prompt   = */ history,
                             /* .result   = */ &slot.spec_draft,
                             /* .result_q = */ spec_reject ? &slot.spec_draft_q : nullptr,
                             /* .temp     = */ slot.task->params.sampling.temp,
