@@ -4082,11 +4082,10 @@ void ggml_cuda_op_inkling_moe_down(ggml_backend_cuda_context & ctx, ggml_tensor 
 // ---------------------------------------------------------------------------------------------------------------------
 // inkling_moe_sum_conv: the weighted expert sum, the FFN short convolution and the residual, one thread per channel
 
-static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a, const int64_t a_s1, const float * __restrict__ w, const int w_s1,
+static __device__ __forceinline__ void ik_sum_channel(const float * __restrict__ a, const int64_t a_s1, const float * __restrict__ w, const int w_s1,
         const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
         const int write_cell, const int chan_offset, const float scale, const float * __restrict__ residual, float * __restrict__ dst,
-        const int n_embd, const int n_used, const int n_conv) {
-    const int c = blockIdx.x*blockDim.x + threadIdx.x;
+        const int n_embd, const int n_used, const int n_conv, const int c) {
     if (c >= n_embd) {
         return;
     }
@@ -4127,6 +4126,107 @@ static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a,
         }
     }
     dst[c] = res + (sum + out)*scale;
+}
+
+static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a, const int64_t a_s1, const float * __restrict__ w, const int w_s1,
+        const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
+        const int write_cell, const int chan_offset, const float scale, const float * __restrict__ residual, float * __restrict__ dst,
+        const int n_embd, const int n_used, const int n_conv) {
+    ik_sum_channel(a, a_s1, w, w_s1, conv_w, state, state_s1, rs_ids, write_cell, chan_offset, scale, residual, dst,
+            n_embd, n_used, n_conv, blockIdx.x*blockDim.x + threadIdx.x);
+}
+
+struct ik_tail_args {
+    const float * down, * coeff, * taps, * residual;
+    const int32_t * ids;
+    float * state, * result;
+    int stride, cell, offset;
+    float scale;
+};
+
+template<int ns, bool q8>
+static __global__ void __launch_bounds__(640) ik_tail_mix(ik_tail_args tail, ik_mix_ctrl_args m, ik_res_mix_norm norm,
+        void * dst, int * counts, int producers, bool waiters) {
+    const int b = blockIdx.x, t = threadIdx.x;
+    __shared__ int last;
+    if (b < producers) {
+        for (int c = b*640+t; c < 2304; c += producers*640) {
+            ik_sum_channel(tail.down, 2304, tail.coeff, 1, tail.taps, tail.state, tail.stride, tail.ids,
+                    tail.cell, tail.offset, tail.scale, tail.residual, tail.result, 2304, 8, 4, c);
+        }
+        __syncthreads();
+        if (producers > 1 || waiters) {
+            if (!t) { last = ik_atomic_add_acq_rel(counts, 1) + 1 == producers; }
+            __syncthreads();
+            if (!last) { return; }
+            if (!t) { ik_st_relaxed(counts, 0); }
+            if (waiters) {
+                if (t < m.cols) { ik_st_release(counts + 1 + t, 1); }
+                return;
+            }
+        }
+    } else {
+        if (!t) {
+            while (!ik_ld_acquire(counts + 1 + b-producers)) {}
+            ik_st_relaxed(counts + 1 + b-producers, 0);
+        }
+        __syncthreads();
+    }
+    for (int q = waiters ? b-producers : 0; q < m.cols; q += waiters ? m.cols : 1) {
+        ik_mix_vec4<640,q8,ns>(m.query, m.st, dst, 576, 1, ns, m.q_stride*sizeof(float4), m.eps, m.scale, norm, 0, q);
+        __syncthreads();
+    }
+}
+
+bool ggml_cuda_tail_mix(ggml_backend_cuda_context & ctx, ggml_tensor * tail, ggml_tensor * mix, int mode) {
+    int ns = ik_res_mix_state_count(mix);
+    bool q8 = mix->type == GGML_TYPE_Q8_1;
+    if (ns < 1 || ns > 5 || mix->src[ns]->data != tail->data || mix->ne[0] != 2304 || mix->ne[1] != 1 ||
+            (mix->ne[2] != 1 && mix->ne[2] != 3) || !ggml_is_contiguous(mix) ||
+            (!q8 && mix->type != GGML_TYPE_F32) || !ggml_is_vector(tail) ||
+            tail->src[2]->ne[0] != 4 || tail->src[0]->ne[1] != 8 || tail->src[0]->nb[1] != 2304*sizeof(float) ||
+            tail->src[1]->nb[1] != sizeof(float)) { return false; }
+    ik_mix_ctrl_args m{};
+    for (int j = 0; j < ns; ++j) {
+        m.st.p[j] = (const float *)mix->src[1+j]->data;
+        if ((uintptr_t)m.st.p[j]%16) { return false; }
+    }
+    m.query = mix->src[0] ? (const float4 *)mix->src[0]->data : nullptr;
+    m.q_stride = m.query ? mix->src[0]->nb[1]/sizeof(float4) : 0;
+    m.cols = mix->ne[2];
+    m.eps = ggml_get_op_params_f32(mix, 0);
+    m.scale = ggml_get_op_params_f32(mix, 1);
+    ik_res_mix_norm norm{};
+    if (ggml_get_op_params_i32(mix, 3)) {
+        const auto * nw = mix->src[1+ns];
+        norm.nw = (const float *)nw->data;
+        norm.nw_nb1 = ggml_nrows(nw) == 1 ? 0 : nw->nb[1];
+        norm.eps = ggml_get_op_params_f32(mix, 2);
+    }
+    ik_tail_args a{(const float *)tail->src[0]->data,(const float *)tail->src[1]->data,(const float *)tail->src[2]->data,
+        (const float *)tail->src[5]->data,(const int32_t *)tail->src[4]->data,(float *)tail->src[3]->data,(float *)tail->data,
+        int(tail->src[3]->nb[1]/sizeof(float)),ggml_get_op_params_i32(tail,0),ggml_get_op_params_i32(tail,1),ggml_get_op_params_f32(tail,2)};
+    int producers = std::clamp(abs(mode),1,4);
+    bool waiters = mode < 0;
+    int * counts = ik_counters(ctx, 960, 4);
+    auto launch = [&](auto n) {
+        constexpr int states = decltype(n)::value;
+        auto kernel = q8 ? ik_tail_mix<states,true> : ik_tail_mix<states,false>;
+        if (waiters) {
+            void * params[] = { &a, &m, &norm, &mix->data, &counts, &producers, &waiters };
+            CUDA_CHECK(cudaLaunchCooperativeKernel((void *)kernel, producers+m.cols, 640, params, 0, ctx.stream()));
+        } else {
+            kernel<<<producers,640,0,ctx.stream()>>>(a,m,norm,mix->data,counts,producers,waiters);
+        }
+    };
+    switch (ns) {
+        case 1: launch(std::integral_constant<int,1>{}); break;
+        case 2: launch(std::integral_constant<int,2>{}); break;
+        case 3: launch(std::integral_constant<int,3>{}); break;
+        case 4: launch(std::integral_constant<int,4>{}); break;
+        case 5: launch(std::integral_constant<int,5>{}); break;
+    }
+    return true;
 }
 
 // the rows of a window: a thread per channel walks the tokens in order (the statements of the single-token kernel)

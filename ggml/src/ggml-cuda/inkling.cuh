@@ -42,3 +42,4 @@ struct ik_message_pass {
     float eps[48];
 };
 void ggml_cuda_message_pass(cudaStream_t stream, const ik_message_pass & pass, float2 * terms);
+bool ggml_cuda_tail_mix(ggml_backend_cuda_context & ctx, ggml_tensor * tail, ggml_tensor * mix, int mode);

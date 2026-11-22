@@ -1,0 +1,5 @@
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.13 ± 0.45 |
+pass=1 exact
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.06 ± 0.66 |
+pass=2 exact
+build/p7l3r3/pass-3.bin build/p7l3r2/base-200.bin differ: byte 1, line 1
