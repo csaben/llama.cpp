@@ -2575,7 +2575,7 @@ static __device__ __forceinline__ void ik_scan_sync() {
     }
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool prepared = false>
 static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -2677,7 +2677,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     const int     n_conv = args.n_conv;
     const int64_t ch     = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
     float cur_in, w_c[8], taps[8];
-    if constexpr (!MR) {
+    if constexpr (!MR && !prepared) {
         const int64_t off  = which ? args.off_v : args.off_k;
         const int64_t offt = which ? args.off_vtaps : args.off_ktaps;
         const int     col  = args.proj_ncols == 3 ? (which ? 2 : 1) : 0;
@@ -2746,7 +2746,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 
     // ===== round 2: the past inputs of the convolution (after the cell id), consumed after the cell loop =====
     float x[8];
-    if constexpr (!MR) {
+    if constexpr (!MR && !prepared) {
         const float * past = args.state + (int64_t) read_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -2929,7 +2929,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 
     // ===== the K/V convolution of the token, the post-normalization, the cache store (split 0), the new state =====
     float x_new[7];
-    if constexpr (MR) {
+    if constexpr (MR || prepared) {
         const char * row = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
         float yq;
         if constexpr (std::is_same<cache_t, half>::value) {
@@ -3173,7 +3173,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     }
 
     // ===== the new recurrent state of the K and V channels (every block has read the old state by now) =====
-    if constexpr (!MR) {
+    if constexpr (!MR && !prepared) {
         float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 7; ++j) {
