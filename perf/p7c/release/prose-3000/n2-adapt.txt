@@ -1,0 +1,5 @@
+n2-adapt       letter    prompt     40  3000 tok   314.2 tok/s    1446 chars  accepted/proposed 1868/1936
+n2-adapt       science   prompt     38  3000 tok   319.0 tok/s   11823 chars  accepted/proposed 1897/1941
+n2-adapt       scene     prompt     44  3000 tok   251.5 tok/s   10777 chars  accepted/proposed 1460/1713
+n2-adapt       review    prompt     39  3000 tok   303.4 tok/s    3188 chars  accepted/proposed 1816/1931
+n2-adapt       dialogue  prompt     43  3000 tok   268.4 tok/s    9758 chars  accepted/proposed 1594/1822
