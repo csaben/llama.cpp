@@ -1,0 +1,12 @@
+spec_prof: 384 tokens, 104 target steps, wall 1680.5 ms (16.159 ms/step)
+spec_prof: draft              10.0 ms     102 calls    0.097 ms/step
+spec_prof: draft.decode        9.1 ms     102 calls    0.087 ms/step
+spec_prof: draft.read          0.0 ms       0 calls    0.000 ms/step
+spec_prof: target           1261.5 ms     104 calls   12.130 ms/step
+spec_prof: inject             16.9 ms     104 calls    0.163 ms/step
+spec_prof: inject.decode      15.9 ms     104 calls    0.153 ms/step
+spec_prof: accept              0.4 ms     102 calls    0.004 ms/step
+spec_prof: target.submit     130.4 ms     104 calls    1.254 ms/step
+spec_prof: target.wait      1129.3 ms     103 calls   10.858 ms/step
+spec_prof: batch.build         0.2 ms     102 calls    0.002 ms/step
+spec_prof: other             391.6 ms                  3.766 ms/step

@@ -1,0 +1,14 @@
+Complete rounds 839
+injection graph median ms: 0.1157
+draft graph median ms: 0.9216
+target graph median ms: 11.0582
+Sum of target and draft GPU ms 10059.587
+round ms: median 12.3664, min 11.7019, max 14.6457
+GPU graphs total ms: median 12.0975, min 11.4698, max 12.6106
+longest GPU graph ms: median 11.0582, min 10.4305, max 11.5702
+auxiliary sync ms: median 0.0000, min 0.0000, max 0.0000
+longest sync ms: median 12.0184, min 10.6653, max 12.5564
+API waits > 0 ms: median 1, range 1..1
+API waits > 0.05 ms: median 1, range 1..1
+API waits > 0.1 ms: median 1, range 1..1
+API waits > 1 ms: median 1, range 1..1

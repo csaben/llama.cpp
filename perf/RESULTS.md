@@ -1249,19 +1249,19 @@ At `8899fa9` we also packed the first four rows of a five-row window. Isolated t
 
 ### What limits the round
 
-On `c71f680`, CUDA API interception measured exactly one host synchronization in every complete steady fixed-n3 round below. CUDA events measured the graph launches on their issuing streams. The comparison keeps consecutive generation fences 8-25 ms apart with all three graphs present. First capture, graph-shape changes and incomplete rounds are excluded. The draft and target graphs are serialized because target embedding lookup consumes the drafter's device IDs.
+On release `59c71a9`, CUDA API interception measured exactly one host synchronization in every complete steady fixed-n3 round below. CUDA events measured the graph launches on their issuing streams. The comparison keeps consecutive generation fences 8-25 ms apart with all three graphs present. First capture, graph-shape changes and incomplete rounds are excluded. The draft and target graphs are serialized because target embedding lookup consumes the drafter's device IDs.
 
 | Workload | Complete rounds | GPU graphs, median ms/round | Host syncs/round, min-max | Measured draft + target, total s | Entire reply budget at target, s |
 |---|---:|---:|---:|---:|---:|
-| Edit, 384 | 99 | 11.073 | 1-1 | 1.083 | 1.067 |
-| Edit, 3,000 | 862 | 11.282 | 1-1 | 9.627 | 9.375 |
-| Edit @ 16K, 3,000 | 839 | 12.034 | 1-1 | 10.006 | 9.375 |
+| Edit, 384 | 99 | 11.197 | 1-1 | 1.093 | 1.067 |
+| Edit, 3,000 | 862 | 11.365 | 1-1 | 9.700 | 9.375 |
+| Edit @ 16K, 3,000 | 839 | 12.098 | 1-1 | 10.060 | 9.375 |
 
-In launch order, injection, draft and target medians were 0.114 / 0.820 / 10.137 ms on short edit, 0.114 / 0.842 / 10.325 ms on long edit, and 0.116 / 0.919 / 10.998 ms on long edit at 16K. The draft was already using the folded shortlist. The sum of just the draft and target graphs in the retained rounds exceeds each whole-reply budget. Even making host bookkeeping, injection and the unmeasured rounds free would miss the targets for this fixed-n3 execution. Faster target or drafter math, or more accepted tokens per unit of GPU work, would change that limit. [Short trace](p7/final-profile/short/rounds.txt), [long edit trace](p7/final-profile/edit/rounds.txt), [16K trace](p7/final-profile/edit@16K/rounds.txt).
+In launch order, injection, draft and target medians were 0.115 / 0.828 / 10.254 ms on short edit, 0.115 / 0.846 / 10.404 ms on long edit, and 0.116 / 0.922 / 11.058 ms on long edit at 16K. The draft was already using the folded shortlist. The sum of just the draft and target graphs in the retained rounds exceeds each whole-reply budget. Even making host bookkeeping, injection and the unmeasured rounds free would miss the targets for this fixed-n3 execution. Faster target or drafter math, or more accepted tokens per unit of GPU work, would change that limit. [Short trace](p7/release/profile/short/rounds.txt), [long edit trace](p7/release/profile/edit/rounds.txt), [16K trace](p7/release/profile/edit@16K/rounds.txt).
 
-`LLAMA_SPEC_PROF=1` on the short edit recorded 0 draft-read calls, 0.092 ms/step to submit the draft graph, 0.155 ms/step to submit injection, 0.004 ms/step for host sampling/acceptance and 0.002 ms/step to construct the verification batch after drafting. For comparison, the same binary running the previous path (`r3_prof.sh`, 32K slot) made 102 draft-read calls. Its draft.decode, inject.decode, accept and batch.build timers were 1.063, 0.347, 0.011 and 0.004 ms/step. Both profiles verified 281 of 306 draft tokens over 104 target steps. [Previous path host timers](p7/control-profile.txt).
+`LLAMA_SPEC_PROF=1` on the short edit recorded 0 draft-read calls, 0.087 ms/step to submit the draft graph, 0.153 ms/step to submit injection, 0.004 ms/step for host sampling/acceptance and 0.002 ms/step to construct the verification batch after drafting. For comparison, candidate `c71f680` running the previous path (`r3_prof.sh`, 32K slot) made 102 draft-read calls. Its draft.decode, inject.decode, accept and batch.build timers were 1.063, 0.347, 0.011 and 0.004 ms/step. Both profiles verified 281 of 306 draft tokens over 104 target steps. [Previous path host timers](p7/control-profile.txt).
 
-The target wait includes outstanding device work from the drafter. The profiler's wall total includes prompt processing. Token selection runs on the GPU; the server still commits token history and rolls back its cache indices on the host after the fence. [Short host timers](p7/final-profile/short/spec.txt), [long host timers](p7/final-profile/edit/spec.txt).
+The target wait includes outstanding device work from the drafter. The profiler's wall total includes prompt processing. Token selection runs on the GPU; the server still commits token history and rolls back its cache indices on the host after the fence. [Short host timers](p7/release/profile/short/spec.txt), [long host timers](p7/release/profile/edit/spec.txt).
 
 Nsight Systems 2024.6 with the installed CUDA 13.0 driver collected initialization events only. The API and CUDA-event traces above were collected with the repository probe. Benchmark tables use separate uninstrumented requests.
 
