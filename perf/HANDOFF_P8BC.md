@@ -23,3 +23,5 @@ The first combined C run reproduced prefill PPL 3.0530 and reached 3,302 / 3,017
 The B/C/C/B crossover measured +13.5% / +12.4% / +11.6% throughput at 4K / 16K / 32K. Client TTFT fell from 6.827 to 6.008 seconds at 16K. All tests used microbatch 512. CUDA operation, bitwise-logit and integrated output validation follow this crossover. [Paired results](RESULTS_P8BC.md#stream-c-release-crossover).
 
 Final C served outputs matched both C plain and the saved B plain captures on all eleven prompts at both budgets, 37,224 drafted IDs total. The CUDA, logit and rollback checks passed. Testing larger optional microbatches and end-to-end TTFT with DSpark. [Output hashes](p8bc/prefill/served.tsv), [bitwise logits](p8bc/prefill/logits.tsv).
+
+The optional 2,048-token microbatch reached 5.553 s at 16K on the plain server, using 20,417 MiB and decoding the reply at 174.6 tok/s. The 512-microbatch run used 14,711 MiB and decoded at 181.0 tok/s. [Optional settings](RESULTS_P8BC.md#optional-microbatch-sizes).

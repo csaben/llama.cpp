@@ -116,3 +116,15 @@ The 16K profile saved 562 ms in Q2_K experts, 30 ms in Q2_0 experts and 141 ms i
 The final CUDA build passed 3,779 matrix and routed-matrix cases plus 13 relative-bias cases. These include dedicated ragged 257-row routed matrices and a 129-token, 1,025-key bias test. All 216 captured full-vocabulary FP32 rows matched B byte for byte, including interleaved sequences and prefixes through 32K. In a further 728 kept target rows at four depths, mixed-width decode reproduced single-token decode with maximum logit difference zero. [Operation and window results](p8bc/prefill/checks.txt), [FP32 capture hashes](p8bc/prefill/logits.tsv), [capture driver](p7l3/logits.cpp), [width and rollback driver](p6/mr_check.cpp).
 
 At microbatch 512 the final C server repeated all eleven release and agent prompts with cap six and plain at 384 and 3,000 emitted tokens. Every one of the 22 full messages and 37,224 drafted IDs matched both same-flags C plain and the saved Stream B plain captures. [Rates and SHA-256 for each message and ID stream](p8bc/prefill/served.tsv).
+
+## Optional microbatch sizes
+
+Each configuration below ran three bench samples and three uncached real tool replays per prompt length. The 64K server used batch 2,048 throughout. The memory column is sampled whole-device use on GPU 0. The last column measures the 128 reply tokens following the 16K file-read prompt. [Samples](p8bc/prefill/microbatch.tsv), [B/C results at matching microbatches, memory and PPL](p8bc/prefill/microbatch-summary.tsv).
+
+| C microbatch | Prompt tok/s at 4K / 16K / 32K | 16K client TTFT | Prefill PPL | Peak MiB | 16K decode tok/s |
+|---:|---|---:|---:|---:|---:|
+| 512 | 3,302 / 3,017 / 2,720 | 6.015 s | 3.0530 | 14,711 | 181.0 |
+| 1,024 | 3,452 / 3,132 / 2,799 | 5.742 s | 3.0522 | 16,605 | 179.5 |
+| 2,048 | 3,581 / 3,260 / 2,925 | 5.553 s | 3.0509 | 20,417 | 174.6 |
+
+At the same microbatch of 2,048 the saved B control measured 3,099 tok/s and 5.781 s client TTFT at 16K. Larger microbatches change numerical grouping. Each PPL matched its same-microbatch control and stayed within 0.07% of the 3.0530 target. The source changes keep the release microbatch at 512. [Same-configuration controls](p8bc/prefill/microbatch-summary.tsv).
