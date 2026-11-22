@@ -28,7 +28,7 @@ Done (commits after `59449ce`, tags `p6-r3-pick-short-edit-306tok`, `p6-r3-final
 Next, if someone continues (RESULTS "Not done"): one scan over K/V for all rows of a window (the 16K case: 253 tok/s); a
 graph (scheduler) cache per window size in `llama_context` (0.88 ms per change of size); a device-side accept + drafter commit;
 context tokens in the shortlist; a `test-backend-ops` case for `GGML_OP_DSPARK_PICK`; the unexplained slow server starts
-(about one in ten is 10% slower for its whole life).
+(two of about twenty were 10% slower for their whole life).
 
 ## Round 2 status (2026-11-21, finished)
 

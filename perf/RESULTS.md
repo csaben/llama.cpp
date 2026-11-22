@@ -814,7 +814,7 @@ Goal: 300 tok/s on the edit prompts with DSpark, new code and prose never slower
 
 **Outcome.** The edit prompt reaches **304 tok/s** with max 3 (1.49x plain; round 2: 273) and 303 with the policy.
 The edit at 16K context reaches **253 tok/s** (1.35x; round 2: 220), not 300: there each window row scans the
-16K-cell cache by itself and a 4-row window costs about 13.5 ms. With the retuned policy, new code is 5% faster
+16K-cell cache by itself (a round takes 14.2 ms there against 12.3 ms on the short edit). With the retuned policy, new code is 5% faster
 than plain (225 vs 215) and prose is 2% slower than plain decode of the same server and 4% slower than the best
 plain build (206 vs 210 / 214): "never slower" is met for code and missed by that margin for prose. All 28 drafted
 replies are byte-identical to the plain replies; windows are bit-identical to single-token decode (257 rows, 0
@@ -865,7 +865,7 @@ With the policy (`LLAMA_DSPARK_ADAPTIVE=1`):
 
 In brackets: accepted / proposed draft tokens of the median run. Single runs of a cell vary: the three requests are
 within 1-2% in most cells, but separate server starts of the same build gave 267 and 297 tok/s for the edit at max 3
-during this round (one slow start in about ten; not explained), which is why the cells are medians. The shortlist
+during this round (two slow starts in about twenty; not explained), which is why the cells are medians. The shortlist
 head changes the drafts slightly (edit: 281 / 306 instead of 282 / 302) and is 4% faster.
 
 Greedy equality: every drafted reply (7 configurations x 4 prompts) is byte-identical to the plain reply of the same
@@ -917,8 +917,8 @@ a CPU implementation but no `test-backend-ops` case; the unchanged accepted / pr
    acceptance of a draft per bin of its top-2 margin; each drafted step verifies the prefix of the drafts with the
    best expected tokens per ms (a change of window size is charged 1 ms); the drafter is switched off for 8-64 steps
    while no window beats a plain step, and probed again. While it is off the target features stay on the host and are
-   injected in one batch before the next probe, so plain steps cost what plain decode costs (4.76 ms measured in the
-   policy against 4.75 ms plain). Round 2's instability is gone (max 3 edit 303, was 192 with the old policy).
+   injected in one batch before the next probe, so plain steps cost what plain decode costs (4.76 ms measured by the
+   policy; plain decode with these flags: 210 tok/s = 4.76 ms). Round 2's instability is gone (max 3 edit 303, was 192 with the old policy).
 5. **CUDA graphs keyed by shape** (`ggml_cuda_graph_get_key`; `IK_GRAPH_KEY_SHAPE=0` = as before): each window size
    keeps its captured graph instead of resetting the warm-up at every change of size. No effect on fixed sizes.
 6. **Merge of `inkling-3090-plain`** (tag `p6p-final-215tok`) after its unit was inactive; exactness handled as above.
@@ -933,8 +933,8 @@ a CPU implementation but no `test-backend-ops` case; the unchanged accepted / pr
 - **Per-step window sizes** gain nothing over a fixed size: a change of size rebuilds the target graph on the host
   (0.88 ms) and the policy therefore settles on one size per stretch. Max 4 with the policy is slower than max 3.
   A graph cache per window size in `llama_context` (one scheduler each) would remove this.
-- **300 tok/s at 16K context**: 253. The window there costs about 13.5 ms because every row scans the cache
-  separately (+0.8 ms per row over depth 0); sharing one pass over K/V between the rows of a window (rows as extra
+- **300 tok/s at 16K context**: 253. A round there takes 14.2 ms against 12.3 ms on the short edit because every row
+  scans the cache separately; sharing one pass over K/V between the rows of a window (rows as extra
   mma columns of the tensor-core scan, as ingine's attention does) is the next cut and was not attempted.
 - **Prose never slower than plain**: -2% against plain decode with the same flags, -4% against the default build
   (the DSpark flags themselves cost 2%: no short attention schedule, `IK_MMA` expert kernels). Probes and the first
