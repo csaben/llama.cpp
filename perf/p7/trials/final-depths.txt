@@ -1,0 +1,27 @@
+p7-final-depth-0-columns.log
+window of 4: 9.32 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 0..127) after a 0-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+p7-final-depth-0-separate.log
+window of 4: 9.22 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 0..127) after a 0-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+p7-final-depth-0-stage.log
+window of 4: 9.56 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 0..127) after a 0-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+p7-final-depth-16384-columns.log
+window of 4: 11.23 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 16384..16511) after a 16384-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+p7-final-depth-16384-separate.log
+window of 4: 11.52 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 16384..16511) after a 16384-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+p7-final-depth-32768-columns.log
+window of 4: 12.20 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 32768..32895) after a 32768-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+p7-final-depth-32768-separate.log
+window of 4: 12.71 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 32768..32895) after a 32768-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+p7-final-depth-4096-columns.log
+window of 4: 10.95 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 4096..4223) after a 4096-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+p7-final-depth-4096-separate.log
+window of 4: 11.20 ms per step (31 steps, all logits read back)
+128 rows in 32 steps (positions 4096..4223) after a 4096-token prefix: 0 rows differ from single-token decode, max |logit diff| 0

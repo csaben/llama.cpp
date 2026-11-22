@@ -1234,6 +1234,15 @@ The 16-cell MMA microstep uses the two FP16 limbs of each query as two columns. 
 
 These are four-row target windows with all logits read back. The first trial used one prefix token. The final paired sweep below also starts with an empty cache. The first two columns use `10c8f8c`, except the 1,024-row control at `0f4c67b`. The last column uses `4b8cb7b`. The separate-kernel version reads each K/V tile once for all query warps, but pays for an extra launch and intermediate global partials. Staging a whole split inside the fused kernel also lost at 1K and 16K. At 16K, staging two or four rows cost 11.86 or 12.03 ms against 11.48 ms without staging (`0f4c67b`). Every row in these three depth sweeps matched single-token logits bit for bit. [Raw sweeps](p7/trials/).
 
+The release sweep at `c71f680` used 32 consecutive four-row windows per configuration. Times average the last 31 windows, with all logits read back. Packing added 0.10 ms from an empty cache and saved 0.25 / 0.29 / 0.51 ms at 4K / 16K / 32K. The separate shared-memory launch cost 9.56 ms from empty. All 1,152 rows across the nine runs matched single-token logits bit for bit. [Release depth sweep](p7/trials/final-depths.txt).
+
+| Initial prefix | Separate rows, ms | Packed rows, ms |
+|---:|---:|---:|
+| 0 | 9.22 | 9.32 |
+| 4,096 | 11.20 | 10.95 |
+| 16,384 | 11.52 | 11.23 |
+| 32,768 | 12.71 | 12.20 |
+
 At `8899fa9` we also packed the first four rows of a five-row window. Isolated target-window time at 32K went from 15.27 to 15.03 ms, with all 120 rows exact for each setting. Served fixed n4 fell from 271.0 to 263.4 tok/s on the long edit and from 260.2 to 256.9 at 16K. The release uses `IK_WINDOW_COLS=1`, which packs only four-row windows. [Five-row A/B](p7/wide/).
 
 ### What limits the round
@@ -1248,7 +1257,9 @@ On `c71f680`, CUDA API interception measured exactly one host synchronization in
 
 In launch order, injection, draft and target medians were 0.114 / 0.820 / 10.137 ms on short edit, 0.114 / 0.842 / 10.325 ms on long edit, and 0.116 / 0.919 / 10.998 ms on long edit at 16K. The draft was already using the folded shortlist. The sum of just the draft and target graphs in the retained rounds exceeds each whole-reply budget. Even making host bookkeeping, injection and the unmeasured rounds free would miss the targets for this fixed-n3 execution. Faster target or drafter math, or more accepted tokens per unit of GPU work, would change that limit. [Short trace](p7/final-profile/short/rounds.txt), [long edit trace](p7/final-profile/edit/rounds.txt), [16K trace](p7/final-profile/edit@16K/rounds.txt).
 
-`LLAMA_SPEC_PROF=1` on the short edit recorded 0 draft-read calls, 0.092 ms/step to submit the draft graph, 0.155 ms/step to submit injection, 0.004 ms/step for host sampling/acceptance and 0.002 ms/step to construct the verification batch after drafting. The target wait includes outstanding device work from the drafter. The profiler's wall total includes prompt processing. Token selection runs on the GPU; the server still commits token history and rolls back its cache indices on the host after the fence. [Short host timers](p7/final-profile/short/spec.txt), [long host timers](p7/final-profile/edit/spec.txt).
+`LLAMA_SPEC_PROF=1` on the short edit recorded 0 draft-read calls, 0.092 ms/step to submit the draft graph, 0.155 ms/step to submit injection, 0.004 ms/step for host sampling/acceptance and 0.002 ms/step to construct the verification batch after drafting. For comparison, the same binary running the previous path (`r3_prof.sh`, 32K slot) made 102 draft-read calls. Its draft.decode, inject.decode, accept and batch.build timers were 1.063, 0.347, 0.011 and 0.004 ms/step. Both profiles verified 281 of 306 draft tokens over 104 target steps. [Previous path host timers](p7/control-profile.txt).
+
+The target wait includes outstanding device work from the drafter. The profiler's wall total includes prompt processing. Token selection runs on the GPU; the server still commits token history and rolls back its cache indices on the host after the fence. [Short host timers](p7/final-profile/short/spec.txt), [long host timers](p7/final-profile/edit/spec.txt).
 
 Nsight Systems 2024.6 with the installed CUDA 13.0 driver collected initialization events only. The API and CUDA-event traces above were collected with the repository probe. Benchmark tables use separate uninstrumented requests.
 
