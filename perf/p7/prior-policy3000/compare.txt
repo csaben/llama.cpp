@@ -1,0 +1,5 @@
+n3-adapt     code      identical (9644 bytes)
+n3-adapt     edit      identical (9375 bytes)
+n3-adapt     prose     identical (11163 bytes)
+n3-adapt     edit@16K  identical (4734 bytes)
+n3-adapt     edit@32K  identical (2392 bytes)

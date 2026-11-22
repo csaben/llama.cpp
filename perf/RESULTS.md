@@ -1207,6 +1207,8 @@ The target saves the four extracted feature rows on its device, and the drafter 
 
 Each cached width has its own scheduler, tensor arena and CUDA graph addresses. The input uploader takes a bounded pinned snapshot of CPU tensors before the producer can overwrite them. Uploads and their consumers share the device stream. After a fence, the contexts can reuse the pinned storage of their cached schedulers. The cached-width policy learns the cost between consecutive rounds. It uses recent acceptance at each draft position because the current margins arrive after the next verify graph is submitted. Its short-context priors for plain and verify widths 1..5 are 1.00, 1.20, 1.67, 1.99, 2.35 and 2.87 plain steps. Switching between cached widths carries no graph-rebuild penalty.
 
+At adaptive cap 3 on the release binary, the previous cost model reached 319.9 tok/s on short edit and 284.9 / 274.7 / 271.7 on long edit / edit@16K / edit@32K. Retuning gave 323.2 and 287.3 / 276.3 / 274.4. On long prose it raised throughput from 235.9 to 241.8. Both policy versions agreed with plain for all five prompts at both lengths. [Previous-policy short A/B](p7/prior-policy384/), [long A/B](p7/prior-policy3000/).
+
 | Trial | Inference commit | Short edit, fixed n3 (median tok/s) |
 |---|---|---:|
 | Round 4 published | `399b61a` | 308.4 |
