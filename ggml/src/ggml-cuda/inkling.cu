@@ -1027,21 +1027,63 @@ struct ik_mix_ctrl_args {
     float eps, scale, ctrl_eps;
 };
 
-template <int ns, bool compact = false>
+template <int ns, bool compact = false, int ranks = 2, bool stage = false, bool split = false>
 static __global__ void __launch_bounds__(640) ik_mix_down(ik_mix_ctrl_args a) {
     const int b = blockIdx.y, t = threadIdx.x, k = t%256;
     const int col = a.cols == 1 ? 0 : b;
     __shared__ __align__(16) float mixed[2304];
+    __shared__ __align__(16) half cache[stage ? ranks*4608 : 1];
+    const half * weights = a.weights + (b*64+ranks*blockIdx.x)*4608;
+    if constexpr (stage) {
+        for (int i = t; i < ranks*4608/8; i += 640) {
+            cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(cache+8*i),weights+8*i);
+        }
+        cp_async_commit_group();
+    }
     ik_mix_vec4<640, false, ns, compact>(a.query + col*a.q_stride, a.st, mixed, 576, 1, ns, 0, a.eps, a.scale, {}, 0, 0);
     __syncthreads();
     // The mix also feeds later nodes. Write each column once.
     if (blockIdx.x == 0 && b == col && t < 576) {
         ((float4 *) a.mixed)[col*576 + t] = ((float4 *) mixed)[t];
     }
+    if constexpr (stage) {
+        cp_async_wait_all();
+        __syncthreads();
+        weights = cache;
+    }
+    if constexpr (split) {
+        __shared__ float2 partial[16];
+        if (t < 512) {
+            const int half_id = t/256;
+            const float * input = half_id ? a.msg+b*a.msg_stride : mixed;
+            const half * w = weights+half_id*2304;
+            float ss=0, dot=0;
+#pragma unroll
+            for (int j = 0; j < 9; ++j) {
+                const float v = input[k+j*256];
+                ss += v*v;
+                dot += v*__half2float(w[k+j*256]);
+            }
+            ss = warp_reduce_sum(ss);
+            dot = warp_reduce_sum(dot);
+            if (t%32 == 0) { partial[t/32] = make_float2(ss,dot); }
+        }
+        __syncthreads();
+        if (t == 0) {
+            float sa=0, da=0, sb=0, db=0;
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const float2 x = partial[j], v = partial[8+j];
+                sa += x.x; da += x.y; sb += v.x; db += v.y;
+            }
+            a.down[b*64+blockIdx.x] = da*rsqrtf(sa/2304+a.ctrl_eps) + db*rsqrtf(sb/2304+a.ctrl_eps);
+        }
+        return;
+    }
     float sa = 0, da = 0, sb = 0, db = 0;
     __shared__ float4 partial[16];
-    if (t < 512) {
-        const half * w = a.weights + (b*64 + 2*blockIdx.x + t/256)*4608;
+    if (t < ranks*256) {
+        const half * w = weights + (t/256)*4608;
 #pragma unroll
         for (int j = 0; j < 9; ++j) {
             const int i = j*256 + k;
@@ -1061,7 +1103,7 @@ static __global__ void __launch_bounds__(640) ik_mix_down(ik_mix_ctrl_args a) {
         }
     }
     __syncthreads();
-    if (t < 2) {
+    if (t < ranks) {
         sa = da = sb = db = 0;
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -1071,7 +1113,7 @@ static __global__ void __launch_bounds__(640) ik_mix_down(ik_mix_ctrl_args a) {
             sb += p.z;
             db += p.w;
         }
-        a.down[b*64+2*blockIdx.x+t] = da*rsqrtf(sa/2304 + a.ctrl_eps) + db*rsqrtf(sb/2304 + a.ctrl_eps);
+        a.down[b*64+ranks*blockIdx.x+t] = da*rsqrtf(sa/2304 + a.ctrl_eps) + db*rsqrtf(sb/2304 + a.ctrl_eps);
     }
 }
 
@@ -1117,8 +1159,26 @@ bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml
     a.eps = ggml_get_op_params_f32(mix, 0);
     a.scale = ggml_get_op_params_f32(mix, 1);
     a.ctrl_eps = ggml_get_op_params_f32(down, 0);
+    if (getenv("IK_R4_SHAPES")) {
+        fprintf(stderr,"r4 down %s ns=%d cols=%d heads=%lld\n",mix->name,states,a.cols,(long long)down->ne[2]);
+    }
     auto launch = [&](auto count) {
         constexpr int n = decltype(count)::value;
+        static const int stage = getenv("IK_DOWN_TILE") ? atoi(getenv("IK_DOWN_TILE")) : 0;
+        if (stage == 1) {
+            ik_mix_down<n,true,2,true><<<dim3(32,down->ne[2]),640,0,ctx.stream()>>>(a);
+            return;
+        }
+        if (stage == 2 || stage == 3) {
+            if (stage == 2) { ik_mix_down<n,true,1,false,true><<<dim3(64,down->ne[2]),640,0,ctx.stream()>>>(a); }
+            else { ik_mix_down<n,true,1,true,true><<<dim3(64,down->ne[2]),640,0,ctx.stream()>>>(a); }
+            return;
+        }
+        if (stage == 4 || stage == 5) {
+            if (stage == 4) { ik_mix_down<n,true,1,false><<<dim3(64,down->ne[2]),640,0,ctx.stream()>>>(a); }
+            else { ik_mix_down<n,true,1,true><<<dim3(64,down->ne[2]),640,0,ctx.stream()>>>(a); }
+            return;
+        }
         if (ik_moments_mode() & 2) {
             ik_mix_down<n, true><<<dim3(32, down->ne[2]), 640, 0, ctx.stream()>>>(a);
             return;
@@ -1644,6 +1704,9 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
     const size_t nw_nb1 = nw && ggml_nrows(nw) != 1 ? nw->nb[1] : 0;
     float eps = nw ? ggml_get_op_params_f32(dst, 0) : 0.0f;
 
+    if (getenv("IK_R4_SHAPES") && n_tok == 1) {
+        fprintf(stderr,"r4 apply %s cols=%lld B=%d norm_rows=%lld\n",dst->name,(long long)cur->ne[2],B,(long long)(nw?ggml_nrows(nw):0));
+    }
     if (q8 && group8 && !v2 && !fuse_norm && n_tok == 1 && n == 2304 && B == 3 && rank == 64 &&
             wg->type == GGML_TYPE_F16 && (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 &&
             (uintptr_t) wf->data % 8 == 0 && ik_ctrl_gemm_min() != 1 && ik_dependency_fusion(ctx) &&
@@ -3796,6 +3859,9 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
         const uintptr_t first = uintptr_t(x->data), last = first + ggml_nbytes(x);
         if (first < uintptr_t(dst->data) + ggml_nbytes(dst) && uintptr_t(dst->data) < last) {
             return false;
+        }
+        if (getenv("IK_R4_SHAPES")) {
+            fprintf(stderr,"r4 attention %s cells=%d split=%d per=%d columns=%d taps=%d mask_bytes=%d\n",dst->name,a.n_kv,a.n_split,a.kv_per_split,a.proj_ncols,a.has_taps,a.mask_f16?2:4);
         }
         if (a.has_taps) {
             ik_launch_gate_projection<1>(ctx, a, proj, short_scan);
