@@ -61,3 +61,24 @@ All 360 drafted requests (347,520 emitted token IDs) matched the full canonical 
 | edit@16K | 178.5 | 274.5 | 162.5 | 267.6 |
 | edit@32K | 162.1 | 203.9 | 152.5 | 242.4 |
 | agent | 186.8 | 280.2 | 174.0 | 270.9 |
+
+Eight of the 20 guarded short additional-prose medians fell below their matrix plain controls (worst was review, -4.9%). In the subsequent six-process prose crossover, every cap-6 median exceeded both surrounding plain medians. Averaged over the two processes, cap 6 was 0.9% faster than frozen cap 3 on science and 0.5-1.2% slower on the other four. GPU 0 reported software thermal throttling during the matrix. [Paired prose](p8bc/paired/prose.txt), [process-start clock samples](p8bc/paired/gpu.csv).
+
+## Frozen release crossover
+
+Same six prompts in the same order. Each length ran frozen cap 3, new cap 6, new cap 6, frozen cap 3. Each short rate is a five-request process median, each long rate a single request. Percentages compare the means of the two process results per implementation. Control ranges matter, especially after the 32K short prefill. [384 tokens](p8bc/paired/384.txt), [3,000 tokens](p8bc/paired/3000.txt).
+
+| Prompt | Frozen 384 range | Cap 6 range | Change | Frozen 3,000 range | Cap 6 range | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| code | 244.4-248.0 | 244.1-245.3 | -0.6% | 268.5-269.7 | 267.6-268.0 | -0.5% |
+| edit | 332.4-336.1 | 337.2-338.7 | +1.1% | 296.1-297.0 | 297.6-298.7 | +0.5% |
+| prose | 211.2-214.3 | 212.9-213.9 | +0.3% | 287.6-288.4 | 294.1-294.4 | +2.2% |
+| edit@16K | 239.6-284.5 | 261.9-278.2 | +3.1% | 289.6-290.5 | 290.3-290.5 | +0.1% |
+| edit@32K | 216.0-250.2 | 213.9-238.7 | -2.9% | 292.7-292.7 | 293.9-294.3 | +0.5% |
+| agent | 268.1-287.2 | 263.3-294.0 | +0.4% | 319.8-320.0 | 319.6-323.1 | +0.5% |
+
+The isolated 384-token agent replay averaged 285.5 tok/s frozen, 290.6 new cap 3 and 294.5 new cap 6. The process order was frozen/3/6/6/3/frozen. [Isolated agent](p8bc/paired/agent-384.txt).
+
+The isolated 3000-token agent replay averaged 320.1 tok/s frozen, 319.9 new cap 3 and 319.7 new cap 6. The process order was frozen/3/6/6/3/frozen. [Isolated agent](p8bc/paired/agent-3000.txt).
+
+A separate tool-enabled replay stopped naturally at 777 tokens. Cap 6 and plain produced identical full messages and IDs at 241.0 and 190.6 tok/s respectively. [Natural tool reply](p8bc/paired/natural.txt).

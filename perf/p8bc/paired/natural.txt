@@ -1,0 +1,2 @@
+cap6           read-tool prompt   2073   777 tok   241.0 tok/s    2558 chars  accepted/proposed 445/529
+plain          read-tool prompt   2073   777 tok   190.6 tok/s    2558 chars
