@@ -1131,9 +1131,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "INKLING_MOE_SUM_CONV",
     "INKLING_ROUTER",
     "INKLING_PROJ",
+    "DSPARK_PICK",
 };
 
-static_assert(GGML_OP_COUNT == 113, "GGML_OP_COUNT != 113");
+static_assert(GGML_OP_COUNT == 114, "GGML_OP_COUNT != 114");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1260,9 +1261,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "inkling_moe_sum_conv(a,w)",
     "inkling_router(q,x...)",
     "inkling_proj(q,x...,w)",
+    "dspark_pick(base,bias,ids,prev)",
 };
 
-static_assert(GGML_OP_COUNT == 113, "GGML_OP_COUNT != 113");
+static_assert(GGML_OP_COUNT == 114, "GGML_OP_COUNT != 114");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6393,6 +6395,38 @@ struct ggml_tensor * ggml_inkling_router_conv(
         result->src[9 + n_states]  = residual;
         result->src[10 + n_states] = states[n_states - 1]; // the written leaf as a source: the scheduler assigns it a backend
     }
+
+    return result;
+}
+
+// ggml_dspark_pick
+// op_params: [0] n_valid (int), [1] cap (float); src: base, bias (optional), ids (optional), prev (optional)
+
+struct ggml_tensor * ggml_dspark_pick(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * base,
+        struct ggml_tensor  * bias,
+        struct ggml_tensor  * ids,
+        struct ggml_tensor  * prev,
+        int64_t               n_valid,
+        float                 cap) {
+    const int64_t n = ggml_nelements(base);
+    GGML_ASSERT(base->type == GGML_TYPE_F32 && ggml_is_contiguous(base));
+    GGML_ASSERT(bias == NULL || (bias->type == GGML_TYPE_F32 && ggml_nelements(bias) >= n && ggml_is_contiguous(bias)));
+    GGML_ASSERT(ids  == NULL || (ids->type  == GGML_TYPE_I32 && ggml_nelements(ids)  >= n && ggml_is_contiguous(ids)));
+    GGML_ASSERT(prev == NULL || (prev->type == GGML_TYPE_I32 && ggml_is_contiguous(prev)));
+    GGML_ASSERT(n_valid >= 1 && n_valid <= n && n < INT32_MAX);
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (prev ? ggml_nelements(prev) : 0) + 2);
+
+    ggml_set_op_params_i32(result, 0, (int32_t) n_valid);
+    ggml_set_op_params_f32(result, 1, cap);
+
+    result->op     = GGML_OP_DSPARK_PICK;
+    result->src[0] = base;
+    result->src[1] = bias;
+    result->src[2] = ids;
+    result->src[3] = prev;
 
     return result;
 }

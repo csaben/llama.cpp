@@ -131,6 +131,7 @@ void ggml_compute_forward_inkling_moe_down(const struct ggml_compute_params * pa
 void ggml_compute_forward_inkling_moe_sum_conv(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_inkling_router(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_inkling_proj(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_dspark_pick(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 #ifdef __cplusplus
 }
 #endif

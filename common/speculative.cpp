@@ -1269,6 +1269,7 @@ public:
                     const llama_pos pos_arr[4] = { p, p, p, 0 };
                     batch_inject.add_embd({ features_buf.data() + (size_t) i * n_embd_enc, 1, n_embd_enc }, pos_arr, seq_id, false);
                 }
+                const int64_t t_prof = common_spec_prof_on() ? ggml_time_us() : 0;
                 const int32_t rc = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch_inject.get());
                 if (rc != 0) {
                     LOG_ERR("%s: llama_process(ctx_dft) failed rc=%d (n_tokens=%d, offset=%d)\n",
@@ -1276,6 +1277,7 @@ public:
                     return false;
                 }
                 store_context_features(seq_id, n_chunk);
+                if (t_prof && n_chunk <= 16) { common_spec_prof_add(SPEC_PROF_INJECT_DECODE, ggml_time_us() - t_prof); }
             }
         }
 
@@ -1380,6 +1382,9 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
     // > 0: the drafter graph computes (and returns the logits of) the anchor and the first head_n draft positions only
     int32_t head_n = 0;
 
+    // the drafter graph returns { token, margin } per draft position in place of logits (LLAMA_DSPARK_PICK)
+    bool pick = false;
+
     size_t context_rows = 0;
     std::vector<float>     context_embd;
     std::vector<llama_pos> context_pos;
@@ -1414,6 +1419,11 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             // the head graph stops after the positions that are read (see graph_inkling2) and returns their logits only
             setenv("LLAMA_DSPARK_HEAD_N", std::to_string(this->params.n_max).c_str(), 1);
             head_n = this->params.n_max;
+            // LLAMA_DSPARK_PICK=0: the drafter returns the logits of the draft positions and the host scans them (round 2);
+            // otherwise the draft tokens and their margins are reduced on the device (see graph_inkling2)
+            const char * env = getenv("LLAMA_DSPARK_PICK");
+            pick = env == nullptr || atoi(env) != 0;
+            setenv("LLAMA_DSPARK_PICK", pick ? "1" : "0", 1);
         }
         {
             const char * env = getenv("LLAMA_DSPARK_ADAPTIVE");
@@ -1586,7 +1596,7 @@ public:
             }
             i_block_beg[seq_id] = batch.size();
             for (int32_t i = 0; i < n_block_tokens; ++i) {
-                const int32_t idx = batch.add(i == 0 ? dp.id_last : mask_token_id, n + i, seq_id, head_n == 0 || i <= head_n);
+                const int32_t idx = batch.add(i == 0 ? dp.id_last : mask_token_id, n + i, seq_id, !pick && (head_n == 0 || i <= head_n));
                 if (context) {
                     batch.set_embd_state(idx, { context, 1, (size_t) n_embd_dec });
                 }
@@ -1597,11 +1607,20 @@ public:
             return;
         }
 
+        const int64_t t_prof = common_spec_prof_on() ? ggml_time_us() : 0;
         int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
         if (ret != 0) {
             LOG_WRN("%s: llama_process returned %d\n", __func__, ret);
             return;
         }
+        if (t_prof) {
+            llama_synchronize(ctx_dft);
+            common_spec_prof_add(SPEC_PROF_DRAFT_DECODE, ggml_time_us() - t_prof);
+        }
+        struct prof_read {
+            int64_t t0;
+            ~prof_read() { if (t0) { common_spec_prof_add(SPEC_PROF_DRAFT_READ, ggml_time_us() - t0); } }
+        } prof_read_guard = { t_prof ? ggml_time_us() : 0 };
 
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
             if (i_block_beg[seq_id] < 0) {
@@ -1627,6 +1646,18 @@ public:
                     break;
                 }
 
+                if (pick) {
+                    int32_t tok;
+                    float   margin;
+                    const float * picks = llama_get_embeddings_nextn(ctx_dft);
+                    std::memcpy(&tok,    picks + 2*(i - i_draft_beg),     sizeof(tok));
+                    std::memcpy(&margin, picks + 2*(i - i_draft_beg) + 1, sizeof(margin));
+                    if (margin < margin_min) {
+                        break;
+                    }
+                    result.push_back(tok);
+                    continue;
+                }
                 if (has_rnn_context) {
                     // Use the first maximum, as in the RNN conditioning graph: a scan of the logits (what the greedy
                     // sampler chain returns, without building its candidate array of the whole vocabulary).
@@ -3810,4 +3841,37 @@ void common_speculative_print_stats(const common_speculative * spec) {
                 str_stats.c_str(),
                 str_perf.c_str());
     }
+}
+
+static int64_t g_spec_prof_us[SPEC_PROF_COUNT], g_spec_prof_n[SPEC_PROF_COUNT], g_spec_prof_t0;
+bool common_spec_prof_on() {
+    static const bool on = getenv("LLAMA_SPEC_PROF") != nullptr && atoi(getenv("LLAMA_SPEC_PROF")) != 0;
+    return on;
+}
+void common_spec_prof_add(int slot, int64_t us, int n) {
+    if (g_spec_prof_t0 == 0) {
+        g_spec_prof_t0 = ggml_time_us() - us;
+    }
+    g_spec_prof_us[slot] += us;
+    g_spec_prof_n[slot]  += n;
+}
+void common_spec_prof_dump(int n_tokens) {
+    if (!common_spec_prof_on() || g_spec_prof_t0 == 0) {
+        return;
+    }
+    static const char * names[SPEC_PROF_COUNT] = { "draft", "draft.decode", "draft.read", "target", "inject", "inject.decode", "accept" };
+    const double wall = (ggml_time_us() - g_spec_prof_t0)/1e3;
+    const double steps = (double) std::max<int64_t>(1, g_spec_prof_n[SPEC_PROF_TARGET]);
+    fprintf(stderr, "spec_prof: %d tokens, %.0f target steps, wall %.1f ms (%.3f ms/step)\n", n_tokens, steps, wall, wall/steps);
+    double sum = 0.0;
+    for (int i = 0; i < SPEC_PROF_COUNT; ++i) {
+        fprintf(stderr, "spec_prof: %-14s %8.1f ms  %6lld calls  %7.3f ms/step\n", names[i], g_spec_prof_us[i]/1e3, (long long) g_spec_prof_n[i], g_spec_prof_us[i]/1e3/steps);
+        if (i == SPEC_PROF_DRAFT || i == SPEC_PROF_TARGET || i == SPEC_PROF_INJECT || i == SPEC_PROF_ACCEPT) {
+            sum += g_spec_prof_us[i]/1e3;
+        }
+    }
+    fprintf(stderr, "spec_prof: %-14s %8.1f ms                %7.3f ms/step\n", "other", wall - sum, (wall - sum)/steps);
+    std::fill(g_spec_prof_us, g_spec_prof_us + SPEC_PROF_COUNT, 0);
+    std::fill(g_spec_prof_n,  g_spec_prof_n  + SPEC_PROF_COUNT, 0);
+    g_spec_prof_t0 = 0;
 }

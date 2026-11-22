@@ -2517,7 +2517,8 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
                 float * embd_nextn_out = embd_nextn.data + offset*n_embd;
 
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
-                ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
+                // a graph may return fewer bytes than its rows (the DSpark drafter's picks, see ggml_dspark_pick)
+                ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, std::min<size_t>(n_rows*n_embd*sizeof(float), ggml_nbytes(t_h_nextn)));
                 extract_all_idxs = extract_all_idxs || !masked;
             }
         }

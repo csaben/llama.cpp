@@ -446,6 +446,7 @@ extern "C" {
         GGML_OP_INKLING_MOE_SUM_CONV,
         GGML_OP_INKLING_ROUTER,
         GGML_OP_INKLING_PROJ,
+        GGML_OP_DSPARK_PICK,
 
         GGML_OP_COUNT,
     };
@@ -2625,6 +2626,20 @@ extern "C" {
     // Optional MoE epilogue of the previous layer, computed first: the last state must be layer_out, which receives
     //   residual + (d + conv([past, d], conv_w))*conv_scale, d[c] = sum_e moe_w[e]*moe_d[c, e] (see ggml_inkling_moe_sum_conv);
     //   moe_d [n_embd, n_used] F32, moe_w [1, n_used] F32/I32 bits, conv_w [n_conv, n_embd], state, rs_ids, residual [n_embd] F32.
+    // One draft position of the DSpark head: v[r] = softcap(base[r] + bias[r]) (softcap(x) = tanh(x/cap)*cap, cap <= 0: none)
+    // over the rows r < n_valid whose ids[r] >= 0; the result is prev followed by { token, bits of (v1 - v2) }: the token
+    // of the largest v (ties: the smallest token id), and its margin over the second largest v.
+    //   base [n] F32, bias [n] F32 or NULL, ids [n] I32 or NULL (row -> token id; NULL: the row index),
+    //   prev [2k] I32 or NULL -> dst [2k + 2] I32
+    GGML_API struct ggml_tensor * ggml_dspark_pick(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * base,
+            struct ggml_tensor  * bias,
+            struct ggml_tensor  * ids,
+            struct ggml_tensor  * prev,
+            int64_t               n_valid,
+            float                 cap);
+
     GGML_API struct ggml_tensor * ggml_inkling_proj(
             struct ggml_context * ctx,
             struct ggml_tensor  * query,

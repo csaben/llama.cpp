@@ -953,7 +953,7 @@ llama_model_dflash::graph_mistral_large4::graph_mistral_large4(const llm_graph_p
 }
 
 static ggml_tensor * build_inkling2_head(llm_graph_context & g, const llama_model & model, const llama_model & target,
-        ggml_tensor * prev, ggml_tensor * & state, ggml_tensor * hidden, ggml_tensor * base, ggml_tensor * context) {
+        ggml_tensor * prev, ggml_tensor * & state, ggml_tensor * hidden, ggml_tensor * base, ggml_tensor * context, bool bias_only = false) {
     auto * ctx0 = g.ctx0;
     const int64_t rank = model.dspark_markov_w1->ne[0];
     auto * joint = ggml_concat(ctx0, state, ggml_get_rows(ctx0, model.dspark_markov_w1, prev), 0);
@@ -977,6 +977,9 @@ static ggml_tensor * build_inkling2_head(llm_graph_context & g, const llama_mode
         bias = g.build_lora_mm(target.output, correction, target.output_s);
     }
     ggml_prec_set_acc(bias, GGML_PREC_F32);
+    if (bias_only) {
+        return bias; // the caller adds the base logits and the soft cap (ggml_dspark_pick)
+    }
     if (bias->ne[0] != base->ne[0]) {
         bias = ggml_cont(ctx0, ggml_view_2d(ctx0, bias, base->ne[0], bias->ne[1], bias->nb[1], 0));
     }
@@ -1082,6 +1085,29 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
         if (nb == 1 && block <= hparams.dflash_block_size && atoi(env) >= 1) {
             n_head = std::min<int64_t>(n_head, atoi(env));
         }
+    }
+    // LLAMA_DSPARK_PICK=1 (set by the drafter with LLAMA_DSPARK_HEAD_N): each draft position is reduced on the device to
+    // { token, margin over the second logit } (ggml_dspark_pick); the graph returns these 2*n_head ints in place of the
+    // h_nextn rows and no logits. The anchor's base logits are not computed (they are never read).
+    const bool pick_on = getenv("LLAMA_DSPARK_PICK") != nullptr && atoi(getenv("LLAMA_DSPARK_PICK")) == 1;
+    if (pick_on && nb == 1 && n_head < block - 1 && target->output_s == nullptr) {
+        auto * base = build_lora_mm(target->output, ggml_view_2d(ctx0, cur, n_embd, n_head, cur->nb[1], cur->nb[1]));
+        ggml_prec_set_acc(base, GGML_PREC_F32);
+        auto * state   = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, rank, nb), 0.0f);
+        auto * context = ggml_cont(ctx0, ggml_view_2d(ctx0, f_rnn, f_rnn->ne[0], 1, f_rnn->nb[1], 0));
+        ggml_tensor * picks = nullptr;
+        ggml_tensor * prev  = tokens->ne[0] == 1 ? tokens : ggml_view_1d(ctx0, tokens, 1, 0);
+        for (int64_t i = 1; i <= n_head; ++i) {
+            auto * hidden = ggml_cont(ctx0, ggml_view_2d(ctx0, cur, n_embd, 1, cur->nb[1], i*cur->nb[1]));
+            auto * bias   = build_inkling2_head(*this, model, *target, prev, state, hidden, base, context, true);
+            auto * col    = ggml_view_1d(ctx0, base, base->ne[0], (i - 1)*base->nb[1]);
+            picks = ggml_dspark_pick(ctx0, col, bias, nullptr, picks, hparams.n_vocab_unpadded, model.hparams.f_final_logit_softcapping);
+            prev  = ggml_view_1d(ctx0, picks, 1, 2*(i - 1)*sizeof(int32_t));
+        }
+        res->t_logits  = nullptr;
+        res->t_h_nextn = picks;
+        ggml_build_forward_expand(gf, picks);
+        return;
     }
     auto * base = build_lora_mm(target->output, n_head < block - 1 ? ggml_view_2d(ctx0, cur, n_embd, n_head + 1, cur->nb[1], 0) : cur, target->output_s);
     ggml_prec_set_acc(base, GGML_PREC_F32);

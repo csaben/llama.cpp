@@ -13917,3 +13917,47 @@ void ggml_compute_forward_moe_sum(const ggml_compute_params * params, ggml_tenso
         }
     }
 }
+
+// ggml_compute_forward_dspark_pick
+
+void ggml_compute_forward_dspark_pick(const ggml_compute_params * params, ggml_tensor * dst) {
+    if (params->ith != 0) {
+        return;
+    }
+    const ggml_tensor * base = dst->src[0];
+    const ggml_tensor * bias = dst->src[1];
+    const ggml_tensor * ids  = dst->src[2];
+    const ggml_tensor * prev = dst->src[3];
+    const int32_t n_valid = ggml_get_op_params_i32(dst, 0);
+    const float   cap     = ggml_get_op_params_f32(dst, 1);
+    const float * b0 = (const float *) base->data;
+    const float * b1 = bias ? (const float *) bias->data : nullptr;
+    const int32_t * id = ids ? (const int32_t *) ids->data : nullptr;
+    int32_t * out = (int32_t *) dst->data;
+    const int64_t n_prev = prev ? ggml_nelements(prev) : 0;
+    if (prev) {
+        memcpy(out, prev->data, n_prev*sizeof(int32_t));
+    }
+    float v1 = -INFINITY, v2 = -INFINITY;
+    int32_t t1 = INT32_MAX;
+    for (int32_t r = 0; r < n_valid; ++r) {
+        const int32_t t = id ? id[r] : r;
+        if (t < 0) {
+            continue;
+        }
+        float v = b0[r] + (b1 ? b1[r] : 0.0f);
+        if (cap > 0.0f) {
+            v = tanhf(v*(1.0f/cap))*cap;
+        }
+        if (v > v1 || (v == v1 && t < t1)) {
+            v2 = v1;
+            v1 = v;
+            t1 = t;
+        } else if (v > v2) {
+            v2 = v;
+        }
+    }
+    const float margin = v1 - v2;
+    out[n_prev] = t1 == INT32_MAX ? 0 : t1;
+    memcpy(out + n_prev + 1, &margin, sizeof(float));
+}

@@ -767,6 +767,7 @@ struct server_slot {
     }
 
     void print_timings() const {
+        common_spec_prof_dump((int) stats.n_gen);
         const double t_prompt_total = stats.t_prompt_ms();
         const double t_gen_total    = stats.t_gen_ms();
 
@@ -3879,9 +3880,11 @@ private:
 
         // generate the actual drafts (if any)
         if (!drafting.empty()) {
+            const int64_t t_prof = common_spec_prof_on() ? ggml_time_us() : 0;
             queue_tasks.yield_to_queue([&]() {
                 common_speculative_draft(spec.get());
             });
+            if (t_prof) { common_spec_prof_add(SPEC_PROF_DRAFT, ggml_time_us() - t_prof); }
         }
 
         // make checkpoints if needed
@@ -4645,12 +4648,14 @@ private:
         // yield to the queue, so we can still handle metrics tasks while decoding
         // note: the sync is done here too, so that the wait is also covered by the yield
         int ret = 0;
+        const int64_t t_prof_tgt = common_spec_prof_on() && spec ? ggml_time_us() : 0;
         queue_tasks.yield_to_queue([&]() {
             ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
             if (ret == 0 && has_output) {
                 llama_synchronize(ctx_tgt);
             }
         });
+        if (t_prof_tgt && batch.view.size() <= 16) { common_spec_prof_add(SPEC_PROF_TARGET, ggml_time_us() - t_prof_tgt); }
 
         if (ret != 0) {
             {
@@ -4710,9 +4715,11 @@ private:
         //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
         if (spec) {
             bool ok = true;
+            const int64_t t_prof = common_spec_prof_on() && batch.view.size() <= 16 ? ggml_time_us() : 0;
             queue_tasks.yield_to_queue([&]() {
                 ok = common_speculative_process(spec.get(), batch.view);
             });
+            if (t_prof) { common_spec_prof_add(SPEC_PROF_INJECT, ggml_time_us() - t_prof); }
 
             if (!ok) {
                 SRV_ERR("%s", "failed to process speculative batch\n");
@@ -4887,6 +4894,7 @@ private:
 
             // verify and try to accept the draft
             {
+                const int64_t t_prof_acc = common_spec_prof_on() ? ggml_time_us() : 0;
                 common_sampler_ptr smpl_save(common_sampler_clone(slot.smpl.get()));
 
                 GGML_ASSERT(spec_i_batch.size() == n_draft + 1);
@@ -4911,6 +4919,7 @@ private:
                 }
 
                 GGML_ASSERT(accepted.size() >= 1);
+                if (t_prof_acc) { common_spec_prof_add(SPEC_PROF_ACCEPT, ggml_time_us() - t_prof_acc); }
 
                 const uint32_t n_rollback = slot.spec_draft.size() + 1 - accepted.size();
 

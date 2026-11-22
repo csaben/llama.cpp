@@ -3188,6 +3188,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_INKLING_PROJ:
             ggml_cuda_op_inkling_proj(ctx, dst);
             break;
+        case GGML_OP_DSPARK_PICK:
+            ggml_cuda_op_dspark_pick(ctx, dst);
+            break;
         case GGML_OP_SSM_SCAN:
             ggml_cuda_op_ssm_scan(ctx, dst);
             break;
@@ -6893,6 +6896,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 return op->ne[0] % 4 == 0 && op->ne[0] <= (has_conv ? 2304 : 4096) && gate_inp->ne[1] % 8 == 0 && gate_inp->ne[1] <= 256 &&
                     (!has_conv || (n_states <= 5 && ggml_get_op_params_i32(op, 8) % 4 == 0 && op->src[6 + n_states]->ne[0] == 4));
             }
+        case GGML_OP_DSPARK_PICK:
+            return true;
         case GGML_OP_INKLING_PROJ:
             {
                 const int n_states = ggml_get_op_params_i32(op, 3);
