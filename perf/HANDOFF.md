@@ -2,6 +2,9 @@
 
 Active on GPU1. Starting tree `c8eefdf`, inference baseline `399b61a`. First measurements compare shared attention and device feature handoff against the same-flags plain reference. Round 4 deployment information below is historical.
 
+- `10c8f8c` shared scan (`IK_WINDOW_SCAN_MIN=1`), four rows, prefixes 1/4096/16384/32768: zero of 320 rows differed. Window ms off/on: 8.96/9.26, 11.08/11.37, 11.47/11.69, 12.49/12.72. Trying fused staging for small splits.
+- `99f3500` device target features and projected anchor (`LLAMA_DSPARK_DEV=1`): 313.1 fixed n3 and 313.3 adaptive n3 on the 384-token edit, median of three. Both matched the plain message and IDs. Long matrix in progress. Device picks still synchronize before target verification.
+
 # Phase 6 hand-off (keep current; newest status first)
 
 ## Round 4 status (2026-11-22, complete)
