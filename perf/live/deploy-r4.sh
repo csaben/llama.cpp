@@ -10,6 +10,7 @@ test -r "$Q2"
 test -r "$draft"
 snapshot="$HOME/inkling-live-bin-p6r4-399b61a"
 test -x "$snapshot/llama-server"
+(cd "$snapshot" && sha256sum -c "$repo/perf/p6/r4_checks/snapshot.sha256")
 if systemctl --user is-active --quiet "$unit"; then
     systemctl --user stop "$unit"
 fi
