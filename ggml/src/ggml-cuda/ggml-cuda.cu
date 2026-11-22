@@ -5482,8 +5482,18 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     return 0;
 }
 
+#ifdef USE_CUDA_GRAPH
+#include "../../../perf/p7l3r2/floor.cuh"
+#endif
+
 static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
     bool graph_evaluated_or_captured = false;
+#ifdef USE_CUDA_GRAPH
+    static const bool floor_requested = ggml_cuda_env_flag("IK_TOKEN_FLOOR");
+    static thread_local bool floor_done = false;
+    const bool measure_floor = floor_requested && !floor_done && !use_cuda_graph && ik_floor_graph(cgraph);
+    std::vector<ik_floor_op> floor_ops;
+#endif
 
     // flag used to determine whether it is an integrated_gpu
     const bool integrated            = ggml_cuda_info().devices[cuda_ctx->device].integrated;
@@ -5638,6 +5648,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     continue;
                 }
 
+#ifdef USE_CUDA_GRAPH
+                if (measure_floor && (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID)) {
+                    floor_ops.push_back(ik_floor_capture(*cuda_ctx, cgraph, i));
+                }
+#endif
                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
 
                 if (nodes_to_skip != 0) {
@@ -5677,6 +5692,12 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     try_launch_concurrent_event(node);
                }
             }
+#ifdef USE_CUDA_GRAPH
+            if (measure_floor) {
+                floor_done = true;
+                ik_floor_measure(*cuda_ctx, floor_ops);
+            }
+#endif
         }
 
 #ifdef USE_CUDA_GRAPH
