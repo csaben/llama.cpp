@@ -1,0 +1,6 @@
+r3-applypack-1.sqlite    apply and norm    24.0/token   7.131 us/call
+mode=1 exact
+r3-applypack-2.sqlite    apply and norm    24.0/token   7.148 us/call
+mode=2 exact
+r3-applypack-3.sqlite    apply and norm    24.0/token   7.130 us/call
+mode=3 exact

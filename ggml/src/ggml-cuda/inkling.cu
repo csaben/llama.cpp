@@ -1617,6 +1617,66 @@ bool ggml_cuda_ctrl_pair(ggml_backend_cuda_context & ctx, ggml_tensor * down, gg
     return true;
 }
 
+template<int threads>
+static __global__ void __launch_bounds__(threads) ik_ctrl_apply_pack(ik_ctrl_pair_args a, const float * nw, int nw_stride,
+        block_q8_1 * out, float * partial, float eps) {
+    const int b = blockIdx.y, tile = blockIdx.x, t = threadIdx.x, local = t%256;
+    const int lane = local%8;
+    const float * dv = a.d + b*64 + lane*4;
+    float4 d0 = *(const float4 *)dv, d1 = *(const float4 *)(dv+32);
+    __shared__ float y[3][32];
+    for (int j = t/256; j < 3; j += threads/256) {
+        const int c = j*1024 + tile*32 + local/8;
+        if (c < 2304) {
+            const int off = (b*2304+c)*64 + lane*4;
+            const half * g = a.gain + off, * f = a.forget + off;
+            const uint2 g0 = *(const uint2 *)g, g1 = *(const uint2 *)(g+32);
+            const uint2 f0 = *(const uint2 *)f, f1 = *(const uint2 *)(f+32);
+            float gv[4], fv[4];
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                const float l = ((const float *)&d0)[k], h = ((const float *)&d1)[k];
+                gv[k] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *)&g1)[k]), h, __fmul_rn(__half2float(((const half *)&g0)[k]), l)));
+                fv[k] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *)&f1)[k]), h, __fmul_rn(__half2float(((const half *)&f0)[k]), l)));
+            }
+            if (!lane) {
+                const float cur = a.cur[b*a.cur_stride+c], msg = a.msg[b*a.msg_stride+c];
+                const float gain = tanhf((gv[0]+gv[2])+(gv[1]+gv[3]));
+                const float forget = tanhf((fv[0]+fv[2])+(fv[1]+fv[3]));
+                y[j][local/8] = (cur - forget*cur) + gain*msg;
+            }
+        }
+    }
+    __syncthreads();
+    if (t < 32) {
+        float ss = 0;
+#pragma unroll
+        for (int j = 0; j < 3; ++j) {
+            if (j*1024 + 32*tile < 2304) { ss += y[j][t]*y[j][t]; }
+        }
+        ss = warp_reduce_sum(ss);
+        if (!t) {
+            partial[b*32 + tile] = ss;
+            if (ik_atomic_add_acq_rel(a.counters+b, 1) == 31) {
+                ik_st_relaxed(a.counters+b, 0);
+                ik_st_release(a.counters+4+b, 1);
+            }
+            while (!ik_ld_acquire(a.counters+4+b)) {}
+        }
+        __syncwarp();
+        const float scale = rsqrtf(warp_reduce_sum(partial[32*b+t])/2304 + eps);
+#pragma unroll
+        for (int j = 0; j < 3; ++j) {
+            const int c = j*1024 + 32*tile + t;
+            if (c < 2304) { ik_warp_store_q8_1(y[j][t]*scale*nw[b*nw_stride+c], out+b*72+c/32, t, true); }
+        }
+        if (!t && ik_atomic_add_acq_rel(a.counters+8+b, 1) == 31) {
+            ik_st_relaxed(a.counters+4+b, 0);
+            ik_st_relaxed(a.counters+8+b, 0);
+        }
+    }
+}
+
 void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * cur = dst->src[0];
     const ggml_tensor * msg = dst->src[1];
@@ -1678,6 +1738,25 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
             nw ? (const float *) nw->data : nullptr, nw_nb1, dst->data, eps, counters)
     static const bool group8 = getenv("IK_CTRL_APPLY8") && atoi(getenv("IK_CTRL_APPLY8"));
     const bool mr_rows = ik_mr_enabled() && n_tok > 1 && n_tok <= 8;
+    static const int pack = getenv("IK_APPLY_PACK") ? atoi(getenv("IK_APPLY_PACK")) : 0;
+    if (pack && !ik_mr_enabled() && group8 && !fused && q8 && nw && n_tok == 1 && n == 2304 && rank == 64 &&
+            B == 3 && wg->type == GGML_TYPE_F16 && wf->type == GGML_TYPE_F16 && ggml_cuda_info().devices[ctx.device].nsm == 82 &&
+            ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X && (uintptr_t)d->data%16 == 0) {
+        const int threads = pack == 1 ? 256 : pack == 2 ? 512 : 768;
+        auto kernel = pack == 1 ? ik_ctrl_apply_pack<256> : pack == 2 ? ik_ctrl_apply_pack<512> : ik_ctrl_apply_pack<768>;
+        int resident;
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, kernel, threads, 0));
+        if (resident*82 >= 32*B) {
+            ik_ctrl_pair_args a{nullptr, (const half *)wg->data, (const half *)wf->data, (const float *)cur->data,
+                (const float *)msg->data, (float *)d->data, nullptr, int(cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float)),
+                int(msg->nb[2]/sizeof(float)), 0, ik_counters(ctx, 832, 12)};
+            int stride = nw_nb1/sizeof(float);
+            const float * weights = (const float *)nw->data;
+            void * params[] = {&a, &weights, &stride, &dst->data, &y, &eps};
+            CUDA_CHECK(cudaLaunchCooperativeKernel((void *)kernel, dim3(32,B), threads, params, 0, ctx.stream()));
+            return;
+        }
+    }
     if (mr_rows && group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n % 32 == 0 &&
             (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 && (uintptr_t) wf->data % 8 == 0) {
         ik_ctrl_apply8_rows<<<dim3(n/32, B, n_tok), 256, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
