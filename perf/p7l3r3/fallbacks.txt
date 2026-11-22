@@ -1,0 +1,6 @@
+GGML_CUDA_DISABLE_GRAPHS=1 8 full vocabulary rows identical
+IK_DENSE_VISIT=0 8 full vocabulary rows identical
+IK_MR=1 8 full vocabulary rows identical
+IK_CTRL_APPLY8=0 8 full vocabulary rows identical
+IK_MIX_SPECIALIZE=0 8 full vocabulary rows identical
+IK_PROJ_CONV=0 8 full vocabulary rows identical
