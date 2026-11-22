@@ -2196,8 +2196,8 @@ static __global__ void flash_attn_ext_f16(
 
 bool ggml_cuda_flash_attn_ext_mma_f16_shall_use_sparse(const int cc, const ggml_tensor * dst, const int ncols1, const int ncols2);
 
-template <int DKQ, int DV, int ncols1, int ncols2, typename kv_t>
-static void ggml_cuda_flash_attn_ext_mma_f16_case_impl(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+template <int DKQ, int DV, int ncols1, int ncols2, typename kv_t = half2>
+void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * KQV = dst;
     const int id = ggml_cuda_get_device();
     const int cc = ggml_cuda_info().devices[id].cc;
@@ -2299,11 +2299,6 @@ static void ggml_cuda_flash_attn_ext_mma_f16_case_impl(ggml_backend_cuda_context
         (ctx, dst, fattn_kernel, nwarps, nbytes_shared_total, nbatch_fa, need_f16, need_f16, true, use_sparse, warp_size_host, async_kv_preload);
 }
 
-
-template <int DKQ, int DV, int ncols1, int ncols2>
-void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    ggml_cuda_flash_attn_ext_mma_f16_case_impl<DKQ, DV, ncols1, ncols2, half2>(ctx, dst);
-}
 
 #define DECL_FATTN_MMA_F16_CASE(DKQ, DV, ncols1, ncols2)                          \
     template void ggml_cuda_flash_attn_ext_mma_f16_case                           \

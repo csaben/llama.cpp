@@ -10107,9 +10107,13 @@ struct test_flash_attn_ext : public test_case {
 };
 
 struct test_flash_attn_ext_rel_bias : public test_flash_attn_ext {
-    explicit test_flash_attn_ext_rel_bias(int64_t n_kv)
-        : test_flash_attn_ext(128, 128, 1, {3, 1}, n_kv, 129, false, true, 0, 0, GGML_PREC_F32,
+    explicit test_flash_attn_ext_rel_bias(int64_t n_kv, int64_t n_query = 129)
+        : test_flash_attn_ext(128, 128, 1, {3, 1}, n_kv, n_query, false, true, 0, 0, GGML_PREC_F32,
                               GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}) {}
+
+    std::string vars() override {
+        return test_flash_attn_ext::vars() + ",rel_bias=1";
+    }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * out = test_flash_attn_ext::build_graph(ctx);
@@ -14333,7 +14337,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},  1025,  64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}));
     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1}, 16384,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 
-    test_cases.emplace_back(new test_flash_attn_ext_rel_bias(513));
+    for (int n_query : {7, 15, 31, 47, 129}) {
+        test_cases.emplace_back(new test_flash_attn_ext_rel_bias(513, n_query));
+    }
     test_cases.emplace_back(new test_flash_attn_ext_rel_bias(4096));
     test_cases.emplace_back(new test_flash_attn_ext_rel_bias(4097));
 

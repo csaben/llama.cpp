@@ -12,7 +12,7 @@ case ${1:?matrix, snapshot or a Phase 8 merge verification stage} in
         python3 perf/p8bc/summarize.py "$dir" >"$dir/cells.tsv"
         python3 perf/p8m/audit.py "$dir" perf/p8m/matrix/cells.tsv >"$dir/audit.txt" ;;
     tiles)
-        args=(build/bin/test-backend-ops test -b CUDA0 -o FLASH_ATTN_EXT -p 'kv=(513|409[67]),nb=129')
+        args=(build/bin/test-backend-ops test -b CUDA0 -o FLASH_ATTN_EXT -p 'rel_bias=1')
         for mode in test memcheck synccheck; do
             prefix=()
             log="$VERIFY_WORK/direct-$mode"
@@ -21,7 +21,7 @@ case ${1:?matrix, snapshot or a Phase 8 merge verification stage} in
             fi
             LD_LIBRARY_PATH="$PWD/build/bin" "${prefix[@]}" "${args[@]}" >"$log.ops" 2>&1
             echo "$mode"
-            rg ' 3/3 tests passed' "$log.ops"
+            rg ' 7/7 tests passed' "$log.ops"
             if [[ $mode != test ]]; then rg 'ERROR SUMMARY: 0 errors' "$log.sanitizer"; fi
         done >"$out/checks/q8-tiles.txt" ;;
     snapshot)
