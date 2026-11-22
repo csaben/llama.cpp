@@ -118,3 +118,32 @@ Out of scope this round: the second GPU / P2P driver, new quantizations, lossy t
 2. `bash perf/live/restore-p5.sh`.
 3. Report the best numbers, commits and tags, and what to deploy (whether the live server should switch to a new build
    and with which exact command). Don't switch it yourself.
+
+## Round 2 (added after round 1, tag `p6-window-verify-edit-235tok`)
+
+Round 1 result (RESULTS.md phase 6): exact window verify works (0 differing rows, replies byte-identical), DSpark
++19% on edits (235 vs 197 tok/s) and +10% at 16K, but −10% on new code and prose even with `LLAMA_DSPARK_ADAPTIVE=1`.
+A 4-row window costs 13.1 ms vs 4.8 ms per plain token; experts are 5.2 ms of it because the per-(token, expert)
+dp4a kernel is compute-bound, and the "read each expert once" variant was slower with that kernel.
+
+Round 2 has exactly two goals, in this order:
+
+1. **Tensor-core expert and dense matvecs for windows** (2–8 rows). Read ingine's kernels first this time (shallow
+   clone at `/tmp/claude-1000/-home-arelius-deploy/453a4d12-6978-485f-8868-dd0a2e664559/scratchpad/ingine`, or
+   re-clone into `perf/ref/`): `native/src/kernels/moe/moe.cu` (`moe_up_kernel`, `moe_down_kernel`, `slot_mask`) and
+   `native/src/kernels/dense/gemv.cu` (`gemv_mma_kernel`): `mma.m16n8k16` with the window's tokens as the n=8
+   columns, so 1–8 tokens cost the same weight bytes and instructions, plus per-visit expert dedup. On sm_86 use
+   `mma.sync` f16 (m16n8k16) or s8 (m16n8k32) with our own Q2_K / Q2_0 / IQ4_NL unpack into fragments. Note the
+   exactness tradeoff: a tensor-core reduction order differs from the single-token dp4a kernel, so rows will no longer
+   be bit-identical to plain decode. That is acceptable ONLY if greedy replies stay identical on the spec_probe prompts
+   or the divergence is tiny and you measure it (report max |logit diff| and replies that differ); otherwise make the
+   single-token path use the same kernel for n=1 and re-check plain decode speed and PPL. Say clearly which you chose.
+   Target: a 4-row window well under 10 ms.
+2. **Cheaper drafter head** (workstream 4 of round 1, not done): basalt's fold (`target.output × dspark hidden_out`
+   precomputed as one 201K × rank matrix, MIT, `src/models/inkling2/dspark.hpp`, `kernels/dspark.cu`) and/or ingine's
+   shortlist (`kernels/draft/shortlist.h`, Apache-2.0). The target head still verifies the full vocabulary, so output
+   is unchanged. Clone basalt next to ingine if needed.
+
+Then re-run the round-1 measurement table (plain vs DSpark n=2/3/4, with and without the adaptive policy, same four
+prompts, greedy-equality check) and update RESULTS.md phase 6 with a "round 2" subsection. All other rules, the stop
+signal and the finishing steps (restore with `bash perf/live/restore-p5.sh`) are unchanged.
