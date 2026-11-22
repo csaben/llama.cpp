@@ -1,0 +1,10 @@
+INKLING_ATTN:   16/16 tests passed 
+INKLING_ROUTER:   7/7 tests passed 
+INKLING_MOE_SUM_CONV: 
+SHORTCONV_RES: 
+LOOP_CTRL_APPLY:   23/23 tests passed 
+LOOP_CTRL_DOWN:   14/14 tests passed 
+RES_MIX:   70/70 tests passed 
+MUL_MAT_ID:   1081/1081 tests passed 
+SHORTCONV_RES:   28/28 tests passed 
+MUL_MAT:   2696/2696 tests passed 

@@ -681,9 +681,8 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
     const int64_t n_tok = (int64_t) args.n_t*args.n_s;
     cudaStream_t stream = ctx.stream();
 
-    if (args.ids && args.n_t > 1) {
+    if (args.ids && args.n_t > 1 && args.n_s == 1 && !taps && !args.post && d_conv == 4 && state != nullptr) {
         // a window over the state in place
-        GGML_ASSERT(args.n_s == 1 && !taps && !args.post && d_conv == 4 && state != nullptr);
         shortconv_res_rows_f32<4><<<(args.n_chan + 255)/256, 256, 0, stream>>>(args);
         return;
     }

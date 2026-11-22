@@ -1,0 +1,15 @@
+mr-n3-p0.6     code      prompt     47   384 tok   156.9 tok/s  accepted/proposed 210/378
+mr-n3-p0.6     edit      prompt   1025   384 tok   230.6 tok/s  accepted/proposed 280/296
+mr-n3-p0.6     prose     prompt     36   384 tok   139.4 tok/s  accepted/proposed 183/443
+mr-n3-p0.8     code      prompt     47   384 tok   161.3 tok/s  accepted/proposed 189/234
+mr-n3-p0.8     edit      prompt   1025   384 tok   231.8 tok/s  accepted/proposed 276/282
+mr-n3-p0.8     prose     prompt     36   384 tok   147.7 tok/s  accepted/proposed 154/238
+mr-n3-p0.95    code      prompt     47   384 tok   157.0 tok/s  accepted/proposed 156/166
+mr-n3-p0.95    edit      prompt   1025   384 tok   224.1 tok/s  accepted/proposed 270/273
+mr-n3-p0.95    prose     prompt     36   384 tok   137.8 tok/s  accepted/proposed 104/120
+mr-n5-p0.8     code      prompt     47   384 tok   149.5 tok/s  accepted/proposed 201/260
+mr-n5-p0.8     edit      prompt   1025   384 tok   234.0 tok/s  accepted/proposed 305/315
+mr-n5-p0.8     prose     prompt     36   384 tok   130.0 tok/s  accepted/proposed 157/263
+mr-n7-p0.9     code      prompt     47   384 tok   131.3 tok/s  accepted/proposed 177/205
+mr-n7-p0.9     edit      prompt   1025   384 tok   227.5 tok/s  accepted/proposed 314/325
+mr-n7-p0.9     prose     prompt     36   384 tok   118.5 tok/s  accepted/proposed 132/175

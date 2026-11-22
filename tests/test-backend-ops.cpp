@@ -5355,20 +5355,21 @@ struct test_inkling_moe : public test_case {
 struct test_inkling_moe_sum_conv : public test_case {
     const int64_t n_embd;
     const int n_used;
-    static constexpr int64_t n_conv = 4, n_cells = 3, write_cell = 2, chan_offset = 100;
+    const int64_t n_tok; // > 1: a window of tokens, the state of the last 3 written to rollback planes
+    static constexpr int64_t n_conv = 4, n_cells = 8, write_cell = 2, chan_offset = 100, plane_cells = 2;
 
     std::string vars() override {
-        return VARS_TO_STR2(n_embd, n_used);
+        return VARS_TO_STR3(n_embd, n_used, n_tok);
     }
 
-    test_inkling_moe_sum_conv(int64_t n_embd = 2304, int n_used = 8) : n_embd(n_embd), n_used(n_used) {}
+    test_inkling_moe_sum_conv(int64_t n_embd = 2304, int n_used = 8, int64_t n_tok = 1) : n_embd(n_embd), n_used(n_used), n_tok(n_tok) {}
 
     void initialize_tensors(ggml_context * ctx) override {
         std::random_device rd;
         std::default_random_engine rng(rd());
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
             if (t->type == GGML_TYPE_I32) {
-                int32_t v = rng() % n_cells;
+                int32_t v = n_tok > 1 ? write_cell : rng() % n_cells; // a window: the state in place
                 ggml_backend_tensor_set(t, &v, 0, sizeof(v));
             } else {
                 init_tensor_uniform(t);
@@ -5377,9 +5378,9 @@ struct test_inkling_moe_sum_conv : public test_case {
     }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, n_used, 1);
+        ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, n_used, n_tok);
         ggml_set_name(a, "a");
-        ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, n_used, 1);
+        ggml_tensor * w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, n_used, n_tok);
         ggml_set_name(w, "w");
         ggml_tensor * conv_w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_conv, n_embd);
         ggml_set_name(conv_w, "conv_w");
@@ -5387,12 +5388,16 @@ struct test_inkling_moe_sum_conv : public test_case {
         ggml_set_name(state, "state");
         ggml_tensor * rs_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
         ggml_set_name(rs_ids, "rs_ids");
-        ggml_tensor * residual = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+        ggml_tensor * residual = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tok);
         ggml_set_name(residual, "residual");
 
         ggml_tensor * out = ggml_inkling_moe_sum_conv(ctx, a, w, conv_w, state, rs_ids, residual, write_cell, chan_offset, 0.5f);
+        if (n_tok > 1) {
+            out->op_params[3] = (int32_t) std::min<int64_t>(n_tok, 3); // planes at cells 2, 4, 6
+            out->op_params[4] = plane_cells;
+        }
         ggml_set_name(out, "out");
-        ggml_tensor * all = ggml_concat(ctx, out, ggml_reshape_2d(ctx, state, ggml_nelements(state), 1), 0);
+        ggml_tensor * all = ggml_concat(ctx, ggml_reshape_2d(ctx, out, n_embd*n_tok, 1), ggml_reshape_2d(ctx, state, ggml_nelements(state), 1), 0);
         ggml_set_name(all, "out_all");
         return all;
     }
@@ -5509,14 +5514,15 @@ struct test_inkling_router : public test_case {
     const bool with_bias;
 
     std::string vars() override {
-        return VARS_TO_STR6(n_embd, n_states, n_expert, n_used, with_bias, with_conv);
+        return VARS_TO_STR7(n_embd, n_states, n_expert, n_used, with_bias, with_conv, n_tok);
     }
 
     const bool with_conv;
+    const int64_t n_tok; // > 1: a window of tokens (rows of the states, the route and the outputs)
     static constexpr int64_t n_conv = 4, n_cells = 3, write_cell = 1, chan_offset = 100;
 
-    test_inkling_router(int64_t n_embd = 2304, int n_states = 4, int n_expert = 128, int n_used = 8, bool with_bias = true, bool with_conv = false)
-        : n_embd(n_embd), n_states(n_states), n_expert(n_expert), n_used(n_used), with_bias(with_bias), with_conv(with_conv) {}
+    test_inkling_router(int64_t n_embd = 2304, int n_states = 4, int n_expert = 128, int n_used = 8, bool with_bias = true, bool with_conv = false, int64_t n_tok = 1)
+        : n_embd(n_embd), n_states(n_states), n_expert(n_expert), n_used(n_used), with_bias(with_bias), with_conv(with_conv), n_tok(n_tok) {}
 
     void initialize_tensors(ggml_context * ctx) override {
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
@@ -5539,18 +5545,18 @@ struct test_inkling_router : public test_case {
         const int ns = n_states > 0 ? n_states : 1;
         std::vector<ggml_tensor *> states(ns);
         for (int i = 0; i < ns; ++i) {
-            states[i] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+            states[i] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tok);
             ggml_set_name(states[i], ("s" + std::to_string(i)).c_str());
         }
         ggml_tensor * consts = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embd + n_expert); // norm weight | selection bias
         ggml_set_name(consts, "consts");
         ggml_tensor * gate_inp = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_expert);
         ggml_set_name(gate_inp, "gate_inp");
-        ggml_tensor * route = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2*n_used);
+        ggml_tensor * route = n_tok > 1 ? ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 2*n_used, n_tok) : ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2*n_used);
         ggml_set_name(route, "route");
         ggml_tensor * xq = nullptr;
         if (with_bias) { // also the quantized output
-            xq = ggml_new_tensor_1d(ctx, GGML_TYPE_Q8_1, n_embd);
+            xq = n_tok > 1 ? ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_1, n_embd, n_tok) : ggml_new_tensor_1d(ctx, GGML_TYPE_Q8_1, n_embd);
             ggml_set_name(xq, "xq");
         }
 
@@ -5575,6 +5581,14 @@ struct test_inkling_router : public test_case {
             out = ggml_inkling_router(ctx, q, states.data(), ns, consts, gate_inp, route, xq, 1e-6f, 1.0f/sqrtf(n_embd), 1e-6f, n_used, 8.0f, 1e-20f);
         }
         ggml_set_name(out, "out");
+
+        if (n_tok > 1) {
+            // every row's output and expert ids
+            ggml_tensor * ids_w = ggml_cast(ctx, ggml_cont(ctx, ggml_view_2d(ctx, route, n_used, n_tok, route->nb[1], 0)), GGML_TYPE_F32);
+            ggml_tensor * all_w = ggml_concat(ctx, ggml_reshape_2d(ctx, out, n_embd*n_tok, 1), ggml_reshape_2d(ctx, ids_w, n_used*n_tok, 1), 0);
+            ggml_set_name(all_w, "out_all");
+            return all_w;
+        }
 
         // the ids and the weight bits are part of the checked output (the readers run after the op)
         ggml_tensor * ids_f = ggml_cast(ctx, ggml_view_1d(ctx, route, n_used, 0), GGML_TYPE_F32);
@@ -12754,6 +12768,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     test_cases.emplace_back(new test_inkling_moe_sum_conv(2304, 8));
     test_cases.emplace_back(new test_inkling_moe_sum_conv(100, 3));
+    test_cases.emplace_back(new test_inkling_moe_sum_conv(2304, 8, 2));
+    test_cases.emplace_back(new test_inkling_moe_sum_conv(2304, 8, 4));
+    test_cases.emplace_back(new test_inkling_moe_sum_conv(2304, 8, 8));
+    test_cases.emplace_back(new test_inkling_moe_sum_conv(100, 3, 5));
     test_cases.emplace_back(new test_situ_q8(1152, 8));
     test_cases.emplace_back(new test_situ_q8(96, 3));
     for (ggml_type type_w : { GGML_TYPE_Q8_0, GGML_TYPE_Q6_K, GGML_TYPE_IQ4_NL }) {
@@ -12771,6 +12789,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_inkling_router(2304, 0, 128, 8, true));
     test_cases.emplace_back(new test_inkling_router(2304, 2, 128, 8, false));
     test_cases.emplace_back(new test_inkling_router(512, 5, 64, 4, true));
+    test_cases.emplace_back(new test_inkling_router(2304, 4, 128, 8, true, false, 2));
+    test_cases.emplace_back(new test_inkling_router(2304, 5, 128, 8, true, false, 4));
+    test_cases.emplace_back(new test_inkling_router(2304, 1, 128, 8, false, false, 8));
+    test_cases.emplace_back(new test_inkling_router(2304, 0, 128, 8, true, false, 3));
     for (ggml_type type : {GGML_TYPE_IQ4_NL, GGML_TYPE_Q8_0}) {
         test_cases.emplace_back(new test_inkling_moe(type, 256, 64, 8, 4, false));
         test_cases.emplace_back(new test_inkling_moe(type, 256, 64, 8, 4, true));

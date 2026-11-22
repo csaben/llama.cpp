@@ -1,0 +1,6 @@
+ad-n3-p0       code      prompt     47   384 tok   188.8 tok/s  accepted/proposed 58/114
+ad-n3-p0       edit      prompt   1025   384 tok   238.2 tok/s  accepted/proposed 280/297
+ad-n3-p0       prose     prompt     36   384 tok   189.9 tok/s  accepted/proposed 36/84
+ad-n3-p0.8     code      prompt     47   384 tok   187.2 tok/s  accepted/proposed 23/30
+ad-n3-p0.8     edit      prompt   1025   384 tok   216.8 tok/s  accepted/proposed 203/209
+ad-n3-p0.8     prose     prompt     36   384 tok   191.3 tok/s  accepted/proposed 32/44
