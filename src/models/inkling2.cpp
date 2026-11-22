@@ -337,26 +337,6 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
             row += n_piece;
         }
         fused_pending.push_back(std::move(f));
-        if (getenv("IK_DENSE_PACK") && atoi(getenv("IK_DENSE_PACK")) && type == GGML_TYPE_IQ4_NL &&
-                (n_rows == 8600 || n_rows == 8664) && n_embd == 2304 && layers[i].wo->type == type &&
-                layers[i].wo->ne[0] == 3072 && layers[i].wo->ne[1] == 2304 && ggml_is_matrix(layers[i].wo)) {
-            fused_tensor packed;
-            packed.ref = layers[i].wo;
-            packed.t = ggml_new_tensor_1d(fused_context(), GGML_TYPE_I8, ggml_nbytes(fa.w) + ggml_nbytes(packed.ref));
-            ggml_format_name(packed.t, "blk.%d.dense_iq4_codes_scales", i);
-            fa.dense_pack = packed.t;
-            fused_pending.push_back(std::move(packed));
-        }
-        const auto * down = layers[i].ffn_down_exps;
-        if (getenv("IK_Q2_PACK") && atoi(getenv("IK_Q2_PACK")) && down->type == GGML_TYPE_Q2_0 && down->ne[0] == 1152 &&
-                down->ne[1] == 2304 && down->ne[2] == 128 && ggml_is_contiguous(down)) {
-            fused_tensor packed;
-            packed.ref = layers[i].ffn_down_exps;
-            packed.t = ggml_new_tensor_1d(fused_context(), GGML_TYPE_I8, ggml_nbytes(down));
-            ggml_format_name(packed.t, "blk.%d.expert_down_codes_scales", i);
-            fa.down_pack = packed.t;
-            fused_pending.push_back(std::move(packed));
-        }
     }
 
     load_fused(ml);
@@ -370,47 +350,6 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         }
         n_fused++;
         auto & layer = layers[i];
-        if (fa.down_pack) {
-            static const auto perm = [] {
-                std::array<uint16_t, 65536> bits{};
-                for (uint32_t x = 0; x < bits.size(); ++x) {
-                    for (int j = 0; j < 4; ++j) {
-                        bits[x] |= ((x >> (2*j)) & 3) << (4*j);
-                        bits[x] |= ((x >> (2*j + 8)) & 3) << (4*j + 2);
-                    }
-                }
-                return bits;
-            }();
-            auto * down = layer.ffn_down_exps;
-            const int blocks = down->ne[0]/64*down->ne[1];
-            std::vector<uint16_t> src(9*blocks), packed(src.size());
-            for (int id = 0; id < down->ne[2]; ++id) {
-                const size_t offset = id*down->nb[2];
-                ggml_backend_tensor_get(down, src.data(), offset, down->nb[2]);
-                for (int b = 0; b < blocks; ++b) {
-                    packed[8*blocks + b] = src[9*b];
-                    for (int j = 0; j < 8; ++j) { packed[8*b + j] = perm[src[9*b + 1+j]]; }
-                }
-                ggml_backend_tensor_set(fa.down_pack, packed.data(), offset, down->nb[2]);
-            }
-        }
-        if (fa.dense_pack) {
-            size_t offset = 0;
-            for (const auto * matrix : {fa.w, layer.wo}) {
-                std::vector<uint8_t> src(ggml_nbytes(matrix)), packed(src.size());
-                ggml_backend_tensor_get(matrix, src.data(), 0, src.size());
-                const int blocks = matrix->ne[0]/32;
-                for (int64_t r = 0; r < matrix->ne[1]; ++r) {
-                    const size_t row = r*matrix->nb[1];
-                    for (int b = 0; b < blocks; ++b) {
-                        memcpy(packed.data() + row + 16*b, src.data() + row + 18*b + 2, 16);
-                        memcpy(packed.data() + row + 16*blocks + 2*b, src.data() + row + 18*b, 2);
-                    }
-                }
-                ggml_backend_tensor_set(fa.dense_pack, packed.data(), offset, packed.size());
-                offset += packed.size();
-            }
-        }
 
         const size_t row_size = ggml_row_size(fa.w->type, n_embd);
 
@@ -1086,9 +1025,6 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                             n_head, n_head_kv, n_embd_head, hp.n_relative, hp.n_shortconv_l_cache, !is_swa, recr->mctx->get_head(),
                             hp.f_qk_clip, hp.f_relative_clip, hp.f_norm_rms_eps, hp.f_log_scale_alpha, (float) hp.n_log_scale_floor,
                             1.0f/sqrtf(n_embd_head), a_type);
-                    if (!mr && n_tokens == 1 && fa.dense_pack && proj->op == GGML_OP_MUL_MAT && proj->src[0] == fa.w) {
-                        cur->src[11] = fa.dense_pack;
-                    }
                     if (mr) {
                         cur->src[10] = inp->window_kv_before;
                         ik_set_param(cur, 14, mr_planes);
@@ -1372,7 +1308,6 @@ attn_done:
             }
             cb(h, "ffn_moe_situ", il);
             ggml_tensor * d = mr_mark(ggml_mul_mat_id(ctx0, layer.ffn_down_exps, h, selected_experts)); // [n_embd, n_expert_used, 1]
-            if (!mr && n_tokens == 1 && fa.down_pack) { d->src[3] = fa.down_pack; }
             cb(d, "ffn_moe_down", il);
             if (proj_op && router_fused) {
                 // the epilogue is deferred into the next layer's fused projection op (or flushed before any other consumer)
@@ -1386,10 +1321,6 @@ attn_done:
             } else {
                 cur = ggml_inkling_moe_sum_conv(ctx0, d, weights, layer.ffn_post_conv, state, rs_ids, ffn_inp,
                         recr->mctx->get_head(), 2*n_embd_k_gqa + n_embd, conv_scale);
-                if (!mr && n_tokens == 1 && layer.ffn_down_exps->type == GGML_TYPE_Q2_0 && getenv("IK_EXPERT_TAIL") && atoi(getenv("IK_EXPERT_TAIL"))) {
-                    cur->src[6] = h;
-                    cur->src[7] = selected_experts;
-                }
                 if (mr) {
                     ik_set_param(cur, 3, mr_planes);
                     ik_set_param(cur, 4, mr_plane_cells);

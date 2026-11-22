@@ -264,12 +264,14 @@ static __global__ void res_mix_f32(const float * __restrict__ query, const ik_st
 
 // n_embd % 4 == 0 and n_embd/4 <= block_size: one float4 of every state per thread, a single pass of loads
 template <int block_size, bool q8, int NS = 0>
-static __device__ __forceinline__ void ik_mix_tile(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
+static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
         const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
-        const ik_res_mix_norm norm, int t, int iq) {
+        const ik_res_mix_norm norm) {
     const int n_states = NS ? NS : state_count;
     constexpr int n_warps = block_size/WARP_SIZE;
 
+    const int t  = blockIdx.x;
+    const int iq = blockIdx.y;
 
     const int lane = threadIdx.x % WARP_SIZE;
     const int wid  = threadIdx.x / WARP_SIZE;
@@ -392,12 +394,6 @@ static __device__ __forceinline__ void ik_mix_tile(const float4 * __restrict__ q
     } else if (k < n_embd4) {
         ((float4 *) dst_v)[row*n_embd4 + k] = y;
     }
-}
-
-template <int block_size, bool q8, int NS = 0>
-static __global__ void res_mix_f32_vec4(const float4 * query, const ik_state_ptrs st, void * dst, int n_embd4, int n_tok,
-        int n_states, int64_t q_nb1, float eps, float scale, ik_res_mix_norm norm) {
-    ik_mix_tile<block_size, q8, NS>(query, st, dst, n_embd4, n_tok, n_states, q_nb1, eps, scale, norm, blockIdx.x, blockIdx.y);
 }
 
 // The trailing normalization weight is a source but never a mixed state.
@@ -2383,8 +2379,8 @@ static __device__ __forceinline__ void ik_scan_sync() {
     }
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool late_gate = false, bool ungated = false, bool warp_split = false>
-static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, const int * ready = nullptr, int producers = 0) {
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false>
+static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
@@ -2505,7 +2501,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         qv[hh] = gate_v[hh] = rv[hh] = sink_v[hh] = 0.0f;
         if (tid < HD) {
             qv[hh]     = pr0[(int64_t) h*HD + tid]*args.consts[(int64_t) h*HD + tid];
-            if constexpr (!late_gate && !ungated) { gate_v[hh] = pr0[args.off_gate + (int64_t) h*HD + tid]; }
+            if constexpr (!warp_split && !ungated) { gate_v[hh] = pr0[args.off_gate + (int64_t) h*HD + tid]; }
         } else if (warp == 4) {
             if (lane < args.n_rel) {
                 rv[hh] = pr0[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane];
@@ -2991,15 +2987,15 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         }
     }
 
-    if constexpr (late_gate) {
+    if constexpr (warp_split) {
         if (tid == 0) {
             while (ik_ld_acquire(ready) != producers) {}
-            if constexpr (warp_split) { ik_st_relaxed(const_cast<int *>(ready), 0); }
+            ik_st_relaxed(ready, 0);
         }
         ik_scan_sync<warp_split>();
         if (tid < HD) {
 #pragma unroll
-            for (int hh = 0; hh < G; ++hh) { gate_v[hh] = pr0[3480 + (g*G + hh)*HD + tid]; }
+            for (int hh = 0; hh < G; ++hh) { gate_v[hh] = pr0[args.off_gate + (g*G + hh)*HD + tid]; }
         }
     }
     // ===== the zero sink logit, the normalization and the sigmoid gate; threads 0..127 write the heads =====
@@ -3255,7 +3251,7 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
     }
 }
 
-static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ik_dense_visit * visit) {
+static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor * dst, bool project_gates) {
     const ggml_tensor * proj    = dst->src[0];
     const ggml_tensor * consts  = dst->src[1];
     ggml_tensor       * state   = dst->src[2];
@@ -3402,15 +3398,22 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
         a.counters = ext ? nullptr : n_rows > 1 ? ik_counters(ctx, 64, a.n_head_kv*n_rows) : ik_counters(ctx, 0, a.n_head_kv); // self-resetting arrival counters
     }
 
-    if (visit) {
-        if ((!short_scan && ((visit->mode < 10 || visit->mode == 16) || !fixed || n_rows != 1 || ik_mr_enabled())) || (proj->ne[0] != (a.has_taps ? 8664 : 8600))) { return false; }
-        ggml_cuda_pool_alloc<float> projection(ctx.pool(), proj->ne[0]);
-        ggml_cuda_pool_alloc<block_q8_1> activation(ctx.pool(), 3072/QK8_1);
-        visit->activation = activation.get();
-        a.proj = projection.get();
-        a.dst = visit->mode == 2 ? dst->data : activation.get();
-        visit->counters = ik_counters(ctx, 192, 14);
-        return a.has_taps ? ik_launch_dense<1>(ctx, a, *visit) : ik_launch_dense<0>(ctx, a, *visit);
+    if (project_gates) {
+        if (!fixed || n_rows != 1 || ik_mr_enabled() || (!short_scan && a.n_kv <= 256) ||
+                proj->ne[0] != (a.has_taps ? 8664 : 8600)) {
+            return false;
+        }
+        const auto * x = proj->src[1];
+        const uintptr_t first = uintptr_t(x->data), last = first + ggml_nbytes(x);
+        if (first < uintptr_t(dst->data) + ggml_nbytes(dst) && uintptr_t(dst->data) < last) {
+            return false;
+        }
+        if (a.has_taps) {
+            ik_launch_gate_projection<1>(ctx, a, proj, short_scan);
+        } else {
+            ik_launch_gate_projection<0>(ctx, a, proj, short_scan);
+        }
+        return true;
     }
 
     const bool q8 = dst->type == GGML_TYPE_Q8_1;
@@ -3488,11 +3491,11 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
 }
 
 void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    ik_dispatch_attention(ctx, dst, nullptr);
+    ik_dispatch_attention(ctx, dst, false);
 }
 
-bool ggml_cuda_inkling_dense_visit(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ik_dense_visit visit) {
-    return ik_dispatch_attention(ctx, dst, &visit);
+bool ggml_cuda_inkling_project_attention(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    return ik_dispatch_attention(ctx, dst, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -4188,8 +4191,8 @@ static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long 
     return key;
 }
 
-template <int NS, int NC, bool MR = false, bool extended = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
-static __device__ __forceinline__ void ik_router_tile(const ik_router_args & args_in, int blocks, const int * dep = nullptr, int workers = 0) {
+template <int NS, int NC, bool MR = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
     if constexpr (MR) {
         const int row = blockIdx.y;
@@ -4229,18 +4232,6 @@ static __device__ __forceinline__ void ik_router_tile(const ik_router_args & arg
 
     // ===== all loads in one round trip: the states / query / norm weight into registers (float4, lane-consecutive),
     //       then the router row of this warp's expert into shared memory with cp.async (needed last) =====
-    auto preload = [&]() {
-        const float4 * row = (const float4 *) (args.gate_inp + (int64_t) (e0 + warp)*n_embd);
-        for (int k = lane; k < n_embd4; k += WARP_SIZE) {
-            cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(s_rows + warp*(IK_R2_MAX_EMBD/4) + k), row + k);
-        }
-        cp_async_commit_group();
-    };
-    if constexpr (extended) {
-        preload();
-        if (!tid) { while (ik_ld_acquire(dep) != workers) {} }
-        __syncthreads();
-    }
     float4 x[NS][C4], q[C4], nw[C4];
     constexpr bool has_conv = NC > 0;
 #pragma unroll
@@ -4255,10 +4246,16 @@ static __device__ __forceinline__ void ik_router_tile(const ik_router_args & arg
         q[j]  = ok && args.query ? ((const float4 *) args.query)[k] : z;
         nw[j] = ok ? ((const float4 *) args.norm_w)[k] : z;
     }
-    if constexpr (!extended) { preload(); }
+    {
+        const float4 * row = (const float4 *) (args.gate_inp + (int64_t) (e0 + warp)*n_embd);
+        for (int k = lane; k < n_embd4; k += WARP_SIZE) {
+            cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(s_rows + warp*(IK_R2_MAX_EMBD/4) + k), row + k);
+        }
+        cp_async_commit_group();
+    }
     if constexpr (has_conv) {
         // the attention-output convolution + residual: the last state (block b writes the channels of the Q8_1 blocks
-        // (k/8) % blocks == b); 4 channels per float4 slot: 4 wo values, 4*NC taps,
+        // (k/8) % gridDim.x == b); 4 channels per float4 slot: 4 wo values, 4*NC taps,
         // 4*(NC-1) past values (all 16-byte aligned: chan_offset % 4 == 0)
         const float scale = args.cv_scale;
         const int   cell  = args.cv_rs_ids[0];
@@ -4287,7 +4284,7 @@ static __device__ __forceinline__ void ik_router_tile(const ik_router_args & arg
                 cur4[c] = res4[c] + (wo4[c] + out)*scale;
             }
             x[NS - 1][j] = make_float4(cur4[0], cur4[1], cur4[2], cur4[3]);
-            if ((k/8) % blocks == blockIdx.x) {
+            if ((k/8) % gridDim.x == blockIdx.x) {
                 ((float4 *) args.attn_out)[k] = x[NS - 1][j];
             }
         }
@@ -4387,7 +4384,7 @@ static __device__ __forceinline__ void ik_router_tile(const ik_router_args & arg
     IK_RDBG_T(9); // weights ready
 
     // ===== the normalized input: shared memory for the logits; the F32 and Q8_1 outputs spread over the blocks
-    //       (block b stores the Q8_1 blocks k/8 with (k/8) % blocks == b) =====
+    //       (block b stores the Q8_1 blocks k/8 with (k/8) % gridDim.x == b) =====
     {
         const float factor = s_w[2*NS];
 #pragma unroll
@@ -4404,7 +4401,7 @@ static __device__ __forceinline__ void ik_router_tile(const ik_router_args & arg
                 y.w += (x[i][j].w*f0)*f1;
             }
             const float4 v = make_float4(factor*y.x*nw[j].x, factor*y.y*nw[j].y, factor*y.z*nw[j].z, factor*y.w*nw[j].w);
-            const bool mine = ok && (k/8) % blocks == blockIdx.x;
+            const bool mine = ok && (k/8) % gridDim.x == blockIdx.x;
             if (ok) {
                 s_x[k] = v;
             }
@@ -4438,7 +4435,7 @@ static __device__ __forceinline__ void ik_router_tile(const ik_router_args & arg
     IK_RDBG_T(3);
     __syncthreads();
     if (tid == 0) {
-        s_last = ik_atomic_add_acq_rel(args.counter, 1) == (int) blocks - 1; // releases the logits, acquires the others'
+        s_last = ik_atomic_add_acq_rel(args.counter, 1) == (int) gridDim.x - 1; // releases the logits, acquires the others'
     }
     __syncthreads();
     IK_RDBG_T(4);
@@ -4525,46 +4522,6 @@ static __device__ __forceinline__ void ik_router_tile(const ik_router_args & arg
     if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); }
 }
 
-
-template<int NS, int NC, bool MR = false>
-static __global__ void __launch_bounds__(256) inkling_router2_kernel(const ik_router_args a) {
-    ik_router_tile<NS, NC, MR>(a, gridDim.x);
-}
-
-template<int ns>
-static __global__ void __launch_bounds__(256) ik_dense_router(ik_router_args a, ik_dense_visit v) {
-    const int workers = gridDim.x - 16;
-    if (blockIdx.x < 16) {
-        ik_router_tile<ns, 0, false, true>(a, 16, v.counters + 10, workers);
-        __syncthreads();
-        if (!threadIdx.x && ik_atomic_add_acq_rel(v.counters + 11, 1) == 15) {
-            ik_st_relaxed(v.counters + 10, 0);
-            ik_st_relaxed(v.counters + 11, 0);
-        }
-        return;
-    }
-    const int warp = threadIdx.x/32, lane = threadIdx.x%32;
-    for (int row = 8*(blockIdx.x-16) + warp; row < 2304; row += 8*workers) {
-        const float y = ik_dense_row<3072>(v.wo, v.activation, row);
-        if (lane == row%2) { ik_dense_store(v.conv, v.out, row, y); }
-    }
-    __syncthreads();
-    if (!threadIdx.x) { ik_atomic_add_acq_rel(v.counters + 10, 1); }
-}
-
-template<int ns>
-static void ik_launch_dense_router(ggml_backend_cuda_context & ctx, ik_router_args a, ik_dense_visit v) {
-    const size_t shared = 9*2304*sizeof(float);
-    const auto kernel = ik_dense_router<ns>;
-    CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared));
-    int active;
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, kernel, 256, shared));
-    const int n = active*ggml_cuda_info().devices[ctx.device].nsm;
-    GGML_ASSERT(n > 16);
-    void * params[] = {&a, &v};
-    CUDA_CHECK(cudaLaunchCooperativeKernel((const void *)kernel, dim3(n), dim3(256), params, shared, ctx.stream()));
-}
-
 template <int NS, int NC>
 static void inkling_router2_launch_nc(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
     const size_t smem = (size_t) (IK_R2_WARPS + 1)*(IK_R2_MAX_EMBD/4)*sizeof(float4);
@@ -4597,7 +4554,7 @@ static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_rou
     }
 }
 
-static void ik_router_dispatch(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ik_dense_visit * visit) {
+void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
     const ggml_tensor * consts   = dst->src[1 + n_states];
@@ -4684,16 +4641,6 @@ static void ik_router_dispatch(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     a.warp_topk = warp_topk && !a.dbg_skip && !a.dbg_times && a.n_expert == 128 && a.n_used == 8 &&
             ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X;
 
-    if (visit) {
-        switch (n_states) {
-            case 1: ik_launch_dense_router<1>(ctx, a, *visit); break;
-            case 2: ik_launch_dense_router<2>(ctx, a, *visit); break;
-            case 3: ik_launch_dense_router<3>(ctx, a, *visit); break;
-            case 4: ik_launch_dense_router<4>(ctx, a, *visit); break;
-            case 5: ik_launch_dense_router<5>(ctx, a, *visit); break;
-        }
-        return;
-    }
     static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
     if (n_rows > 1) {
@@ -4726,8 +4673,4 @@ static void ik_router_dispatch(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         case 8:  inkling_router_kernel<8><<<a.n_expert/8, 8*WARP_SIZE, 0, ctx.stream()>>>(a); break;
         default: inkling_router_kernel<4><<<a.n_expert/4, 4*WARP_SIZE, 0, ctx.stream()>>>(a); break;
     }
-}
-
-void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    ik_router_dispatch(ctx, dst, nullptr);
 }

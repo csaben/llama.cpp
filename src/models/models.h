@@ -2515,8 +2515,6 @@ struct llama_model_inkling2 : public llama_model_base {
     // [wq | attn_rel | attn_sink_proj | attn_gate | wk | (attn_k_conv_proj) | wv | (attn_v_conv_proj)]
     // q/k/v are the views of the Q-, K- and V-input groups (one matmul each; the whole matrix when the inputs agree)
     struct attn_fused {
-        ggml_tensor * dense_pack = nullptr;
-        ggml_tensor * down_pack = nullptr;
         ggml_tensor * w = nullptr;
         ggml_tensor * q = nullptr; // rows [0, n_q)
         ggml_tensor * k = nullptr; // rows [n_q, n_q + n_k)

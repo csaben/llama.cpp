@@ -4599,75 +4599,22 @@ static int ik_projection_conv_end(ggml_backend_cuda_context & ctx, const ggml_cg
     return conv->op == GGML_OP_SHORTCONV_RES && conv->src[2] == mm && (conv->flags & GGML_TENSOR_FLAG_COMPUTE) ? j : i;
 }
 
-static int ik_dense_end(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int start) {
-    static const int dense_mode = ggml_cuda_env_int("IK_DENSE_VISIT", 0);
-    if (!dense_mode) { return start; }
-    int i = start;
-    ggml_tensor * mix = nullptr;
-    if (dense_mode == 13 && cgraph->nodes[i]->op == GGML_OP_RES_MIX && cgraph->nodes[i]->type == GGML_TYPE_Q8_1) {
-        mix = cgraph->nodes[i++];
-        while (i < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[i])) { ++i; }
-        if (i >= cgraph->n_nodes || cgraph->nodes[i]->op != GGML_OP_MUL_MAT || cgraph->nodes[i]->src[1]->data != mix->data ||
-                mix->ne[0] != 2304 || mix->ne[1] != 1 || (mix->ne[2] != 1 && mix->ne[2] != 3) ||
-                !ggml_is_contiguous(mix) || !ggml_get_op_params_i32(mix, 3)) { return start; }
+static int ik_attention_projection_end(ggml_backend_cuda_context & ctx, const ggml_cgraph * graph, int i) {
+    static const bool enabled = ggml_cuda_env_flag("IK_DENSE_VISIT") && !ggml_cuda_env_flag("IK_MR");
+    const ggml_tensor * mm = graph->nodes[i];
+    if (!enabled || mm->op != GGML_OP_MUL_MAT || mm->type != GGML_TYPE_F32 || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
+            mm->src[0]->type != GGML_TYPE_IQ4_NL || mm->src[0]->ne[0] != 2304 || !ggml_is_matrix(mm->src[0]) ||
+            !ggml_is_contiguous(mm->src[0]) || mm->src[1]->type != GGML_TYPE_Q8_1 || !ggml_is_contiguous(mm->src[1]) ||
+            !ggml_is_matrix(mm) || (mm->ne[1] != 1 && mm->ne[1] != 3) || !ggml_is_contiguous(mm) ||
+            ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X || !ggml_node_has_n_uses(graph, i, 1)) {
+        return i;
     }
-    auto * node = cgraph->nodes[i];
-    if (!ggml_cuda_env_flag("IK_MR") && node->op == GGML_OP_MUL_MAT && cuda_ctx->stream_context().concurrent_events.empty() &&
-            node->src[0]->type == GGML_TYPE_IQ4_NL && node->src[0]->ne[0] == 2304 && ggml_is_contiguous(node->src[0]) &&
-            ggml_is_matrix(node) && (node->ne[1] == 1 || node->ne[1] == 3) && node->src[1]->type == GGML_TYPE_Q8_1 &&
-            ggml_is_contiguous(node->src[1]) && ggml_node_has_n_uses(cgraph, i, 1)) {
-        auto next = [&](int j) {
-            do { ++j; } while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j]));
-            return j;
-        };
-        const int j = next(i), k = next(j);
-        if (k < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_INKLING_ATTN && cgraph->nodes[j]->src[0] == node &&
-                (cgraph->nodes[j]->src[4]->ne[2] == 256 || dense_mode >= 10) && ggml_node_has_n_uses(cgraph, j, 1) &&
-                cgraph->nodes[k]->op == GGML_OP_MUL_MAT && cgraph->nodes[k]->src[1] == cgraph->nodes[j]) {
-            const int end = ik_projection_conv_end(*cuda_ctx, cgraph, k);
-            ik_dense_visit v{};
-            if (end > k && ggml_cuda_inkling_projection_conv(*cuda_ctx, cgraph->nodes[k], cgraph->nodes[end], &v.conv)) {
-                v.wi = (const block_iq4_nl *) node->src[0]->data;
-                v.x = (const block_q8_1 *) node->src[1]->data;
-                v.wo = (const block_iq4_nl *) cgraph->nodes[k]->src[0]->data;
-                v.out = (float *) cgraph->nodes[end]->data;
-                v.mode = dense_mode == 13 ? 10 : dense_mode;
-                v.mix = mix;
-                if (dense_mode == 16 || dense_mode == 17) {
-                    const auto * packed = cgraph->nodes[j]->src[11];
-                    if (!packed || packed->type != GGML_TYPE_I8 || !ggml_is_vector(packed) ||
-                            ggml_nbytes(packed) != ggml_nbytes(node->src[0]) + ggml_nbytes(cgraph->nodes[k]->src[0])) { return start; }
-                    v.wi = (const block_iq4_nl *)packed->data;
-                    v.wo = (const block_iq4_nl *)((const char *)packed->data + ggml_nbytes(node->src[0]));
-                }
-                v.prefetch = ggml_cuda_env_int("IK_DENSE_PREFETCH", 1);
-                int last = end;
-                if (dense_mode == 9) {
-                    v.mode = 7;
-                    const int r = next(end);
-                    if (r < cgraph->n_nodes) {
-                        auto * router = cgraph->nodes[r];
-                        if (router->op == GGML_OP_INKLING_ROUTER && !ggml_get_op_params_i32(router, 10)) {
-                            const int ns = ggml_get_op_params_i32(router, 6);
-                            if (ns >= 1 && ns <= 5 && router->src[ns]->data == v.out &&
-                                    ggml_is_vector(router) && router->ne[0] == 2304 && router->src[2+ns]->ne[1] == 128 &&
-                                    ggml_get_op_params_i32(router, 3) == 8) {
-                                v.router = router;
-                                last = r;
-                            }
-                        }
-                    }
-                }
-                // The two-stage variant publishes attention before the input projection has drained.
-                const uintptr_t x = uintptr_t(v.x), y = uintptr_t(cgraph->nodes[j]->data);
-                if ((dense_mode != 2 || x + ggml_nbytes(node->src[1]) <= y || y + ggml_nbytes(cgraph->nodes[j]) <= x) &&
-                        ggml_cuda_inkling_dense_visit(*cuda_ctx, cgraph->nodes[j], v)) {
-                    return dense_mode == 2 ? j : last;
-                }
-            }
-        }
-    }
-    return start;
+    int j = i + 1;
+    while (j < graph->n_nodes && ggml_cuda_is_view_or_noop(graph->nodes[j])) { ++j; }
+    if (j == graph->n_nodes) { return i; }
+    const ggml_tensor * attn = graph->nodes[j];
+    return attn->op == GGML_OP_INKLING_ATTN && attn->src[0] == mm && attn->type == GGML_TYPE_Q8_1 &&
+           ggml_is_vector(attn) && ggml_is_contiguous(attn) && (attn->flags & GGML_TENSOR_FLAG_COMPUTE) ? j : i;
 }
 
 // try and fuse nodes and return the number of nodes to skip
@@ -4679,19 +4626,11 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
-
-    static const int tail_mode = ggml_cuda_env_int("IK_EXPERT_TAIL", 0);
-    if (tail_mode && node->op == GGML_OP_MUL_MAT_ID && !ggml_cuda_env_flag("IK_MR") && cuda_ctx->stream_context().concurrent_events.empty() &&
-            !(node->flags & GGML_TENSOR_FLAG_OUTPUT) && ggml_node_has_n_uses(cgraph, i, 1)) {
-        int j = i + 1;
-        while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j])) { ++j; }
-        if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_INKLING_MOE_SUM_CONV && cgraph->nodes[j]->src[0] == node &&
-                ggml_cuda_inkling_expert_tail(*cuda_ctx, node, cgraph->nodes[j], tail_mode)) { return j - i; }
-    }
-    const int dense_end = ik_dense_end(cuda_ctx, cgraph, i);
-    if (dense_end > i) { return dense_end - i; }
-
     if (node->op == GGML_OP_MUL_MAT && cuda_ctx->stream_context().concurrent_events.empty()) {
+        const int attn = ik_attention_projection_end(*cuda_ctx, cgraph, i);
+        if (attn > i && ggml_cuda_inkling_project_attention(*cuda_ctx, cgraph->nodes[attn])) {
+            return attn - i;
+        }
         const int j = ik_projection_conv_end(*cuda_ctx, cgraph, i);
         if (j > i && ggml_cuda_inkling_projection_conv(*cuda_ctx, node, cgraph->nodes[j])) {
             return j - i;
@@ -5565,20 +5504,8 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     return 0;
 }
 
-#ifdef USE_CUDA_GRAPH
-#include "../../../perf/p7l3r2/floor.cuh"
-#endif
-
 static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
     bool graph_evaluated_or_captured = false;
-#ifdef USE_CUDA_GRAPH
-    static const bool floor_requested = ggml_cuda_env_flag("IK_TOKEN_FLOOR");
-    static thread_local bool floor_done = false;
-    static thread_local int floor_step = 0;
-    const bool measure_floor = floor_requested && !floor_done && !use_cuda_graph && ik_floor_graph(cgraph) &&
-            floor_step++ == ggml_cuda_env_int("IK_FLOOR_STEP", 0);
-    std::vector<ik_floor_op> floor_ops;
-#endif
 
     // flag used to determine whether it is an integrated_gpu
     const bool integrated            = ggml_cuda_info().devices[cuda_ctx->device].integrated;
@@ -5733,11 +5660,6 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     continue;
                 }
 
-#ifdef USE_CUDA_GRAPH
-                if (measure_floor && (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID)) {
-                    floor_ops.push_back(ik_floor_capture(*cuda_ctx, cgraph, i));
-                }
-#endif
                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
 
                 if (nodes_to_skip != 0) {
@@ -5777,12 +5699,6 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     try_launch_concurrent_event(node);
                }
             }
-#ifdef USE_CUDA_GRAPH
-            if (measure_floor) {
-                floor_done = true;
-                ik_floor_measure(*cuda_ctx, floor_ops);
-            }
-#endif
         }
 
 #ifdef USE_CUDA_GRAPH
@@ -5947,6 +5863,10 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
         // TODO: consolidate fusion paths in graph_optimize and graph_compute
         ggml_cuda_set_device(cuda_ctx->device);
         for (int i = 0; i < cgraph->n_nodes; ++i) {
+            const int attn = ik_attention_projection_end(*cuda_ctx, cgraph, i);
+            if (attn > i) {
+                params->add_alloc_dep(params->user_data, cgraph->nodes[i]->src[1], cgraph->nodes[attn]);
+            }
             const int j = ik_projection_conv_end(*cuda_ctx, cgraph, i);
             if (j > i) {
                 params->add_alloc_dep(params->user_data, cgraph->nodes[i]->src[1], cgraph->nodes[j]);

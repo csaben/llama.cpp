@@ -112,22 +112,3 @@ static __device__ __forceinline__ int ik_atomic_add_acq_rel(int * p, const int v
     asm volatile("atom.acq_rel.gpu.global.add.s32 %0, [%1], %2;" : "=r"(old) : "l"(p), "r"(v) : "memory");
     return old;
 }
-
-static __device__ __forceinline__ void ik_dense_store(ik_projection_conv conv, float * out, int row, float cur) {
-    const float * past = conv.past + conv.ids[0]*conv.past_cell + 3*row;
-    const float * tap = conv.taps + 4*row;
-    const float a = past[0], b = past[1], c = past[2];
-    float sum = 0.0f;
-    sum += a*tap[0];
-    sum += b*tap[1];
-    sum += c*tap[2];
-    sum += cur*tap[3];
-    float y = (cur + sum)*conv.scale;
-    if (conv.residual) {
-        y += conv.residual[row];
-    }
-    out[row] = y;
-    conv.state[3*row] = b;
-    conv.state[3*row + 1] = c;
-    conv.state[3*row + 2] = cur;
-}
