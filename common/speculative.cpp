@@ -1475,6 +1475,7 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
         }
         const char * round = getenv("LLAMA_DSPARK_ROUND");
         if (dev_anchor && use_dev_features && round && atoi(round) && this->params.p_min == 0 && head_n < block_size - 1) {
+            std::fill(std::begin(previous_margins), std::end(previous_margins), 4.0f);
             device_draft = llama_set_ctx_state_src(this->params.ctx_tgt, this->params.ctx_dft);
             if (!device_draft) {
                 llama_set_ctx_state_src(this->params.ctx_tgt, nullptr);
@@ -1885,7 +1886,7 @@ public:
             const int width = adapt.on ? adaptive_window(previous_margins, n) : n;
             first.result->assign(width, first.id_last);
             first.device_draft = width > 0;
-            pending_ids = width > 0 ? first.result : nullptr;
+            pending_ids = first.result;
             if (t_prof) { common_spec_prof_add(SPEC_PROF_DRAFT_DECODE, ggml_time_us() - t_prof); }
             return;
         }

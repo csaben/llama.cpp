@@ -456,6 +456,14 @@ private:
 
     llm_graph_result * gf_res_prev_active = nullptr;
 
+    struct window_graph {
+        ggml_backend_sched_ptr sched;
+        std::array<llm_graph_result_ptr, 2> results;
+        llm_graph_result * active = nullptr;
+    };
+
+    std::map<uint32_t, window_graph> window_graphs;
+
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;
 

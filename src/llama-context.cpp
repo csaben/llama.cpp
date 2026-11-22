@@ -814,6 +814,7 @@ void llama_context::sched_reserve() {
 
     LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
 
+    window_graphs.clear();
     gf_res_prev_active = nullptr;
 
     gf_res_reserve->set_max_nodes(max_nodes);
@@ -1064,6 +1065,10 @@ bool llama_context::memory_update(bool optimize) {
                 }
         }
 
+        if (!window_graphs.empty()) {
+            synchronize();
+            window_graphs.clear();
+        }
         // reset the previous graph results to make sure that they won't be reused
         // TODO: make mctx->apply() report if a graph reserve is needed, then reset graph results only if the memory module reset the scheduler
         for (auto & res : gf_res_prev) {
@@ -2362,6 +2367,37 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         LLAMA_LOG_ERROR("%s: could not reserve space for batch with %d outputs\n", __func__, n_outputs_all);
         return -2;
     };
+
+    // A scheduler owns its graph's allocation. Keep both while alternating injection, draft and verify shapes.
+    static const bool cache_windows = getenv("LLAMA_DSPARK_GRAPHS") && atoi(getenv("LLAMA_DSPARK_GRAPHS"));
+    const bool cache_draft = has_state_row && cparams.ctx_state_src == this;
+    const bool cache_verify = layer_inp_dev && model.arch == LLM_ARCH_INKLING2_LOOP && n_tokens_all <= 8;
+    window_graph * window = nullptr;
+    if (cache_windows && (cache_draft || cache_verify) && !cparams.pipeline_parallel && cparams.n_seq_max == 1 &&
+            n_tokens_all <= cparams.n_ubatch && !graph_reuse_disable) {
+        window = &window_graphs[n_tokens_all];
+        if (!window->sched) {
+            const auto & limits = sched_params_cur;
+            window->sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), limits.max_nodes, false, limits.op_offload));
+            ggml_backend_sched_set_copy_callback(window->sched.get(), sched_copy_experts, this);
+            ggml_backend_sched_set_realloc_callback(window->sched.get(), sched_graph_realloc, this);
+            for (auto & r : window->results) {
+                r = std::make_unique<llm_graph_result>(limits.max_nodes);
+            }
+        }
+    }
+    auto swap_window = [&]() {
+        if (window) {
+            std::swap(sched, window->sched);
+            std::swap(gf_res_prev, window->results);
+            std::swap(gf_res_prev_active, window->active);
+        }
+    };
+    swap_window();
+    struct restore_window {
+        decltype(swap_window) & fn;
+        ~restore_window() { fn(); }
+    } restore = { swap_window };
 
     // start a new sampling transaction for this logical batch
     for (const auto & entry : sampling.samplers) {
