@@ -1,0 +1,8 @@
+libllama-server-impl.so /home/arelius/inkling-live-bin-p8m-f7f505c/libllama-server-impl.so
+libllama-common.so.1 /home/arelius/inkling-live-bin-p8m-f7f505c/libllama-common.so.1
+libmtmd.so.1 /home/arelius/inkling-live-bin-p8m-f7f505c/libmtmd.so.1
+libllama.so.1 /home/arelius/inkling-live-bin-p8m-f7f505c/libllama.so.1
+libggml.so.1 /home/arelius/inkling-live-bin-p8m-f7f505c/libggml.so.1
+libggml-base.so.1 /home/arelius/inkling-live-bin-p8m-f7f505c/libggml-base.so.1
+libggml-cpu.so.1 /home/arelius/inkling-live-bin-p8m-f7f505c/libggml-cpu.so.1
+libggml-cuda.so.1 /home/arelius/inkling-live-bin-p8m-f7f505c/libggml-cuda.so.1
