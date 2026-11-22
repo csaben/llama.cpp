@@ -1,0 +1,25 @@
+total GPU kernel time 4951.9 ms, 76144 launches
+   2476.5 ms  50.0%    7936 x    312.1 us  mul_mat_q
+    796.7 ms  16.1%    1536 x    518.7 us  flash_attn_ext_f16
+    275.4 ms   5.6%    1536 x    179.3 us  rel_bias_four_heads
+    175.9 ms   3.6%    3872 x     45.4 us  res_mix_f32_vec4
+    137.6 ms   2.8%    3072 x     44.8 us  situ_kernel
+    124.3 ms   2.5%    7936 x     15.7 us  quantize_mmq_q8_1
+     97.5 ms   2.0%    4864 x     20.0 us  mul_mat_q_stream_k_fixup
+     96.9 ms   2.0%    1536 x     63.1 us  ik_ctrl_stack_norm
+     91.6 ms   1.8%    6144 x     14.9 us  ampere_sgemm_32x128_tn
+     87.7 ms   1.8%    1536 x     57.1 us  ik_ctrl_apply_elem
+     79.0 ms   1.6%    3072 x     25.7 us  ampere_sgemm_64x32_sliced1x4_tn
+     77.8 ms   1.6%    1536 x     50.6 us  moe_sum_f32
+     70.4 ms   1.4%    1536 x     45.8 us  cutlass::Kernel
+     60.2 ms   1.2%    3072 x     19.6 us  shortconv_res_f32
+     59.5 ms   1.2%    3072 x     19.4 us  k_set_rows_quant
+     44.3 ms   0.9%     768 x     57.6 us  rms_norm_mul_inplace_f32
+     40.6 ms   0.8%    3072 x     13.2 us  l2_clip_f32
+     39.0 ms   0.8%    3072 x     12.7 us  mm_ids_helper
+     33.1 ms   0.7%    1536 x     21.5 us  flash_attn_stream_k_fixup_general
+     30.7 ms   0.6%    3072 x     10.0 us  shortconv_res_post_f32
+     19.6 ms   0.4%    4608 x      4.3 us  ik_half_to_float
+     11.5 ms   0.2%     800 x     14.4 us  rms_norm_f32
+      8.0 ms   0.2%    3072 x      2.6 us  splitKreduce_kernel
+      7.0 ms   0.1%    1536 x      4.5 us  topk_moe_cuda
