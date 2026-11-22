@@ -33,6 +33,12 @@ struct ik_projection_conv {
 
 bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst, ik_projection_conv * params = nullptr);
 void ggml_cuda_ctrl_half(cudaStream_t stream, ggml_tensor * down, float2 * terms, bool message);
-bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml_tensor * down, int mode);
+bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml_tensor * down, int mode, const float2 * prepared = nullptr);
 bool ggml_cuda_ctrl_pair(ggml_backend_cuda_context & ctx, ggml_tensor * down, ggml_tensor * apply, int mode);
 bool ggml_cuda_inkling_layer(ggml_backend_cuda_context & ctx, ggml_tensor * attn, ggml_tensor * wo, ggml_tensor * conv, ggml_tensor * router, ggml_tensor * up, ggml_tensor * sum);
+struct ik_message_pass {
+    const half * weights[48];
+    const float * inputs[48];
+    float eps[48];
+};
+void ggml_cuda_message_pass(cudaStream_t stream, const ik_message_pass & pass, float2 * terms);
