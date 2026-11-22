@@ -1389,6 +1389,7 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
     bool pick = false;
 
     bool device_draft = false;
+    bool cached_policy = false;
     llama_tokens * pending_ids = nullptr;
     float previous_margins[9] = {};
     llama_pos dev_pos0 = -1;
@@ -1477,6 +1478,9 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
         if (dev_anchor && use_dev_features && round && atoi(round) && this->params.p_min == 0 && head_n < block_size - 1) {
             std::fill(std::begin(previous_margins), std::end(previous_margins), 4.0f);
             device_draft = llama_set_ctx_state_src(this->params.ctx_tgt, this->params.ctx_dft);
+            const char * policy = getenv("LLAMA_DSPARK_POLICY");
+            const char * graphs = getenv("LLAMA_DSPARK_GRAPHS");
+            cached_policy = device_draft && graphs && atoi(graphs) && policy && atoi(policy);
             if (!device_draft) {
                 llama_set_ctx_state_src(this->params.ctx_tgt, nullptr);
             }
@@ -1545,6 +1549,7 @@ protected:
         float  last_margin[ADAPT_T_MAX] = {};
         int64_t   last_us = 0;
         llama_pos last_pos0 = -1;
+        double pos_ok[ADAPT_T_MAX] = {}, pos_tested[ADAPT_T_MAX] = {};
         double cost[ADAPT_T_MAX + 1] = {};   // ms of a step by kind (decayed mean)
         int    cost_n[ADAPT_T_MAX + 1] = {}; // steps of this kind seen (the first is a warm-up and not counted in cost)
         double ok[ADAPT_BINS], tested[ADAPT_BINS];
@@ -1562,7 +1567,14 @@ protected:
 
     // cost of a step of kind t in units of a plain step, before any measurement (windows: perf/p6/mr_check on the
     // round 3 build; the drafter and its injection: about 0.25 of a plain step)
-    static double adaptive_shape(int t) {
+    double adaptive_shape(int t) const {
+        if (cached_policy) {
+            // Relative round costs for cached shapes on the 3090, including injection and draft.
+            static const double cached[] = { 1.0, 1.20, 1.67, 1.99, 2.35, 2.87 };
+            if (t < (int) (sizeof(cached)/sizeof(cached[0]))) {
+                return cached[t];
+            }
+        }
         static const double rows[ADAPT_T_MAX] = { 1.0, 1.62, 2.0, 2.25, 2.7, 3.05, 3.35, 3.7, 4.1 };
         return t <= 0 ? 1.0 : rows[std::min(t, ADAPT_T_MAX) - 1] + 0.25;
     }
@@ -1626,6 +1638,8 @@ protected:
             }
             const int n_acc = (int) (pos0 - adapt.last_pos0) - 1;
             for (int i = 0; i < adapt.last_n && i <= n_acc; ++i) {
+                adapt.pos_ok[i] = 0.97*adapt.pos_ok[i] + (i < n_acc);
+                adapt.pos_tested[i] = 0.97*adapt.pos_tested[i] + 1.0;
                 const int b = adaptive_bin(adapt.last_margin[i]);
                 adapt.ok[b]     = 0.98*adapt.ok[b] + (i < n_acc ? 1.0 : 0.0);
                 adapt.tested[b] = 0.98*adapt.tested[b] + 1.0;
@@ -1664,10 +1678,15 @@ protected:
         double best = 1.0/adaptive_cost(1), best_drafted = 0.0;
         int    best_k = 0;
         for (int k = 1; k <= n; ++k) {
-            all *= adaptive_chance(margin[k - 1]);
+            double chance = adaptive_chance(margin[k - 1]);
+            if (cached_policy) {
+                // Before this draft finishes, use recent acceptance at the same position.
+                chance = (adapt.pos_ok[k - 1] + 6.0*chance)/(adapt.pos_tested[k - 1] + 6.0);
+            }
+            all *= chance;
             e   += all;
             // another window size than the last one rebuilds the target graph (about 1 ms on the host)
-            const double r = e/(adaptive_cost(k + 1) + (adapt.last_window != 0 && adapt.last_window != k + 1 ? 1.0 : 0.0));
+            const double r = e/(adaptive_cost(k + 1) + (!cached_policy && adapt.last_window != 0 && adapt.last_window != k + 1 ? 1.0 : 0.0));
             best_drafted = std::max(best_drafted, r);
             if (r > best) {
                 best   = r;
