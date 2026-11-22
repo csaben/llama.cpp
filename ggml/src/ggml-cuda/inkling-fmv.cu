@@ -1167,6 +1167,63 @@ static __global__ void ik_projection_conv_kernel(const block_iq4_nl * weights, c
     }
 }
 
+template<int rows>
+static __global__ void ik_projection_conv_cta(const block_iq4_nl * weights, const block_q8_1 * x, float * out, ik_projection_conv conv) {
+    const int lane = threadIdx.x, warp = threadIdx.y, first = blockIdx.x*rows;
+    const int tid = WARP_SIZE*warp + lane;
+    const int my_row = first + lane;
+    float a = 0, b = 0, c = 0, residual = 0;
+    float4 taps{};
+    if (warp == 0 && lane < rows) {
+        const volatile float * past = conv.past + conv.ids[0]*conv.past_cell + 3*my_row;
+        a = past[0];
+        b = past[1];
+        c = past[2];
+        taps = ((const float4 *) conv.taps)[my_row];
+        residual = conv.residual ? conv.residual[my_row] : 0.0f;
+    }
+    constexpr int blocks = 3072/QK4_NL;
+    float acc[rows] = {};
+#pragma unroll
+    for (int i = 0; i < blocks; i += 64) {
+        const int k = i + tid/2;
+        if (k < blocks) {
+#pragma unroll
+            for (int r = 0; r < rows; ++r) {
+                acc[r] = ik_iq4_acc(acc[r], weights + (first+r)*blocks + k, x + k, 2*(lane%2));
+            }
+        }
+    }
+    __shared__ float part[3][rows][WARP_SIZE];
+    if (warp > 0) {
+#pragma unroll
+        for (int r = 0; r < rows; ++r) { part[warp-1][r][lane] = acc[r]; }
+    }
+    __syncthreads();
+    if (warp == 0) {
+#pragma unroll
+        for (int r = 0; r < rows; ++r) {
+            float sum = __fadd_rn(__fadd_rn(__fadd_rn(acc[r], part[0][r][lane]), part[1][r][lane]), part[2][r][lane]);
+            sum = warp_reduce_sum(sum);
+            // The two-row reference writes from lane row%2. Move that lane's rounded result to the writer.
+            sum = __shfl_sync(0xffffffff, sum, (first+r)%2);
+            if (lane == r) {
+                float v = 0;
+                v += a*taps.x;
+                v += b*taps.y;
+                v += c*taps.z;
+                v += sum*taps.w;
+                float y = (sum + v)*conv.scale;
+                if (conv.residual) { y += residual; }
+                out[my_row] = y;
+                conv.state[3*my_row] = b;
+                conv.state[3*my_row + 1] = c;
+                conv.state[3*my_row + 2] = sum;
+            }
+        }
+    }
+}
+
 bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst) {
     const auto * w = mm->src[0], * x = mm->src[1];
     const auto * past = dst->src[0], * taps = dst->src[1], * residual = dst->src[4], * state = dst->src[5], * ids = dst->src[6];
@@ -1190,6 +1247,18 @@ bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const gg
     ik_projection_conv conv = {(const float *) past->data, (const float *) taps->data, residual ? (const float *) residual->data : nullptr,
                                (float *) state->data, (const int32_t *) ids->data, int64_t(past->nb[2]/sizeof(float)), ggml_get_op_params_f32(dst, 0)};
     static const int rows = getenv("IK_PROJ_CONV_ROWS") ? atoi(getenv("IK_PROJ_CONV_ROWS")) : 2;
+    static const int cta = getenv("IK_PROJ_CONV_CTA") ? atoi(getenv("IK_PROJ_CONV_CTA")) : 0;
+    if (cta && ((uintptr_t) conv.taps % 16) == 0) {
+        auto launch = [&](auto count) {
+            ik_projection_conv_cta<decltype(count)::value><<<2304/count, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
+                    (const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
+        };
+        if (cta == 1) { launch(std::integral_constant<int, 1>{}); }
+        else if (cta == 2) { launch(std::integral_constant<int, 2>{}); }
+        else if (cta == 4) { launch(std::integral_constant<int, 4>{}); }
+        else { launch(std::integral_constant<int, 8>{}); }
+        return true;
+    }
     if (rows == 1) {
         ik_projection_conv_kernel<1><<<2304/4, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>((const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
     } else {
