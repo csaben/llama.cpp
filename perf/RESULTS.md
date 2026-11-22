@@ -1335,3 +1335,32 @@ The staged server and its eight project libraries are in `~/inkling-live-bin-p7-
 - ingine's device-ordered verify, accept, commit and draft sequence informed the stream handoff. Its attention processes multiple queries against cache cells. Phase 7 uses ggml device rows and CUDA stream events with the existing server transaction. No ingine source was copied for Phase 7. [Apache-2.0 round implementation](https://github.com/satellitedown/inkling-2-mini-abliterated-ingine/blob/306eaa8a90c9840f042a59d565f6dc4536bbb5ea/native/src/model/spec.cpp#L181-L201), [attention](https://github.com/satellitedown/inkling-2-mini-abliterated-ingine/blob/306eaa8a90c9840f042a59d565f6dc4536bbb5ea/native/src/kernels/attn/attn.cu).
 - basalt's graph cache by shape and selection of the window by expected accepted tokens per millisecond informed the scheduler cache and policy retune. Phase 7 uses its own ggml allocation and acceptance statistics. [MIT graph cache](https://github.com/jesdga95/basalt/blob/ae82a4841c95f6a05ca8ca2331ef6af7ca844aef/src/models/inkling2/session.cpp#L752-L766), [draft policy](https://github.com/jesdga95/basalt/blob/ae82a4841c95f6a05ca8ca2331ef6af7ca844aef/src/spec/draft_policy.cpp).
 - The pinned input uploader uses ordinary ggml host buffers and asynchronous CUDA copies. The timeline probe records CUDA events around graph launches on the same stream and queries completed pairs later. [CUDA asynchronous transfers](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#asynchronous-and-overlapping-transfers-with-computation), [CUDA event timing](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__EVENT.html).
+
+## Phase 7b
+
+The local merge `1a45f6d` combines Phase 7's four-row verification with lever 3 round 2 at `e03d993`. The single-row output-projection fold and overlapped gate keep the lever 3 dispatch conditions. MR/MMA keeps its exact verification schedule. All Phase 7b measurements used the 24 GiB RTX 3090 at PCI 03:00.0, physical GPU1.
+
+### Combined plain decode
+
+The same `llama-bench` driver loaded either the frozen Phase 7 libraries from `~/inkling-live-bin-p7-59c71a9` or the merged libraries. Each invocation ran tg128 three times per depth with default attention, Q8_0 K/V, flash attention and full offload. The runs were ordered Phase 7, merged, merged, Phase 7. [Paired raw output](p7b/combined/).
+
+| Initial tokens | Phase 7, first | Merged, first | Merged, second | Phase 7, second | Change in mean rate |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 219.17 | 228.07 | 228.07 | 220.32 | +3.8% |
+| 4,096 | 201.16 | 208.61 | 208.55 | 201.49 | +3.6% |
+| 16,384 | 190.13 | 196.12 | 196.11 | 190.40 | +3.1% |
+| 32,768 | 176.19 | 182.49 | 182.56 | 176.13 | +3.6% |
+
+The frozen and merged libraries returned byte-identical FP32 logits over all 200,058 vocabulary entries in 88 rows. The probe read 64 rows after a 200-token prefix and eight after each of 4K, 16K and 32K. Each of the two merged correctness runs (defaults and release flags) matched single-token decode in all 1,699 historical trace rows and 1,015 boundary, mixed-width and rollback rows. The separate four-depth sweep compared 1,024 more rows with window packing on and off. Maximum absolute logit difference was zero. All six greedy probes matched Phase 7 in both runs. Prefill PPL was 3.0530, decode PPL was 4.1979 with default attention and 4.2038 with MR/MMA, and all 1,108 selected backend cases passed. [Logit fingerprints](p7b/combined/logits.sha256), [default checks](p7b/checks-default/), [preset checks](p7b/checks/), [depth sweep](p7b/depths.txt).
+
+### Short controls before the policy fix
+
+The entries are median decode tok/s over three independent 384-token requests per prompt. All three messages and every emitted token ID matched the same-flags plain reference. The cap-3 policy inherited from Phase 7 produced almost the same prose regression as a forced three-token draft. [Merged controls and comparisons](p7b/merged-384/).
+
+| Configuration | Code | Edit | Prose | Edit at 16K | Edit at 32K |
+|---|---:|---:|---:|---:|---:|
+| Plain MR/MMA | 212.5 | 202.6 | 211.5 | 184.9 | 171.0 |
+| Fixed 2 | 236.5 | 291.1 | 191.5 | 263.0 | 237.9 |
+| Fixed 3 | 233.4 | 324.0 | 172.6 | 289.2 | 250.1 |
+| Fixed 4 | 209.5 | 310.8 | 148.3 | 275.9 | 228.4 |
+| Previous adaptive 3 | 230.4 | 322.9 | 172.5 | 291.6 | 245.8 |
