@@ -1390,6 +1390,7 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
 
     bool device_draft = false;
     llama_tokens * pending_ids = nullptr;
+    float previous_margins[9] = {};
     llama_pos dev_pos0 = -1;
     int32_t dev_count = 0;
     size_t context_rows = 0;
@@ -1473,7 +1474,7 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             }
         }
         const char * round = getenv("LLAMA_DSPARK_ROUND");
-        if (dev_anchor && use_dev_features && round && atoi(round) && params.p_min == 0 && head_n < block_size - 1) {
+        if (dev_anchor && use_dev_features && round && atoi(round) && this->params.p_min == 0 && head_n < block_size - 1) {
             device_draft = llama_set_ctx_state_src(this->params.ctx_tgt, this->params.ctx_dft);
             if (!device_draft) {
                 llama_set_ctx_state_src(this->params.ctx_tgt, nullptr);
@@ -1796,6 +1797,12 @@ public:
             for (size_t i = 0; i < pending_ids->size(); ++i) {
                 std::memcpy(&(*pending_ids)[i], picks + 2*i, sizeof(llama_token));
             }
+            if (adapt.on) {
+                for (int i = 0; i < head_n; ++i) {
+                    previous_margins[i] = picks[2*i + 1];
+                    adapt.last_margin[i] = previous_margins[i];
+                }
+            }
             pending_ids = nullptr;
         }
         if (batch_in.size() > 0 && batch_in.has_token() != batch_in.has_embd() && defer_features(batch_in)) {
@@ -1873,10 +1880,12 @@ public:
             return;
         }
         auto & first = dparams[0];
-        if (device_draft && first.allow_device_draft && !adapt.on) {
-            first.result->assign(params.n_max, first.id_last);
-            first.device_draft = true;
-            pending_ids = first.result;
+        if (device_draft && first.allow_device_draft) {
+            const int n = std::min(params.n_max, first.n_max);
+            const int width = adapt.on ? adaptive_window(previous_margins, n) : n;
+            first.result->assign(width, first.id_last);
+            first.device_draft = width > 0;
+            pending_ids = width > 0 ? first.result : nullptr;
             if (t_prof) { common_spec_prof_add(SPEC_PROF_DRAFT_DECODE, ggml_time_us() - t_prof); }
             return;
         }

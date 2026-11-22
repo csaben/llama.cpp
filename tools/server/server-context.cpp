@@ -3871,8 +3871,7 @@ private:
                             /* .temp     = */ slot.task->params.sampling.temp,
                             /* .seed     = */ slot.task->params.sampling.seed,
                             /* .allow_device_draft = */ slots.size() == 1 && !use_ckpt_tgt && !use_ckpt_dft &&
-                                !getenv("IK_TRACE") && n_draft_max <= (int) llama_n_rs_seq(ctx_tgt),
-
+                                !getenv("IK_TRACE") && common_speculative_n_max(spec.get()) <= (int) llama_n_rs_seq(ctx_tgt),
                         };
 
                         drafting.push_back(&slot);
