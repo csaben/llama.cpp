@@ -1743,3 +1743,16 @@ The intermediate builds used the frozen P8m snapshot with just the new CUDA libr
 ### Loading the bias and KV inside the MMA kernel
 
 The compact-bias prototype kept the original MMA accumulation and F16 KV conversion, looking up the projected relative-position bias while filling the shared mask tile. It measured 3,283 / 2,968 / 2,656 tok/s, with PPL 3.0530. A separate prototype kept the dense bias and unpacked Q8_0 directly into shared memory for every prefill attention layer and length. It measured 3,478 / 3,179 / 2,861 tok/s, with PPL 3.0530. This motivated a narrower dispatch for long caches. [Compact bias](p9/compact/), [direct tiles](p9/direct/), [Unsloth quantized KV reference](https://github.com/unslothai/llama.cpp/commit/7db4a7064).
+
+### DSpark graph reuse and pausing
+
+The release already caches target verifier graphs by width and can pause or shorten drafting using measured cost. On the 24 GiB 3090 we compared that policy with the model-only acceptance EMA in upstream PR 32773 (0.15 smoothing, 0.33 cutoff after eight rounds, 64-token pause). The draft-confidence threshold remained zero. Each cell is the median of three 384-token requests. The first and last release runs bracketed the other policies. Disabling graph reuse also disables the guarded history policy in this fork. All variants reproduced the same plain messages and token IDs. [Samples and byte checks](p9/policies/), [upstream PR](https://github.com/ggml-org/llama.cpp/pull/32773), [evaluated revision](https://github.com/ggml-org/llama.cpp/commit/61031e7d2d989a7237587d2685f4aced1ac373d8).
+
+| Policy, tok/s | Code | Prose | Agent |
+|---|---:|---:|---:|
+| plain | 224.4 | 224.4 | 217.5 |
+| release | 255.4 | 223.9 | 302.6 |
+| nocache | 223.7 | 216.1 | 246.2 |
+| model-only | 234.5 | 202.7 | 268.5 |
+| ema | 236.8 | 215.4 | 267.4 |
+| release-after | 255.9 | 224.3 | 300.0 |
