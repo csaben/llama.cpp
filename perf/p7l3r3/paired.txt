@@ -1,0 +1,112 @@
+version=off depth=0
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        223.06 ± 2.10 |
+
+build: 0eb06fd (218)
+version=on depth=0
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        224.77 ± 1.89 |
+
+build: 0eb06fd (218)
+version=on depth=0
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        224.72 ± 2.33 |
+
+build: 0eb06fd (218)
+version=off depth=0
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.97 ± 1.76 |
+
+build: 0eb06fd (218)
+version=off depth=4096
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |   tg128 @ d4096 |        204.36 ± 3.57 |
+
+build: 0eb06fd (218)
+version=on depth=4096
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |   tg128 @ d4096 |        207.49 ± 3.59 |
+
+build: 0eb06fd (218)
+version=on depth=4096
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |   tg128 @ d4096 |        207.39 ± 3.73 |
+
+build: 0eb06fd (218)
+version=off depth=4096
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |   tg128 @ d4096 |        205.30 ± 3.60 |
+
+build: 0eb06fd (218)
+version=off depth=16384
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        192.26 ± 2.92 |
+
+build: 0eb06fd (218)
+version=on depth=16384
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        192.97 ± 4.57 |
+
+build: 0eb06fd (218)
+version=on depth=16384
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        194.06 ± 3.15 |
+
+build: 0eb06fd (218)
+version=off depth=16384
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        192.24 ± 2.94 |
+
+build: 0eb06fd (218)
+version=off depth=32768
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d32768 |        177.82 ± 2.47 |
+
+build: 0eb06fd (218)
+version=on depth=32768
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d32768 |        179.45 ± 2.25 |
+
+build: 0eb06fd (218)
+version=on depth=32768
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d32768 |        179.42 ± 2.27 |
+
+build: 0eb06fd (218)
+version=off depth=32768
+start_temp_C=63
+| model                          |       size |     params | backend    | ngl | type_k | type_v |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | -----: | --: | --------------: | -------------------: |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d32768 |        177.49 ± 2.34 |
+
+build: 0eb06fd (218)
