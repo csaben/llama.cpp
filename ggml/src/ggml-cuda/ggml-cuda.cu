@@ -5632,6 +5632,63 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     return 0;
 }
 
+// Diagnostic: initialize valid activation blocks and choose eight distinct experts per visit.
+static __global__ void ik_replay_inputs(block_q8_1 * x, int32_t * ids) {
+    const int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i < 384) { ids[i] = (i/8*23 + (i%8)*13)%128; }
+    if (i < 1024*32) {
+        x[i/32].qs[i%32] = (i%32) - 15;
+        if (i%32 == 0) { x[i/32].ds = make_half2(0.03125f, 0.5f); }
+    }
+}
+
+static bool ik_is_replay_graph(const ggml_cgraph * g) {
+    int attn = 0, dense = 0, routed = 0;
+    for (int i = 0; i < g->n_nodes; ++i) {
+        const auto * op = g->nodes[i];
+        if (op->op == GGML_OP_INKLING_ATTN) {
+            if (op->ne[0] != 3072 || ggml_nelements(op->src[6]) != 1) { return false; }
+            ++attn;
+        } else if (op->op == GGML_OP_MUL_MAT || op->op == GGML_OP_MUL_MAT_ID) {
+            if (!ggml_is_quantized(op->src[0]->type) || ggml_nelements(op) > 201024 ||
+                    ggml_nelements(op->src[1]) > 32768 || !ggml_is_contiguous(op)) { return false; }
+            if (op->op == GGML_OP_MUL_MAT_ID) {
+                if (op->src[0]->ne[2] != 128 || ggml_nelements(op->src[2]) != 8) { return false; }
+                ++routed;
+            } else { ++dense; }
+        }
+    }
+    return attn == 48 && dense == 97 && routed == 96;
+}
+
+static void ik_replay_matvec(ggml_backend_cuda_context & ctx, ggml_cgraph * g, int index, block_q8_1 * x, int32_t * ids, float * out) {
+    const auto * src = g->nodes[index];
+    auto mm = *src, act = *mm.src[1];
+    act.type = GGML_TYPE_Q8_1;
+    act.nb[0] = sizeof(block_q8_1);
+    act.nb[1] = ggml_row_size(act.type, act.ne[0]);
+    act.nb[2] = act.ne[1]*act.nb[1];
+    act.nb[3] = act.ne[2]*act.nb[2];
+    act.data = x;
+    mm.src[1] = &act;
+    mm.data = out;
+    if (mm.op == GGML_OP_MUL_MAT_ID) {
+        auto route = *mm.src[2];
+        route.data = ids;
+        mm.src[2] = &route;
+        if (!ggml_cuda_inkling_q2_down(ctx, &mm)) {
+            ggml_cuda_mul_mat_vec_q(ctx, mm.src[0], &act, &route, &mm);
+        }
+    } else if (mm.ne[1] == 3) {
+        int j = index + 1;
+        while (j < g->n_nodes && ggml_cuda_is_view_or_noop(g->nodes[j])) { ++j; }
+        GGML_ASSERT(j < g->n_nodes && g->nodes[j]->op == GGML_OP_INKLING_ATTN);
+        ggml_cuda_inkling_segmented_projection(ctx, &mm, g->nodes[j]);
+    } else {
+        ggml_cuda_mul_mat_vec_q(ctx, mm.src[0], &act, nullptr, &mm);
+    }
+}
+
 static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
     bool graph_evaluated_or_captured = false;
 
@@ -5737,6 +5794,44 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 stream_ctx.concurrent_events.clear();
             }
 
+            static const int requested_replay = ggml_cuda_env_int("IK_DIAG_MATVECS_ONLY", 0);
+            const bool replay = requested_replay && !should_launch_concurrent_events && ik_is_replay_graph(cgraph);
+            ggml_cuda_pool_alloc<block_q8_1> replay_x(cuda_ctx->pool());
+            ggml_cuda_pool_alloc<int32_t> replay_ids(cuda_ctx->pool());
+            ggml_cuda_pool_alloc<float> replay_out(cuda_ctx->pool());
+            ggml_cuda_pool_alloc<char> zero(cuda_ctx->pool());
+            cudaEvent_t fork = nullptr, done = nullptr;
+            const bool two_branches = replay && requested_replay >= 2;
+            int routes = 0;
+            if (replay) {
+                replay_x.alloc(1024);
+                replay_ids.alloc(384);
+                replay_out.alloc(201024);
+                ik_replay_inputs<<<128, 256, 0, cuda_ctx->stream()>>>(replay_x.get(), replay_ids.get());
+                if (two_branches) {
+                    GGML_ASSERT(ggml_cuda_graph_chunk_size() == 0);
+                    zero.alloc(201024*sizeof(float));
+                    CUDA_CHECK(cudaMemsetAsync(zero.get(), 0, 201024*sizeof(float), cuda_ctx->stream()));
+                    CUDA_CHECK(cudaEventCreateWithFlags(&fork, cudaEventDisableTiming));
+                    CUDA_CHECK(cudaEventCreateWithFlags(&done, cudaEventDisableTiming));
+                    CUDA_CHECK(cudaEventRecord(fork, cuda_ctx->stream()));
+                    cuda_ctx->curr_stream_no = 1;
+                    CUDA_CHECK(cudaStreamWaitEvent(cuda_ctx->stream(), fork));
+                    if (requested_replay != 4) {
+                        for (int k = 0; k < cgraph->n_nodes; ++k) {
+                            auto * m = cgraph->nodes[k];
+                            if (m->op == GGML_OP_MUL_MAT || m->op == GGML_OP_MUL_MAT_ID) {
+                                ik_replay_matvec(*cuda_ctx, cgraph, k, replay_x.get(), replay_ids.get() + (routes/2%48)*8, replay_out.get());
+                                routes += m->op == GGML_OP_MUL_MAT_ID;
+                            }
+                        }
+                        GGML_ASSERT(routes == 96);
+                    }
+                    CUDA_CHECK(cudaEventRecord(done, cuda_ctx->stream()));
+                    cuda_ctx->curr_stream_no = 0;
+                    if (requested_replay == 3) { CUDA_CHECK(cudaStreamWaitEvent(cuda_ctx->stream(), done)); }
+                }
+            }
             int gap_mask = 0;
 #if defined(USE_CUDA_GRAPH) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11040
             static const int requested = getenv("IK_GAP_MASK") ? atoi(getenv("IK_GAP_MASK")) : 0;
@@ -5792,6 +5887,35 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     }
                 }
 
+                if (two_branches) {
+                    if (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID ||
+                            ggml_cuda_is_view_or_noop(node) || !(node->flags & GGML_TENSOR_FLAG_COMPUTE)) {
+                        continue;
+                    }
+                    ggml_tensor glue = *node;
+                    ggml_tensor input[GGML_MAX_SRC];
+                    for (int k = 0; k < GGML_MAX_SRC; ++k) {
+                        const auto * v = node->src[k];
+                        if (!v) { continue; }
+                        const auto * root = v->view_src ? v->view_src : v;
+                        if (root->op == GGML_OP_MUL_MAT || root->op == GGML_OP_MUL_MAT_ID) {
+                            input[k] = *v;
+                            size_t offset = v->view_src ? v->view_offs : 0;
+                            GGML_ASSERT(offset + ggml_nbytes(v) <= 201024*sizeof(float));
+                            input[k].data = zero.get() + offset;
+                            glue.src[k] = &input[k];
+                        }
+                    }
+                    GGML_ASSERT(ggml_cuda_compute_forward(*cuda_ctx, &glue));
+                    continue;
+                }
+                if (replay) {
+                    if (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) {
+                        ik_replay_matvec(*cuda_ctx, cgraph, i, replay_x.get(), replay_ids.get() + (routes/2%48)*8, replay_out.get());
+                        routes += node->op == GGML_OP_MUL_MAT_ID;
+                    }
+                    continue;
+                }
                 prev_i = i;
 
                 if (ggml_cuda_is_view_or_noop(node)) {
@@ -5846,6 +5970,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 if (!is_concurrent_event_active) {
                     try_launch_concurrent_event(node);
                }
+            }
+            if (two_branches) {
+                CUDA_CHECK(cudaStreamWaitEvent(cuda_ctx->stream(), done));
+                CUDA_CHECK(cudaEventDestroy(fork));
+                CUDA_CHECK(cudaEventDestroy(done));
             }
         }
 
