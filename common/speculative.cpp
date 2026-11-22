@@ -1405,6 +1405,10 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             }
         }
 
+        if (has_rnn_context && this->params.n_max > 0) {
+            // the head graph stops after the positions that are read (see graph_inkling2); an existing value wins
+            setenv("LLAMA_DSPARK_HEAD_N", std::to_string(this->params.n_max).c_str(), 0);
+        }
         if (has_rnn_context) {
             const llama_model * model_tgt = llama_get_model(this->params.ctx_tgt);
             if (n_embd_tgt != n_embd_dec || target_layer_ids[target_layer_ids_n - 1] != llama_model_n_layer(model_tgt)) {

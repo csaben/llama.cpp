@@ -1,0 +1,2 @@
+240 rows in 48 windows after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+180 rows in 36 windows after a 1500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0

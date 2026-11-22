@@ -1062,7 +1062,16 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
     }
     cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
     res->t_embd = cur;
-    auto * base = build_lora_mm(target->output, cur, target->output_s);
+    // LLAMA_DSPARK_HEAD_N=n (set by the drafter from --spec-draft-n-max): only the first n draft positions are read, so
+    // the head (a full-vocabulary matvec and a first-maximum search per position, each feeding the next) stops there
+    // and the base logits are computed for those columns only. The n drafts are unchanged. One sequence per batch.
+    int64_t n_head = block - 1;
+    if (const char * env = getenv("LLAMA_DSPARK_HEAD_N")) {
+        if (nb == 1 && block <= hparams.dflash_block_size && atoi(env) >= 1) {
+            n_head = std::min<int64_t>(n_head, atoi(env));
+        }
+    }
+    auto * base = build_lora_mm(target->output, n_head < block - 1 ? ggml_view_2d(ctx0, cur, n_embd, n_head + 1, cur->nb[1], 0) : cur, target->output_s);
     ggml_prec_set_acc(base, GGML_PREC_F32);
     if (block > hparams.dflash_block_size) {
         res->t_logits = ggml_cont(ctx0, ggml_view_2d(ctx0, base, hparams.n_vocab_unpadded, n_tokens, base->nb[1], 0));
@@ -1078,6 +1087,11 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
     tie_rank = ggml_scale_bias(ctx0, tie_rank, -1.0f, hparams.n_vocab_unpadded);
     auto * prev = ids;
     for (int64_t i = 1; i < block; ++i) {
+        if (i > n_head) {
+            // an unread position: any column keeps the shape
+            logits = ggml_concat(ctx0, logits, ggml_view_2d(ctx0, base, base->ne[0], 1, base->nb[1], 0), 1);
+            continue;
+        }
         auto * col = build_inkling2_head(*this, model, *target, prev, state, column(cur, i), column(base, i), context);
         logits = ggml_concat(ctx0, logits, col, 1);
         // Select the first maximum, independent of backend argmax tie order.
