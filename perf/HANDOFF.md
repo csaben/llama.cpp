@@ -15,7 +15,7 @@ The staged build is `c71f680`, local tag `p7-final-edit-324tok`, on branch `inkl
 - The snapshot is `~/inkling-live-bin-p7-c71f680`. All nine hashes and the library search paths verified. The manual [deploy script](live/deploy-p7.sh) was syntax-checked and left unexecuted. Phase 7 touched no live service or container and made no remote repository changes.
 - [Full results, sources, commands and tradeoffs](RESULTS.md#phase-7-levers-1-2), [long matrix](p7/final3000/), [short matrix](p7/final384/), [GPU timelines](p7/final-profile/), [plain and correctness checks](p7/checks/), [snapshot manifest](p7/snapshot.sha256).
 
-The reversed-order controls caught a 0.26-0.90% default plain shortfall in `c71f680`. New inference build `59c71a9` selects the tested queued input path for single-row Q8 Inkling decode. Its median plain and MR/MMA throughput now exceeds Round 4 at every required depth without enabling Phase 7 flags. The release correctness and served matrices are running on GPU1.
+The reversed-order controls caught a 0.26-0.90% default plain shortfall in `c71f680`. New inference build `59c71a9` selects the tested queued input path for single-row Q8 Inkling decode. Its median plain and MR/MMA throughput now exceeds Round 4 at every required depth without enabling Phase 7 flags. Both release correctness batteries passed, and all 30 long comparisons matched plain. Fixed n3 gave 287.4 / 277.3 / 277.4 tok/s on the three long edits. The short medians and final depth sweep are running on GPU1.
 
 # Phase 6 hand-off (keep current; newest status first)
 
