@@ -5004,10 +5004,11 @@ static void inkling_router2_launch_rows(ggml_backend_cuda_context & ctx, const i
 
 template <int NS>
 static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
+    static const bool direct = getenv("IK_ROUTER_DIRECT_ONLY") && atoi(getenv("IK_ROUTER_DIRECT_ONLY"));
     if (a.wo_out) {
         GGML_ASSERT(a.cv_n_conv == 4);
         inkling_router2_launch_nc<NS, 4>(ctx, a);
-    } else if (ik_dependency_fusion(ctx) && a.n_embd == 2304 && a.n_expert == 128 && a.n_used == 8 && a.warp_topk && !a.dbg_times) {
+    } else if ((!direct || a.query) && ik_dependency_fusion(ctx) && a.n_embd == 2304 && a.n_expert == 128 && a.n_used == 8 && a.warp_topk && !a.dbg_times) {
         inkling_router2_kernel<NS, 0, false, true><<<32, IK_R2_BLOCK, 4*576*sizeof(float), ctx.stream()>>>(a);
     } else {
         inkling_router2_launch_nc<NS, 0>(ctx, a);
@@ -5016,7 +5017,8 @@ static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_rou
 
 void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     static const int plain = getenv("IK_CONTROLLED_ROUTER") ? atoi(getenv("IK_CONTROLLED_ROUTER")) : 0;
-    if (plain == 1 && ggml_cuda_controlled_route(ctx, nullptr, dst, 1)) { return; }
+    static const int width = getenv("IK_CONTROLLED_SINGLE_ROWS") ? atoi(getenv("IK_CONTROLLED_SINGLE_ROWS")) : 4;
+    if (plain == 1 && ggml_cuda_controlled_route(ctx, nullptr, dst, width == 8 ? 3 : width == 2 ? 4 : 1)) { return; }
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
     const ggml_tensor * consts   = dst->src[1 + n_states];

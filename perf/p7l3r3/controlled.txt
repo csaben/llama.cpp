@@ -1,0 +1,14 @@
+mode=1 exact
+r3-controlled-1.sqlite           24.0 controller/router pairs per token, 8.669 us/pair, 24 specialized launches/token
+mode=2 exact
+r3-controlled-2.sqlite           24.0 controller/router pairs per token, 13.771 us/pair, 24 specialized launches/token
+mode=-2 exact
+r3-controlled--2.sqlite          24.0 controller/router pairs per token, 14.432 us/pair, 24 specialized launches/token
+mode=3 exact
+r3-controlled-3.sqlite           24.0 controller/router pairs per token, 11.116 us/pair, 24 specialized launches/token
+mode=-3 exact
+r3-controlled--3.sqlite          24.0 controller/router pairs per token, 13.043 us/pair, 24 specialized launches/token
+mode=4 exact
+r3-controlled-4.sqlite           24.0 controller/router pairs per token, 19.318 us/pair, 24 specialized launches/token
+mode=-4 exact
+r3-controlled--4.sqlite          24.0 controller/router pairs per token, 20.140 us/pair, 24 specialized launches/token
