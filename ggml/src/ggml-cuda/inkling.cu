@@ -2508,7 +2508,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
     const ik_attn_args & args = MR || HAS_TAPS >= 0 ? args_m : args_in;
 
     const int g     = MR ? blockIdx.y : blockIdx.x;
-    const int part_g = ROW_COLS ? 3*g + blockIdx.x : g;
+    const int part_g = ROW_COLS ? 3*g + blockIdx.x%4 : g;
     const int split = MR ? blockIdx.z : blockIdx.y;
     const int tid   = threadIdx.x;
     const int lane  = tid % WARP_SIZE;
@@ -3137,12 +3137,13 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
 // The two limbs of four query rows occupy the eight MMA columns for one query head.
 template <int TAPS>
 static __global__ void __launch_bounds__(IK_A2_BLOCK, 1) inkling_attn_window_cols(const ik_attn_args a) {
+    const int base = (blockIdx.x/4)*4;
     ik_attn_args first = a;
-    ik_window_splits(first, a.kv_idxs, 0);
-    if (first.n_kv != a.n_kv) {
+    ik_window_splits(first, a.kv_idxs, base);
+    if (base + 4 > a.mr_rows || first.n_kv != a.n_kv) {
         ik_attn2<block_q8_0, true, 3, true, true, TAPS>(a, nullptr, blockIdx.x, nullptr);
-    } else if (blockIdx.x < 3) {
-        ik_attn2<block_q8_0, true, 4, true, true, TAPS, false, false, false, true>(a, nullptr, 0, nullptr);
+    } else if (blockIdx.x%4 < 3) {
+        ik_attn2<block_q8_0, true, 4, true, true, TAPS, false, false, false, true>(a, nullptr, base, nullptr);
     }
 }
 
@@ -3557,8 +3558,8 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             else                 { inkling_attn_kv_rows_kernel<block_q8_0, 0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
             static const int shared_min = getenv("IK_WINDOW_SCAN_MIN") ? atoi(getenv("IK_WINDOW_SCAN_MIN")) : 0;
             static const int tile_rows = getenv("IK_WINDOW_TILE_ROWS") ? atoi(getenv("IK_WINDOW_TILE_ROWS")) : 0;
-            static const bool cols = getenv("IK_WINDOW_COLS") && atoi(getenv("IK_WINDOW_COLS"));
-            if (fixed && cols && n_rows == 4) {
+            static const int cols = getenv("IK_WINDOW_COLS") ? atoi(getenv("IK_WINDOW_COLS")) : 0;
+            if (fixed && ((cols && n_rows == 4) || (cols >= 2 && n_rows >= 4))) {
                 if (a.has_taps) { inkling_attn_window_cols<1><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a); }
                 else            { inkling_attn_window_cols<0><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a); }
             } else if (fixed && tile_rows >= 2 && a.kv_per_split <= 256 && (uintptr_t) a.k_cache % 8 == 0 && (uintptr_t) a.v_cache % 8 == 0) {
