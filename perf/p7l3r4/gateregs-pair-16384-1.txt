@@ -1,0 +1,12 @@
+IK_GATE_REGISTERS=0 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        196.86 ± 2.06 |
+build: 812b439 (231)
+IK_GATE_REGISTERS=1 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        196.62 ± 1.56 |
+build: 812b439 (231)
+IK_GATE_REGISTERS=1 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        195.88 ± 1.56 |
+build: 812b439 (231)
+IK_GATE_REGISTERS=0 start_C=87
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        193.71 ± 0.84 |
+build: 812b439 (231)

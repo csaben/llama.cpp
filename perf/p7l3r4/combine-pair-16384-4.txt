@@ -1,0 +1,12 @@
+IK_WARP_COMBINE=0 start_C=82
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        196.00 ± 0.80 |
+build: 812b439 (231)
+IK_WARP_COMBINE=4 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        196.74 ± 1.78 |
+build: 812b439 (231)
+IK_WARP_COMBINE=4 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        195.88 ± 1.84 |
+build: 812b439 (231)
+IK_WARP_COMBINE=0 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        195.91 ± 2.01 |
+build: 812b439 (231)
