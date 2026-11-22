@@ -147,3 +147,25 @@ Round 2 has exactly two goals, in this order:
 Then re-run the round-1 measurement table (plain vs DSpark n=2/3/4, with and without the adaptive policy, same four
 prompts, greedy-equality check) and update RESULTS.md phase 6 with a "round 2" subsection. All other rules, the stop
 signal and the finishing steps (restore with `bash perf/live/restore-p5.sh`) are unchanged.
+
+## Round 3 (after tag `p6-r2-mma-fold-edit-273tok`)
+
+Goal: **≥ 300 tok/s on the edit prompts** (edit and edit@16K) with DSpark, while new code and prose are never slower
+than plain decode (the policy must turn drafting off where it loses). Round 2: n=3 edit 272.9 tok/s at 3.76 tokens per
+step, i.e. ~13.8 ms per step, of which a 3-row window is ~9.7 ms; the rest is drafter + host round trip.
+
+1. **Profile one verify round end to end** (nsys on the server, `perf/p6/prof_server.sh`) and itemize the ~4 ms outside
+   the window: drafter, logits copy, host accept/sample, graph rebuild/launch, KV bookkeeping.
+2. **Device-side round** (ingine `model/spec.cpp`): accept/rollback, drafter commit and next draft on the GPU with one
+   host sync per round; CUDA graph reuse per window size.
+3. **Drafter shortlist** (ingine `kernels/draft/shortlist.h`, Apache-2.0): score only frequent + special + context
+   tokens; target still verifies the full vocabulary.
+4. **Retune `LLAMA_DSPARK_ADAPTIVE`** to round-2 costs (it now switches off n=3 edit, 273 -> 192); per-step choice of
+   n in {0,2,3,4} from measured cost and draft confidence (basalt `draft_policy.cpp` `choose_window`, MIT).
+5. **Merge the plain-decode stream** when it is finished: branch `inkling-3090-plain` (worktree `~/llama.cpp-plain`,
+   Codex; router warp top-k, short 256-cell attention schedule, two-row Q2_0 down: 207 -> 215 tok/s on GPU0; see its
+   `perf/RESULTS_PLAIN.md`). Check `systemctl --user is-active inkling-codex-plain` is inactive before merging; its
+   short-attention path is disabled under IK_MR, keep windows exact.
+
+Re-run the measurement table (plain, DSpark n=2/3/4 with and without the policy, four prompts, greedy equality) and
+add a "Round 3" subsection to RESULTS.md. Same rules, stop signal and finishing (`bash perf/live/restore-p5.sh`).
