@@ -82,3 +82,9 @@ The isolated 384-token agent replay averaged 285.5 tok/s frozen, 290.6 new cap 3
 The isolated 3000-token agent replay averaged 320.1 tok/s frozen, 319.9 new cap 3 and 319.7 new cap 6. The process order was frozen/3/6/6/3/frozen. [Isolated agent](p8bc/paired/agent-3000.txt).
 
 A separate tool-enabled replay stopped naturally at 777 tokens. Cap 6 and plain produced identical full messages and IDs at 241.0 and 190.6 tok/s respectively. [Natural tool reply](p8bc/paired/natural.txt).
+
+## Stream C baseline
+
+The saved Stream B runtime ran three llama-bench repetitions per length at batch 2,048, microbatch 512, flash attention and Q8_0 KV. At 4K / 16K / 32K it measured 2,892 / 2,675 / 2,443 prompt tok/s. Three uncached tool-follow-up requests at each length had median client TTFT of 1.755 / 6.820 / 14.636 seconds for 4,171 / 16,459 / 32,843 actual prompt tokens. The 8 x 2,048 WikiText control reproduced 3.0530 PPL. The tool replay includes tokenization, prompt evaluation and streaming to the first visible or reasoning delta. [Benchmark samples, client timings and PPL](p8bc/prefill/base/), [benchmark runner](p8bc/prefill.sh), [tool replay](p8bc/ttft.py).
+
+Nsight Systems with CUDA graph node tracing attributed 58.3% of 4K GPU kernel time to MMQ, 8.7% to FlashAttention and 6.7% to relative bias. At 32K those shares were 49.6%, 19.7% and 7.8%. At 4K the 32-column Q2_K and Q2_0 expert kernels alone consumed 480 and 164 ms out of 1,380 ms. [4K profile](p8bc/prefill/base/pp4096_cuda_gpu_kern_sum.csv), [16K profile](p8bc/prefill/base/pp16384_cuda_gpu_kern_sum.csv), [32K profile](p8bc/prefill/base/pp32768_cuda_gpu_kern_sum.csv), [profiler wrapper](p6/prof.sh).
