@@ -5,8 +5,8 @@ export P8_GPU=1
 source perf/p8bc/env.sh
 width=${1:?candidate width}
 export SPEC_KINDS=code,edit,prose,agent LLAMA_DSPARK_ADAPTIVE=1
-export SPEC_SERVER_BIN="$HOME/inkling-live-bin-p8m-$(git rev-parse --short p8m-merged)/llama-server"
-snapshot=$(dirname "$SPEC_SERVER_BIN")
+snapshot=${2:?staged snapshot directory}
+export SPEC_SERVER_BIN="$snapshot/llama-server"
 for pass in off1 on1 on2 off2; do
     export LD_LIBRARY_PATH="$snapshot"
     if [[ $pass == off* ]]; then export LD_LIBRARY_PATH="$PWD/build/p8m/lookup-off:$snapshot"; fi

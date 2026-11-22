@@ -1684,3 +1684,5 @@ GPU1 ran frozen A / merged / merged / frozen A, three samples per depth in each 
 ### Target microbatch choice
 
 Use 512/512 target/draft microbatches with logical batch 2,048. A 2,048/512 target/draft split reproduced its own same-flags plain messages and IDs for the 32K edit and agent at both budgets. It changed prefill PPL from the release target of 3.0530 to 3.0509. Against the 512 target, both split budgets first diverged at output token 49 on the agent and 153 on edit at 32K (one-based). The 16K TTFT saving was 0.204 s at cap 6. [Split PPL and full messages](p8m/split/), [driver](p8m/split.sh), [512 control](p8m/matrix/main/).
+
+On the 65,536-token slot, both settings completed three uncached 64,587-token tool follow-ups plus 128 generated tokens. At this depth, 512/512 measured median TTFT 30.100 s with 7,880 MiB free at minimum. The split measured 30.644 s with 2,180 MiB free at minimum. The larger target microbatch fits on GPU1 under the measured load. The 512/512 choice preserves the released numerics and leaves more room. [512/512 samples and memory](p8m/ttft/release-64k/), [2,048/512 samples and memory](p8m/ttft/split-64k/).
