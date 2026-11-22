@@ -1,5 +1,9 @@
 # GPU0 Phase 7 handoff
 
+Round 2 is on branch `inkling-3090-lever3`. The selected candidate is tagged `p7l3r2-gate-overlap`. [Round 2 handoff](#round-2-in-progress), [streaming floor and experiments](RESULTS_LEVER3.md#round-2-on-gpu0)
+
+## Round 1
+
 Finished on branch `inkling-3090-lever3`. The selected source is `2a132fc`, tagged `p7l3-exact-fold-219tok`. The final report and validation are tagged `p7l3-final-219tok`. [Results, replay flags and reproduction](RESULTS_LEVER3.md)
 
 Plain tg128 reached **219.23, 200.86, 187.12 and 173.51 tok/s** at depths 0, 4096, 16384 and 32768. The fresh 16264c6-equivalent baseline measured 217.75, 198.50, 185.95 and 170.84. A same-binary off/on/on/off comparison gained 1.27%, 1.52%, 2.05% and 1.73%. The fold runs by default on the matching GA10x decode shape. Set `IK_PROJ_CONV=0` for the control. `IK_MR=1` uses the established DSpark path. [Baseline](p7l3/baseline.txt), [selected build](p7l3/final.txt), [paired results](RESULTS_LEVER3.md#plain-single-token-decode)
@@ -27,3 +31,7 @@ Splitting the long-cache block into eight attention warps and four parallel gate
 The layout-enabled floor probe checked three distinct, live 48-visit routing traces at corpus positions 200, 212 and 248. Native and lossless dense-packed layouts both stayed below 2.81 ms in this build. The expert experiment permutes unchanged Q2_0 bits so each dp4a input needs two fewer byte-permute instructions. At all 44 eligible visits, a second kernel joins all eight expert slots per output tile and applies the real FFN convolution/state update. The traced 4-row native-weight fusion took 12.70 us versus 12.17 us for the graph pair. The real mix extension ran at 24 of 48 visits. The selected implementation will keep just the gate overlap and reuse the graph allocator and the existing output projection. [Three-route audit](p7l3r2/layout-floor.txt)
 
 The selected candidate keeps the Q8 activation live through attention with the existing CUDA allocator callback and reuses the native output projection/conv. No repacked model or extra activation copy is required. All 48 visits appeared in Nsight. The interval fell from 31.803 to 30.143 us/visit in the same build, and the first 64 full-vocabulary rows were bit-identical. Use IK_DENSE_VISIT=1 to enable it. A clean archival build of 16264c6 and long-context validation are in build/p7l3r2. [Off](p7l3r2/selected-trace-0.txt), [on](p7l3r2/selected-trace-1.txt)
+
+The exact 16264c6 archival build and the selected build agree on both requested PPL workloads. All 64 vocabulary rows after 200 tokens, and eight rows each after 4096, 16384 and 32768 tokens, matched byte for byte. The controlled four-depth benchmarks start at or below 63 C on GPU0. The supplemental prototype also puts the entire dense chain and the next direct router in the same cooperative launch. [Logits](p7l3r2/logits.txt), [PPL](p7l3r2/ppl.txt)
+
+A bitwise floor directly measured 820 CTAs on 82 distinct SMs and matched all 2,494,400 production FP32 outputs. It took 2.775 ms against 2.935/2.948 ms for stock. The complete dense-plus-router resident kernel is also exact, including its top-8 selections as consumed by the following experts. At the 24 direct visits it took 49.23-49.62 us against 40.80 us for the dense kernel plus stock router. The corrected native/packed expert epilogues also reproduce the reference. [Bitwise floor](p7l3r2/bitwise-floor.txt), [router coverage and timing](p7l3r2/resident-router-trace.txt), [prototype hashes](p7l3r2/extended-hashes.txt)

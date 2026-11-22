@@ -98,6 +98,60 @@ static __device__ __forceinline__ float ik_floor_dot(const char * w, const block
     return warp_reduce_sum(sum);
 }
 
+template<ggml_type type, int k>
+static __device__ __forceinline__ float ik_floor_exact(const ik_floor_tile & t, int row) {
+    constexpr int qk = type == GGML_TYPE_IQ4_NL ? QK4_NL : type == GGML_TYPE_Q2_K ? QK_K : QK2_0;
+    constexpr int lanes = type == GGML_TYPE_IQ4_NL ? QI4_NL/VDR_IQ4_NL_Q8_1_MMVQ : type == GGML_TYPE_Q2_K ? QI2_K/VDR_Q2_K_Q8_1_MMVQ : QI2_0;
+    constexpr int vdr = type == GGML_TYPE_IQ4_NL ? VDR_IQ4_NL_Q8_1_MMVQ : type == GGML_TYPE_Q2_K ? VDR_Q2_K_Q8_1_MMVQ : 1;
+    constexpr int warps = type == GGML_TYPE_Q2_0 ? 1 : 4;
+    const int lane = threadIdx.x%32;
+    float part[4]{};
+#pragma unroll
+    for (int j = 0; j < k/qk; j += warps*32/lanes) {
+#pragma unroll
+        for (int w = 0; w < warps; ++w) {
+            const int b = j + w*(32/lanes) + lane/lanes;
+            if (b < k/qk) {
+                const auto * x = t.x + b*(qk/QK8_1);
+                const int iqs = lane%lanes*vdr, bi = row*(k/qk) + b;
+                if constexpr (type == GGML_TYPE_IQ4_NL) {
+                    const auto wi = ik_iq4_nl_decode((const block_iq4_nl *)t.w, bi, iqs);
+                    part[w] = __fmaf_rn(__fmul_rn(wi.d, __low2float(x->ds)), float(ik_iq4_nl_sumi(wi, x, iqs)), part[w]);
+                } else if constexpr (type == GGML_TYPE_Q2_K) {
+                    part[w] += vec_dot_q2_K_q8_1(t.w, x, bi, iqs);
+                } else {
+                    part[w] = __fadd_rn(part[w], vec_dot_q2_0_q8_1(t.w, x, bi, iqs));
+                }
+            }
+        }
+    }
+    return warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(part[0], part[1]), part[2]), part[3]));
+}
+
+template<bool audit>
+static __global__ void ik_floor_exact_stream(const ik_floor_tile * tiles, int n, float * dst, unsigned * sm_ctas) {
+    if constexpr (audit) {
+        unsigned id;
+        asm("mov.u32 %0, %%smid;" : "=r"(id));
+        if (!threadIdx.x) { atomicAdd(sm_ctas + id, 1u); }
+    }
+    for (int i = blockIdx.x; i < n; i += gridDim.x) {
+        const auto t = tiles[i];
+        for (int r = threadIdx.x/32; r < t.rows; r += blockDim.x/32) {
+            float value;
+            switch (t.kind) {
+                case 0: value = ik_floor_exact<GGML_TYPE_IQ4_NL, 2304>(t, r); break;
+                case 1: value = ik_floor_exact<GGML_TYPE_IQ4_NL, 3072>(t, r); break;
+                case 2: value = ik_floor_exact<GGML_TYPE_IQ4_NL, 1152>(t, r); break;
+                case 3: value = ik_floor_exact<GGML_TYPE_Q2_K, 2304>(t, r); break;
+                default: value = ik_floor_exact<GGML_TYPE_Q2_0, 1152>(t, r); break;
+            }
+            const int writer = (t.kind >= 2 ? r%4 : r%2);
+            if (threadIdx.x%32 == writer) { dst[t.out+r] = value; }
+        }
+    }
+}
+
 template<bool read_only>
 static __global__ void ik_floor_stream(const ik_floor_tile * tiles, int n, float * out) {
     for (int i = blockIdx.x; i < n; i += gridDim.x) {
@@ -293,6 +347,47 @@ static void ik_floor_measure(ggml_backend_cuda_context & ctx, const std::vector<
     CUDA_CHECK(cudaGraphGetNodes(tile_graph, nullptr, &nodes));
     GGML_ASSERT(nodes == 193);
     CUDA_CHECK(cudaGraphInstantiate(&tile_exec, tile_graph, nullptr, nullptr, 0));
+    if (ggml_cuda_env_flag("IK_FLOOR_EXACT")) {
+        GGML_ASSERT(!ggml_cuda_env_flag("IK_FLOOR_PACK"));
+        int resident = 0;
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, ik_floor_exact_stream<false>, threads, 0));
+        const int grid = sm*std::min(resident, ggml_cuda_env_int("IK_FLOOR_CTA", resident));
+        ggml_cuda_pool_alloc<unsigned> counts(ctx.pool(), 1024);
+        CUDA_CHECK(cudaMemsetAsync(counts.get(), 0, 1024*sizeof(unsigned), stream));
+        ik_floor_exact_stream<true><<<grid,threads,0,stream>>>(device_tiles.get(), tiles.size(), out.get(), counts.get());
+        std::vector<unsigned> ctas(1024);
+        CUDA_CHECK(cudaMemcpyAsync(ctas.data(), counts.get(), ctas.size()*sizeof(unsigned), cudaMemcpyDeviceToHost, stream));
+        auto exact = [&] { ik_floor_exact_stream<false><<<grid,threads,0,stream>>>(device_tiles.get(), tiles.size(), out.get(), nullptr); };
+        exact();
+        CUDA_CHECK(cudaMemcpyAsync(b.data(), out.get(), outputs*sizeof(float), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        int seen = 0, min_cta = grid, max_cta = 0, writes = 0;
+        for (unsigned v : ctas) {
+            if (v) { ++seen; min_cta = std::min(min_cta, int(v)); max_cta = std::max(max_cta, int(v)); writes += v; }
+        }
+        GGML_ASSERT(seen == sm && writes == grid);
+        fprintf(stderr, "floor exact grid=%d sms=%d min_ctas=%d max_ctas=%d\n", grid, seen, min_cta, max_cta);
+        int errors[5]{};
+        for (const auto & t : tiles) {
+            for (int r = t.out; r < t.out+t.rows; ++r) { errors[t.kind] += memcmp(&a[r], &b[r], sizeof(float)) != 0; }
+        }
+        fprintf(stderr, "floor exact bit-mismatches by kind: %d %d %d %d %d\n", errors[0],errors[1],errors[2],errors[3],errors[4]);
+        cudaGraph_t eg;
+        cudaGraphExec_t ex;
+        CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed));
+        for (size_t i = 0; i < ops.size(); ++i) {
+            const int n = boundaries[i+1]-boundaries[i];
+            ik_floor_exact_stream<false><<<std::min(grid,n),threads,0,stream>>>(device_tiles.get()+boundaries[i], n, out.get(), nullptr);
+        }
+        CUDA_CHECK(cudaStreamEndCapture(stream, &eg));
+        CUDA_CHECK(cudaGraphGetNodes(eg, nullptr, &nodes));
+        GGML_ASSERT(nodes == 193);
+        CUDA_CHECK(cudaGraphInstantiate(&ex, eg, nullptr, nullptr, 0));
+        ik_floor_time(stream, "bitwise-resident", exact);
+        ik_floor_time(stream, "bitwise-193", [&] { CUDA_CHECK(cudaGraphLaunch(ex, stream)); });
+        CUDA_CHECK(cudaGraphExecDestroy(ex));
+        CUDA_CHECK(cudaGraphDestroy(eg));
+    }
     ik_floor_time(stream, "stock-graph", native);
     ik_floor_time(stream, "persistent", fused);
     ik_floor_time(stream, "read", read);

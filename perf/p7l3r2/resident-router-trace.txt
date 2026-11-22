@@ -1,0 +1,9 @@
+mode=5
+dense + direct router  24 visits/token  40.797 us/visit
+expert down + sum/conv  44 visits/token  12.126 us/visit
+mode=18
+dense + direct router  24 visits/token  49.234 us/visit
+expert down + sum/conv  44 visits/token  12.084 us/visit
+mode=19
+dense + direct router  24 visits/token  49.621 us/visit
+expert down + sum/conv  44 visits/token  12.059 us/visit

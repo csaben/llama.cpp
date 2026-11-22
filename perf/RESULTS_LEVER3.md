@@ -1,5 +1,7 @@
 # Phase 7 GPU0 plain decode
 
+[Round 2 results and streaming-floor measurements](#round-2-on-gpu0)
+
 ## Plain single-token decode
 
 The selected build reached **219.23 tok/s at depth zero** on GPU0. Its mean also rose at 4K, 16K and 32K. The default fold replaces the attention output projection and its recurrent four-tap convolution at all 48 visits. Nsight measured 6.788 us per fused call versus 8.614 us for the original pair, saving about 0.088 ms/token across those visits. The complete profiled interval fell from 4.939 to 4.829 ms. The real decoder still needs to shed 1.228 ms/token to reach 300 tok/s. [Baseline trace](p7l3/base-trace.txt), [selected trace](p7l3/accepted-trace.txt)
@@ -118,3 +120,45 @@ build/bin/test-backend-ops test -b CUDA0 -o INKLING_ATTN,INKLING_ROUTER,SHORTCON
 build/bin/test-backend-ops test -b CUDA0 -o SITU
 build/bin/test-backend-ops test -b CUDA0 -o CONCAT -p 'n_slots=|n_used='
 ```
+
+## Round 2 on GPU0
+
+### Streaming floor for one real route
+
+One resident kernel evaluated the **193 quantized matvecs in 2.692 ms**. A CUDA graph with the 193 production matvec launches took **2.871 ms** before it and **2.892 ms** after it. The measured difference was **0.179-0.200 ms/token**. The 300 tok/s target allows 3.333 ms for everything, leaving 0.642 ms after the resident dot workload for unhidden attention, routing, controllers, recurrent state and other work. [Raw event batches](p7l3r2/floor-first.txt), [launch sweep](p7l3r2/floor-sweep.txt), [brief](PHASE7_LEVER3_BRIEF.md#round-2-after-tag-p7l3-final-219tok)
+
+| Schedule on the captured weights | Median ms/token | Logical weight GB/s |
+|---|---:|---:|
+| Single resident kernel, real quantized dots | 2.692 | 745.5 |
+| Production matvecs in a 193-node graph, before/after | 2.871 / 2.892 | 698.9 / 693.9 |
+| Same row-dot implementation as the resident kernel, 193-node graph | 3.527 | 568.9 |
+| Single resident kernel, volatile reads | 2.340 | 857.4 |
+
+After a 200-token corpus prefix, the probe took the weight pointers from the live decode graph. Immediately before each routed matvec consumed its IDs, it copied the eight actual selections. Each of 48 gate/up and down pairs agreed, with eight distinct IDs out of 128. The descriptor list preserves visit, matrix, expert slot and row order, including the separate Q/K/V input columns. The timed kernels use the same deterministic nonzero Q8_1 activations. They write every consumed output row. The tiled dot changes accumulation order. All 2,494,400 rows agreed with the production kernels within tolerance, with maximum absolute difference 4.77e-7. [Full matrix inventory and routes](p7l3r2/routes.txt), [probe](p7l3r2/floor.cuh), [corpus driver](p7l3/logits.cpp), [native MMVQ](../ggml/src/ggml-cuda/mmvq.cu), [quantized dot implementations](../ggml/src/ggml-cuda/vecdotq.cuh)
+
+The numerator is **2,006,498,304 bytes** per token. The 96 dense matrices contribute 726,755,328, the 96 selected expert matrices 1,019,215,872, and the vocabulary head 260,527,104. This counts visits to reused layers. The separate F32 router and F16 controller weights add about 169.87 MB to real decode. The brief's 2.42 GB estimate also differs from the sum of its listed components. The bandwidth column uses logical weight bytes. Hardware traffic also includes instructions' other operands, outputs, repeated transactions and cache effects. [Captured weights](p7l3r2/routes.txt), [prior GGUF inventory and card bandwidth measurement](RESULTS_PLAIN.md)
+
+The 82-SM GA102 grid had 820 CTAs, 128 threads each, and 155,924 row tiles of up to 16 rows. Each CTA advances by the grid size across all matrix boundaries. A matrix has no separate launch, synchronization, or final underfilled wave. There is one initial fill and one final drain for the entire token. Each reported value is the median of five CUDA-event batches of 64 invocations after 16 warmups. Both graph controls verified exactly 193 nodes. The volatile PTX control reads the full byte payload. The three-route audit repeated the comparison after 0, 12 and 48 decode steps, checked the distinct route hashes, and validated all output rows. A later layout-capable build used nine CTAs/SM and took 2.749-2.805 ms on the native layout. The last packed run had a slow final graph control, visible in the raw summary. [Launch sweep](p7l3r2/floor-sweep.txt), [matched route audit](p7l3r2/layout-floor.txt), [audit script](p7l3r2/summarize_floor.py), [CUDA graphs, occupancy and event timing](https://docs.nvidia.com/cuda/cuda-programming-guide/index.html), [PTX loads, barriers and memory ordering](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html)
+
+A second resident kernel reproduced the production warp accumulators and writer lane. **All 2,494,400 FP32 results matched bit-for-bit** in **2.775 ms**, compared with 2.935/2.948 ms for the native graph and 3.735 ms for its own 193-node graph. An untimed instrumented dispatch read the hardware SM ID in every block. Exactly ten CTAs ran on each of the 82 SMs. This leaves 0.558 ms of the 300 tok/s budget with production rounding. The measured native-graph savings were 0.160-0.174 ms for this run. Local source tag `p7l3r2-bitwise-floor`. [All SMs, bitwise checks and event batches](p7l3r2/bitwise-floor.txt), [exact dot and graph controls](p7l3r2/floor.cuh)
+
+### From resident tiles to real decode
+
+| Experiment | Measured GPU0 result | Local source tag |
+|---|---|---|
+| Per-head resident instruction lists | A single cooperative launch executed QKV, Q8 attention, WO and short convolution including state at all 48 visits. It took 37.779 us/visit against 31.789 us for the graph. | `p7l3r2-dense-visit-v1` |
+| Producer queues and prefetch | Dedicated scan CTAs, two register budgets, L2 hints and asynchronous shared-memory staging failed to recover the dense graph cost. | `p7l3r2-late-gate-221tok` |
+| Late gate in one cooperative launch | Scheduling the 3,072 gate rows after the scan inputs let the scan and gate overlap. The whole dense chain took 31.630 us against 31.839 us for the graph, all 48 visits. | `p7l3r2-late-gate-221tok` |
+| Three launches | Separate non-gate rows, shared gate/scan grid, then WO+shortconv ran in 31.320 us/visit. Twelve gate CTAs/head performed best in the short sweep. | `p7l3r2-late-gate-221tok` |
+| Extend through output and router | Actual router choices were computed in-kernel at 24 direct visits/token. The output+router section rose from 15.397 to 19.290 us. | `p7l3r2-visit-extensions` |
+| Entire dense chain and direct router in one resident launch | At 24 visits, QKV, attention, WO, state update and top-8 router selection took 49.234 us with shared-weight staging or 49.621 us with L2 prefetch, against 40.797 us for the winning single dense kernel followed by the native router. At the other 24 visits the controller intervenes. Both variants matched the full reference logits. | `p7l3r2-whole-visit-router` |
+| Extend upstream through residual mix | A cooperative launch overlapped input-weight staging with mix, normalization and Q8 packing. It ran at 24 visits/token. Preloading up to 56 rows/worker cost throughput. | `p7l3r2-visit-extensions` |
+| Longer cache | Separate graph streams for the gate and scan lost throughput. A 384-thread block running eight scan warps and four gate warps was faster than eight plus eight in the screen. | `p7l3r2-visit-extensions` |
+| Lossless dense packing | The loader joined each layer's QKV and WO allocations and moved the same IQ4_NL scales to the end of each row. It needed 363,377,664 extra bytes. The small throughput change did not justify keeping the second layout. | `p7l3r2-dense-layout` |
+| Lossless expert packing and output tiles | Packing Q2_0 codes for two fewer byte permutes per eight values took 12.397 us for down plus sum/conv against 12.168 us on native weights. A native four-row, eight-slot fused tile took 12.701 us at the 44 Q2_0 visits. | `p7l3r2-expert-layout` |
+
+The measurements above use live router outputs, KV caches and recurrent state unless explicitly labeled as the streaming-floor experiment. Nsight intervals run from the first kernel start through the last kernel end at each visit over 119 complete token intervals. A separate full-logit run checked the dense resident and staged prototypes. The early expert screen with no eligible fusions was excluded after inspecting its trace. [First visit](p7l3r2/visit-first.txt), [queue sweep](p7l3r2/queue-screen.txt), [late-gate traces](p7l3r2/gate-traces.txt), [gate geometry](p7l3r2/stage-screen.txt), [dense logit hashes](p7l3r2/dense-hashes.txt), [router](p7l3r2/router-trace.txt), [mix](p7l3r2/mix-screen.txt), [long-cache streams](p7l3r2/long-screen.txt), [warp counts](p7l3r2/warps.txt), [dense packing](p7l3r2/pack-screen.txt), [expert screen](p7l3r2/expert-layout-screen.txt), [expert and mix coverage](p7l3r2/expert-trace.txt)
+
+The expert epilogue initially rounded the final scale and residual add differently from the production FFN. Restoring its single fused multiply-add gave the baseline logit hash for native and packed expert tiles, and for the standalone packed matvec. The corrected native/packed full-tail timings were 12.671/12.354 us. Duplicating the 22 Q2_0 physical expert tensors would cost 2,102,132,736 bytes. Both experimental duplicates were discarded from the selected implementation. [Corrected expert traces](p7l3r2/expert-exact-trace.txt), [resident router trace](p7l3r2/resident-router-trace.txt), [resident router benchmark](p7l3r2/resident-router-screen.txt), [coverage analysis](p7l3r2/extended_trace.py)
+
+The single-launch prototypes use a cooperative resident grid, per-task release/acquire counters, and the existing Inkling scan and quantized arithmetic. The instruction-stream design drew on Hazy Research's Llama-3.2-1B work and the Mirage Persistent Kernel paper. Mirage calls its representation an SM-level graph. Neither external implementation was linked. The experiments used local GA102 measurements for every promotion decision. [Hazy Research design](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles), [ThunderKittens](https://github.com/HazyResearch/ThunderKittens), [Cheng et al., MPK](https://arxiv.org/abs/2512.22219), [CUDA asynchronous copies](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async), [Inkling layer graph](../src/models/inkling2.cpp), [attention](../ggml/src/ggml-cuda/inkling.cu), [projection and shortconv](../ggml/src/ggml-cuda/inkling-fmv.cu)
