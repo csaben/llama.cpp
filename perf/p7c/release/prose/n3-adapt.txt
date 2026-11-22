@@ -1,0 +1,5 @@
+n3-adapt       letter    prompt     40   384 tok   217.9 tok/s    1446 chars  accepted/proposed 132/199  runs 217/218/218/219/221
+n3-adapt       science   prompt     38   384 tok   242.8 tok/s    1590 chars  accepted/proposed 165/207  runs 242/242/243/244/244
+n3-adapt       scene     prompt     44   384 tok   228.1 tok/s    1461 chars  accepted/proposed 152/220  runs 227/227/228/229/229
+n3-adapt       review    prompt     39   384 tok   225.6 tok/s    1429 chars  accepted/proposed 147/217  runs 225/226/226/226/227
+n3-adapt       dialogue  prompt     43   384 tok   221.0 tok/s    1651 chars  accepted/proposed 136/200  runs 220/221/221/221/221
