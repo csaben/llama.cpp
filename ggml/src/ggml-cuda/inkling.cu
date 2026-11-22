@@ -299,7 +299,13 @@ static __device__ __forceinline__ float ik_reduce_moments(const float (&v)[n], i
     }
 }
 
-template<int ns, int threads, bool qr, bool repeat>
+template<int count,bool subgroup>
+static __device__ __forceinline__ void ik_team_sync() {
+    if constexpr (subgroup) { asm volatile("bar.sync 1, %0;" :: "n"(count) : "memory"); }
+    else { __syncthreads(); }
+}
+
+template<int ns, int threads, bool qr, bool repeat, bool subgroup=false>
 static __device__ __forceinline__ void ik_mix_by_warp(const float4 * query, ik_state_ptrs st, void * dst, const float4 * nw,
         float eps, float scale, float norm_eps) {
     constexpr int slots = (576+threads-1)/threads;
@@ -326,7 +332,7 @@ static __device__ __forceinline__ void ik_mix_by_warp(const float4 * query, ik_s
             }
         }
     }
-    __syncthreads();
+    ik_team_sync<threads,subgroup>();
     float r=1, p=1;
     if (query && (repeat || t<32)) {
         float ss=0,dt=0;
@@ -343,7 +349,7 @@ static __device__ __forceinline__ void ik_mix_by_warp(const float4 * query, ik_s
         p=sc/warp_reduce_sum(sc);
         if (!repeat && lane < ns) { rms[lane]=r; prob[lane]=p; }
     }
-    if constexpr (!repeat) { __syncthreads(); }
+    if constexpr (!repeat) { ik_team_sync<threads,subgroup>(); }
     float factors[ns], probs[ns];
 #pragma unroll
     for (int i=0; i<ns; ++i) {
@@ -371,7 +377,7 @@ static __device__ __forceinline__ void ik_mix_by_warp(const float4 * query, ik_s
     }
     float norm=1;
     if (nw) {
-        __syncthreads();
+        ik_team_sync<threads,subgroup>();
         norm=rsqrtf(warp_reduce_sum(lane<18 ? partial[lane] : 0.0f)/2304+norm_eps);
     }
 #pragma unroll
@@ -1176,6 +1182,72 @@ static __global__ void __launch_bounds__(threads) ik_down_warps(ik_mix_ctrl_args
     }
 }
 
+template<int ns,int consumers,int helpers,int ranks,bool preload>
+static __global__ void __launch_bounds__(consumers+helpers) ik_ctrl_teams(ik_mix_ctrl_args a) {
+    const int b=blockIdx.y,t=threadIdx.x,col=a.cols==1 ? 0 : b;
+    constexpr int threads=consumers+helpers;
+    __shared__ __align__(16) float mixed[2304];
+    __shared__ float2 red[2][ranks*8];
+    float weight[(ranks*256+threads-1)/threads][9];
+    if constexpr (preload) {
+#pragma unroll
+        for (int l=0;l<(ranks*256+threads-1)/threads;++l) {
+            const int i=t+l*threads;
+            if (i<ranks*256) {
+                const int rank=ranks*blockIdx.x+i/256;
+                const half * row=a.weights+(b*64+rank)*4608;
+#pragma unroll
+                for (int j=0;j<9;++j) { weight[l][j]=__half2float(row[i%256+256*j]); }
+            }
+        }
+    }
+    if (t<consumers) {
+        ik_mix_by_warp<ns,consumers,false,false,true>(a.query+col*a.q_stride,a.st,mixed,nullptr,a.eps,a.scale,0);
+    } else {
+        for (int i=t-consumers;i<ranks*256;i+=helpers) {
+            const int rank=ranks*blockIdx.x+i/256,k=i%256;
+            const half * row=a.weights+(b*64+rank)*4608+2304;
+            float sum=0,dot=0;
+#pragma unroll
+            for (int j=0;j<9;++j) {
+                const int c=k+256*j;
+                const float x=a.msg[b*a.msg_stride+c];
+                sum+=x*x; dot+=x*__half2float(row[c]);
+            }
+            sum=warp_reduce_sum(sum); dot=warp_reduce_sum(dot);
+            if (!(i%32)) { red[1][i/32]=make_float2(sum,dot); }
+        }
+    }
+    __syncthreads();
+    if (blockIdx.x==0 && b==col && t<576) {
+        ((float4 *)a.mixed)[col*576+t]=((float4 *)mixed)[t];
+    }
+    for (int i=t;i<ranks*256;i+=threads) {
+        const int rank=ranks*blockIdx.x+i/256,k=i%256;
+        const half * row=a.weights+(b*64+rank)*4608;
+        float sum=0,dot=0;
+#pragma unroll
+        for (int j=0;j<9;++j) {
+            const int c=k+256*j;
+            const float x=mixed[c];
+            const float w=preload ? weight[i/threads][j] : __half2float(row[c]);
+            sum+=x*x; dot+=x*w;
+        }
+        sum=warp_reduce_sum(sum); dot=warp_reduce_sum(dot);
+        if (!(i%32)) { red[0][i/32]=make_float2(sum,dot); }
+    }
+    __syncthreads();
+    if (t<ranks) {
+        float sa=0,da=0,sb=0,db=0;
+#pragma unroll
+        for (int j=0;j<8;++j) {
+            const float2 x=red[0][t*8+j],y=red[1][t*8+j];
+            sa+=x.x; da+=x.y; sb+=y.x; db+=y.y;
+        }
+        a.down[b*64+ranks*blockIdx.x+t]=da*rsqrtf(sa/2304+a.ctrl_eps)+db*rsqrtf(sb/2304+a.ctrl_eps);
+    }
+}
+
 template <int ns, bool compact = false, int ranks = 2, bool stage = false, bool split = false>
 static __global__ void __launch_bounds__(640) ik_mix_down(ik_mix_ctrl_args a) {
     const int b = blockIdx.y, t = threadIdx.x, k = t%256;
@@ -1313,6 +1385,17 @@ bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml
     }
     auto launch = [&](auto count) {
         constexpr int n = decltype(count)::value;
+        static const int teams=getenv("IK_CTRL_TEAMS") ? atoi(getenv("IK_CTRL_TEAMS")) : 0;
+        if (teams) {
+            if (teams==1) { ik_ctrl_teams<n,576,256,1,false><<<dim3(64,down->ne[2]),832,0,ctx.stream()>>>(a); return; }
+            if (teams==2) { ik_ctrl_teams<n,576,256,2,false><<<dim3(32,down->ne[2]),832,0,ctx.stream()>>>(a); return; }
+            if (teams==3) { ik_ctrl_teams<n,576,256,4,false><<<dim3(16,down->ne[2]),832,0,ctx.stream()>>>(a); return; }
+            if (teams==4) { ik_ctrl_teams<n,576,256,2,true><<<dim3(32,down->ne[2]),832,0,ctx.stream()>>>(a); return; }
+            if (teams==5) { ik_ctrl_teams<n,576,256,4,true><<<dim3(16,down->ne[2]),832,0,ctx.stream()>>>(a); return; }
+            if (teams==6) { ik_ctrl_teams<n,384,256,2,false><<<dim3(32,down->ne[2]),640,0,ctx.stream()>>>(a); return; }
+            if (teams==7) { ik_ctrl_teams<n,256,512,2,false><<<dim3(32,down->ne[2]),768,0,ctx.stream()>>>(a); return; }
+            if (teams==8) { ik_ctrl_teams<n,576,128,2,false><<<dim3(32,down->ne[2]),704,0,ctx.stream()>>>(a); return; }
+        }
         static const int tiled=getenv("IK_DOWN_WARPS") ? atoi(getenv("IK_DOWN_WARPS")) : 0;
         if (tiled) {
             auto run=[&](auto width, auto size, auto rep){
@@ -4625,10 +4708,12 @@ void ggml_cuda_op_inkling_moe_down(ggml_backend_cuda_context & ctx, ggml_tensor 
 // ---------------------------------------------------------------------------------------------------------------------
 // inkling_moe_sum_conv: the weighted expert sum, the FFN short convolution and the residual, one thread per channel
 
+template<bool fixed=false, bool broadcast=false>
 static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a, const int64_t a_s1, const float * __restrict__ w, const int w_s1,
         const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
         const int write_cell, const int chan_offset, const float scale, const float * __restrict__ residual, float * __restrict__ dst,
-        const int n_embd, const int n_used, const int n_conv) {
+        const int n_embd, const int n_used_in, const int n_conv_in) {
+    const int n_used=fixed ? 8 : n_used_in, n_conv=fixed ? 4 : n_conv_in;
     const int c = blockIdx.x*blockDim.x + threadIdx.x;
     if (c >= n_embd) {
         return;
@@ -4650,9 +4735,11 @@ static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a,
     }
     const float res = residual[c];
 
+    const int lane=threadIdx.x%32;
+    const float route=broadcast && lane<8 ? w[lane*w_s1] : 0;
     float sum = 0.0f;
     for (int e = 0; e < n_used; ++e) {
-        sum += av[e]*w[e*w_s1];
+        sum += av[e]*(broadcast ? __shfl_sync(0xffffffff,route,e) : w[e*w_s1]);
     }
     xs[n_conv - 1] = sum;
     float out = 0.0f;
@@ -4758,6 +4845,15 @@ void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_ten
                 (float *) state->data, state->nb[1]/sizeof(float), (const int32_t *) rs_ids->data, write_cell, ggml_get_op_params_i32(dst, 4),
                 ggml_get_op_params_i32(dst, 3), chan_offset, scale, (const float *) residual->data, residual->nb[1]/sizeof(float),
                 (float *) dst->data, dst->nb[1]/sizeof(float), n_embd, n_used, n_conv, (int) dst->ne[1]);
+        return;
+    }
+    static const int width=getenv("IK_SUM_WIDTH") ? atoi(getenv("IK_SUM_WIDTH")) : 0;
+    static const bool broadcast=getenv("IK_SUM_BROADCAST") && atoi(getenv("IK_SUM_BROADCAST"));
+    if ((width==32 || width==64 || width==128 || width==256) && ik_dependency_fusion(ctx) && n_used==8 && n_conv==4 && n_embd==2304) {
+        auto kernel=broadcast ? inkling_moe_sum_conv_kernel<true,true> : inkling_moe_sum_conv_kernel<true,false>;
+        kernel<<<(n_embd+width-1)/width,width, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float),
+            (const float *) w->data, (int) (w->nb[1]/sizeof(float)), (const float *) conv_w->data, (float *) state->data, state->nb[1]/sizeof(float),
+            (const int32_t *) rs_ids->data, write_cell, chan_offset, scale, (const float *) residual->data, (float *) dst->data, n_embd, n_used, n_conv);
         return;
     }
     inkling_moe_sum_conv_kernel<<<(n_embd + block - 1)/block, block, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float),
