@@ -1,0 +1,17 @@
+single token: 4.68 ms per step
+window of 2: 7.24 ms per step (2 steps, all logits read back)
+window of 3: 8.73 ms per step (2 steps, all logits read back)
+window of 4: 10.31 ms per step (2 steps, all logits read back)
+window of 5: 12.78 ms per step (1 steps, all logits read back)
+window of 6: 14.35 ms per step (1 steps, all logits read back)
+window of 7: 15.75 ms per step (1 steps, all logits read back)
+window of 8: 17.37 ms per step (3 steps, all logits read back)
+120 rows in 24 windows after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+single token: 4.68 ms per step
+window of 2: 7.61 ms per step (1 steps, all logits read back)
+window of 3: 8.68 ms per step (1 steps, all logits read back)
+window of 4: 10.75 ms per step (1 steps, all logits read back)
+window of 8: 17.49 ms per step (1 steps, all logits read back)
+77 rows in 16 windows after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+single token: 5.03 ms per step
+60 rows in 12 windows after a 1500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0

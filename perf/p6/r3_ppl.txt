@@ -1,0 +1,8 @@
+== IK_NOP=1 prefill 8x2048
+0.08.442.165 I Final estimate: PPL = 3.0530 +/- 0.06532
+== IK_NOP=1 decode 2x1024 -ub 1
+0.11.090.183 I Final estimate: PPL = 4.1979 +/- 0.28221
+== IK_MMA=3 IK_MR=1 prefill 8x2048
+0.08.432.659 I Final estimate: PPL = 3.0530 +/- 0.06532
+== IK_MMA=3 IK_MR=1 decode 2x1024 -ub 1
+0.11.250.339 I Final estimate: PPL = 4.2038 +/- 0.28288

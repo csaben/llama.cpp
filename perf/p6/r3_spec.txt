@@ -1,0 +1,36 @@
+plain          code      prompt     47   384 tok   215.1 tok/s  runs 215/215/216
+plain          edit      prompt   1025   384 tok   204.3 tok/s  runs 204/204/205
+plain          prose     prompt     36   384 tok   214.0 tok/s  runs 214/214/214
+plain          edit@16K  prompt  16044   384 tok   186.7 tok/s  runs 187/187/187
+plain-mr       code      prompt     47   384 tok   210.0 tok/s  runs 210/210/212
+plain-mr       edit      prompt   1025   384 tok   200.3 tok/s  runs 200/200/200
+plain-mr       prose     prompt     36   384 tok   209.8 tok/s  runs 210/210/210
+plain-mr       edit@16K  prompt  16044   384 tok   184.1 tok/s  runs 184/184/184
+n2             code      prompt     47   384 tok   228.9 tok/s  accepted/proposed 203/357  runs 225/229/230
+n2             edit      prompt   1025   384 tok   276.8 tok/s  accepted/proposed 250/264  runs 272/277/278
+n2             prose     prompt     36   384 tok   183.3 tok/s  accepted/proposed 159/445  runs 183/183/184
+n2             edit@16K  prompt  16044   384 tok   237.3 tok/s  accepted/proposed 247/270  runs 236/237/238
+n3             code      prompt     47   384 tok   222.7 tok/s  accepted/proposed 227/463  runs 199/223/227
+n3             edit      prompt   1025   384 tok   303.8 tok/s  accepted/proposed 281/306  runs 303/304/304
+n3             prose     prompt     36   384 tok   167.3 tok/s  accepted/proposed 172/627  runs 166/167/169
+n3             edit@16K  prompt  16044   384 tok   252.6 tok/s  accepted/proposed 277/318  runs 247/253/253
+n4             code      prompt     47   384 tok   204.0 tok/s  accepted/proposed 239/568  runs 202/204/206
+n4             edit      prompt   1025   384 tok   298.2 tok/s  accepted/proposed 297/341  runs 295/298/301
+n4             prose     prompt     36   384 tok   143.4 tok/s  accepted/proposed 178/811  runs 143/143/144
+n4             edit@16K  prompt  16044   384 tok   246.9 tok/s  accepted/proposed 293/359  runs 239/247/248
+n2-adapt       code      prompt     47   384 tok   217.4 tok/s  accepted/proposed 116/183  runs 215/217/219
+n2-adapt       edit      prompt   1025   384 tok   274.8 tok/s  accepted/proposed 243/250  runs 274/275/276
+n2-adapt       prose     prompt     36   384 tok   204.9 tok/s  accepted/proposed 68/138  runs 202/205/207
+n2-adapt       edit@16K  prompt  16044   384 tok   231.7 tok/s  accepted/proposed 239/256  runs 216/232/236
+n3-adapt       code      prompt     47   384 tok   225.1 tok/s  accepted/proposed 137/247  runs 215/225/227
+n3-adapt       edit      prompt   1025   384 tok   302.7 tok/s  accepted/proposed 278/300  runs 302/303/304
+n3-adapt       prose     prompt     36   384 tok   205.8 tok/s  accepted/proposed 56/132  runs 202/206/206
+n3-adapt       edit@16K  prompt  16044   384 tok   250.9 tok/s  accepted/proposed 275/309  runs 249/251/252
+n4-adapt       code      prompt     47   384 tok   220.7 tok/s  accepted/proposed 138/247  runs 219/221/223
+n4-adapt       edit      prompt   1025   384 tok   294.9 tok/s  accepted/proposed 284/305  runs 287/295/300
+n4-adapt       prose     prompt     36   384 tok   203.4 tok/s  accepted/proposed 28/64  runs 203/203/204
+n4-adapt       edit@16K  prompt  16044   384 tok   248.1 tok/s  accepted/proposed 271/292  runs 236/248/251
+n3-full        code      prompt     47   384 tok   213.7 tok/s  accepted/proposed 227/463  runs 205/214/216
+n3-full        edit      prompt   1025   384 tok   292.7 tok/s  accepted/proposed 282/302  runs 274/293/294
+n3-full        prose     prompt     36   384 tok   163.5 tok/s  accepted/proposed 177/612  runs 163/163/164
+n3-full        edit@16K  prompt  16044   384 tok   241.3 tok/s  accepted/proposed 277/318  runs 237/241/244

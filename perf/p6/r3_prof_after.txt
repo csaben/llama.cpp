@@ -1,0 +1,7 @@
+spec_prof: other             434.0 ms                  4.173 ms/step
+spec_prof: 384 tokens, 104 target steps, wall 1696.1 ms (16.308 ms/step)
+spec_prof: draft             111.3 ms     102 calls    1.071 ms/step
+spec_prof: draft.decode      109.8 ms     102 calls    1.055 ms/step
+spec_prof: target           1115.4 ms     104 calls   10.725 ms/step
+spec_prof: inject             52.6 ms     104 calls    0.506 ms/step
+spec_prof: other             415.6 ms                  3.996 ms/step
