@@ -1,0 +1,6 @@
+plain/gen1.txt identical (595 bytes)
+plain/gen2.txt identical (951 bytes)
+plain/gen3.txt identical (1023 bytes)
+plain-mr/gen1.txt identical (595 bytes)
+plain-mr/gen2.txt identical (951 bytes)
+plain-mr/gen3.txt identical (1030 bytes)

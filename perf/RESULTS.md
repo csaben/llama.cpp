@@ -1191,6 +1191,52 @@ These are four-row target windows with all logits read back. The first trial use
 
 At `8899fa9` we also packed the first four rows of a five-row window. Isolated target-window time at 32K went from 15.27 to 15.03 ms, with all 120 rows exact for each setting. Served fixed n4 fell from 271.0 to 263.4 tok/s on the long edit and from 260.2 to 256.9 at 16K. The release uses `IK_WINDOW_COLS=1`, which packs only four-row windows. [Five-row A/B](p7/wide/).
 
+### What limits the round
+
+On `c71f680`, CUDA API interception measured exactly one host synchronization in every complete steady fixed-n3 round below. CUDA events measured the graph launches on their issuing streams. The comparison keeps consecutive generation fences 8-25 ms apart with all three graphs present. First capture, graph-shape changes and incomplete rounds are excluded. The draft and target graphs are serialized because target embedding lookup consumes the drafter's device IDs.
+
+| Workload | Complete rounds | GPU graphs, median ms/round | Host syncs/round, min-max | Measured draft + target, total s | Entire reply budget at target, s |
+|---|---:|---:|---:|---:|---:|
+| Edit, 384 | 99 | 11.073 | 1-1 | 1.083 | 1.067 |
+| Edit, 3,000 | 862 | 11.282 | 1-1 | 9.627 | 9.375 |
+| Edit @ 16K, 3,000 | 839 | 12.034 | 1-1 | 10.006 | 9.375 |
+
+The sum of just the draft and target graphs in the retained rounds exceeds each whole-reply budget. Even making host bookkeeping, injection and the unmeasured rounds free would miss the targets for this fixed-n3 execution. Faster target or drafter math, or more accepted tokens per unit of GPU work, would change that limit. [Short trace](p7/final-profile/short/rounds.txt), [long edit trace](p7/final-profile/edit/rounds.txt), [16K trace](p7/final-profile/edit@16K/rounds.txt).
+
+`LLAMA_SPEC_PROF=1` on the short edit recorded 0 draft-read calls, 0.092 ms/step to submit the draft graph, 0.155 ms/step to submit injection, 0.004 ms/step for host sampling/acceptance and 0.002 ms/step to construct the verification batch after drafting. The target wait includes outstanding device work from the drafter. The profiler's wall total includes prompt processing. Token selection runs on the GPU; the server still commits token history and rolls back its cache indices on the host after the fence. [Short host timers](p7/final-profile/short/spec.txt), [long host timers](p7/final-profile/edit/spec.txt).
+
+Nsight Systems 2024.6 with the installed CUDA 13.0 driver collected initialization events only. The API and CUDA-event traces above were collected with the repository probe. Benchmark tables use separate uninstrumented requests.
+
+### Reproduction and staging
+
+Run from the repository root on physical GPU1. The process sees that card as CUDA0. The final inference commit is `c71f680`. The short run sorts each set of three requests by decode rate after checking all three full messages and token streams.
+
+```bash
+source perf/p5env.sh
+export LLAMA_DSPARK_DEV=1 LLAMA_DSPARK_ROUND=1 LLAMA_DSPARK_GRAPHS=1 LLAMA_DSPARK_POLICY=1
+export IK_WINDOW_COLS=1 IK_QUEUE_INPUTS=1 GGML_CUDA_GRAPH_CHUNK_SIZE=0
+export LLAMA_ARG_OVERRIDE_TENSOR='token_embd.weight=CUDA0'
+export LLAMA_ARG_SPEC_DRAFT_OVERRIDE_TENSOR='mask_embd.weight=CUDA0'
+export SPEC_CTX=65536 SPEC_KINDS=code,edit,prose,edit@16K,edit@32K SPEC_REQUIRE_IDS=1
+rows=(plain-mr n2 n3 n4 n2-adapt n3-adapt n4-adapt)
+SPEC_MAXT=3000 bash perf/p6/r4_spec.sh /tmp/p7-long "${rows[@]}"
+python3 perf/p6/r4_cmp.py /tmp/p7-long "${rows[@]}"
+SPEC_MAXT=384 SPEC_REPS=3 bash perf/p6/r4_spec.sh /tmp/p7-short "${rows[@]}"
+python3 perf/p6/r4_cmp.py /tmp/p7-short "${rows[@]}"
+CHECKS_OUT=/tmp/p7-checks bash perf/p6/r4_checks.sh
+```
+
+To reproduce the CUDA fence and graph measurements with the same environment and a CUDA 12.8 development toolkit:
+
+```bash
+g++ -std=c++17 -O2 -fPIC -shared perf/p7/timeline.cpp -I"$HOME/opt/cuda-12.8/include" -o /tmp/p7-timeline.so -ldl -lcudart
+LD_PRELOAD=/tmp/p7-timeline.so LLAMA_SPEC_PROF=1 SPEC_SERVER_LOG=/tmp/p7-round.log \
+    SPEC_KINDS=edit SPEC_MAXT=384 bash perf/p6/r4_spec.sh /tmp/p7-round n3
+python3 perf/p7/round_times.py /tmp/p7-round.log 3
+```
+
+The staged server and its eight project libraries are in `~/inkling-live-bin-p7-c71f680`. All nine hashes verified, and the dynamic loader resolved every project library from the snapshot. The manual deploy script was syntax-checked and left unexecuted. [Deployment script](live/deploy-p7.sh), [SHA-256 manifest](p7/snapshot.sha256), [resolved libraries](p7/snapshot-libraries.txt).
+
 ### Sources
 
 - The scan extends the branch's two-limb implementation of Project Maya's warp-level tensor-core attention. Phase 7 changes which queries occupy the MMA columns and retains the existing MIT attribution. [Maya source](https://github.com/alesha-pro/maya-inkling-mini/blob/main/src/ik2/ik2_kernels.cu), [branch notices](../NOTICE.inkling), [NVIDIA PTX warp matrix instructions](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma).
