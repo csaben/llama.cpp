@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -eu -o pipefail
 . perf/p8bc/env.sh
-if [[ $1 == base || $1 == control* ]]; then export LD_LIBRARY_PATH="$PWD/build/p8-b-final:$LD_LIBRARY_PATH"; fi
-if [[ -n ${P8_LIBS:-} ]]; then export LD_LIBRARY_PATH="$P8_LIBS:$PWD/build/bin"; fi
+if [[ -n ${P8_LIBS:-} ]]; then
+    export LD_LIBRARY_PATH="$P8_LIBS:$LD_LIBRARY_PATH"
+elif [[ $1 == base || $1 == control* ]]; then
+    for lib in libggml-cuda.so.1 libllama.so.1 libllama-common.so.1; do
+        test -s "build/p8-b-final/$lib"
+    done
+    export LD_LIBRARY_PATH="$PWD/build/p8-b-final:$LD_LIBRARY_PATH"
+fi
 out=build/p8-prefill/${1:?}
 mkdir -p "$out"
 # Warm the same server before timing three uncached requests at each context.
