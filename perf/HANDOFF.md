@@ -2,7 +2,9 @@
 
 Local merge `1a45f6d` (`p7b-merged`) integrates `e03d993` with the four-row verifier. On GPU1 the merged fixed n3 reaches 324.0 tok/s on the 384-token edit, 172.6 on prose versus 211.5 plain. The previous adaptive policy reaches 172.5 on prose. Four drafted configurations match all five same-flags plain messages and IDs on all three repeats. [Merged short controls](p7b/merged-384/).
 
-Request-local policy trials and the rollback, depth, quality and long-message checks are in progress. Deployment is pending.
+The default battery passed all 2,714 logit rows and 1,108 operator cases. Six greedy runs match Phase 7. PPL is 3.0530 prefill, 4.1979 default decode and 4.2038 MR/MMA decode. Default plain tg128 at 0 / 4K / 16K / 32K is 229.07 / 210.46 / 198.32 / 182.74 tok/s. [Default checks](p7b/checks-default/).
+
+The first current-margin policy reached 206.2 tok/s on short prose at cap 3, below 211.5 plain. Request-local standby and full-width warm-up trials, release-preset checks and long-message comparisons continue. Deployment is pending.
 
 # Phase 7 hand-off
 
