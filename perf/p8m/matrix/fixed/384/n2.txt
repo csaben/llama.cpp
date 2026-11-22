@@ -1,0 +1,6 @@
+n2             code      prompt     47   384 tok   244.0 tok/s    1320 chars  accepted/proposed 203/357  runs 243/244/244
+n2             edit      prompt   1025   384 tok   299.8 tok/s    1115 chars  accepted/proposed 250/264  runs 299/300/300
+n2             prose     prompt     36   384 tok   197.6 tok/s    1474 chars  accepted/proposed 159/445  runs 197/198/198
+n2             edit@16K  prompt  16044   384 tok   270.3 tok/s    1196 chars  accepted/proposed 247/270  runs 270/270/270
+n2             edit@32K  prompt  32045   384 tok   243.3 tok/s    1321 chars  accepted/proposed 241/283  runs 243/243/243
+n2             agent     prompt   2025   384 tok   274.4 tok/s    1284 chars  accepted/proposed 241/282  runs 274/274/275
