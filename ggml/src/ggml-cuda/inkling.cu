@@ -5199,6 +5199,64 @@ static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long 
     return key;
 }
 
+static __device__ __forceinline__ unsigned ik_sort32(unsigned key, int lane) {
+#pragma unroll
+    for (int size=2;size<=32;size*=2) {
+#pragma unroll
+        for (int d=size/2;d;d/=2) {
+            const unsigned peer=__shfl_xor_sync(0xffffffffu,key,d);
+            key=(((lane&size)==0)==((lane&d)==0)) ? max(key,peer) : min(key,peer);
+        }
+    }
+    return key;
+}
+
+static __device__ __forceinline__ bool ik_bitonic32(const ik_router_args & a) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    __shared__ unsigned high[4], win[32], valid;
+    __shared__ float probs[128];
+    const int t=threadIdx.x,lane=t%32,warp=t/32;
+    unsigned key=0;
+    if (t<128) {
+        float p,score;
+        if (a.published) { const float2 v=a.published[t]; score=v.x; p=v.y; }
+        else { p=1.0f/(1.0f+expf(-a.logits[t])); score=p+a.probs_b[t]; }
+        probs[t]=p;
+        const unsigned bits=__float_as_uint(score==0.0f ? 0.0f : score);
+        key=isnan(score) ? 0xffffffffu : bits^(bits&0x80000000u ? 0xffffffffu : 0x80000000u);
+        const unsigned mx=__reduce_max_sync(0xffffffffu,key);
+        if (!lane) { high[warp]=mx; }
+    }
+    __syncthreads();
+    const unsigned mx=max(max(high[0],high[1]),max(high[2],high[3]));
+    if (mx==0xffffffffu) { return false; }
+    const unsigned low=mx>0x01fffffeu ? mx-0x01fffffeu : 0u;
+    if (t<128) {
+        const unsigned best=ik_sort32(key>=low ? ((key-low+1)<<7)|(127-t) : 0u,lane);
+        if (lane<8) { win[warp*8+lane]=best; }
+    }
+    __syncthreads();
+    if (!warp) {
+        const unsigned best=ik_sort32(win[lane],lane);
+        const unsigned eighth=__shfl_sync(0xffffffffu,best,7);
+        if (!lane) { valid=eighth; }
+        if (eighth) {
+            const int id=127-(best&127u);
+            const float p=probs[id];
+            float sum=0;
+#pragma unroll
+            for (int i=0;i<8;++i) { sum+=__shfl_sync(0xffffffffu,p,i); }
+            if (lane<8) { a.route[lane]=id; a.route[8+lane]=__float_as_int(p/(sum+a.w_eps)*a.w_scale); }
+            if (!lane) { *a.counter=0; }
+        }
+    }
+    __syncthreads();
+    return valid!=0;
+#else
+    return false;
+#endif
+}
+
 static __device__ __forceinline__ bool ik_select_keys(const ik_router_args & a) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     const int t=threadIdx.x, lane=t%32;
@@ -5274,7 +5332,7 @@ static __device__ __forceinline__ void ik_finish_route(const ik_router_args & ar
     const int tid = threadIdx.x, lane = tid%32, warp = tid/32;
     __shared__ float s_sel[IK_R2_MAX_EXPERT], s_prob[IK_R2_MAX_EXPERT], s_selected[8];
     // ===== the selection by the last block: the rank of every expert (ties: the smaller id first) =====
-    if (!MR && args.key_mode && ik_select_keys(args)) { return; }
+    if (!MR && args.key_mode && (args.key_mode&8 ? ik_bitonic32(args) : ik_select_keys(args))) { return; }
     const int n_expert = args.n_expert;
     if (tid < n_expert) {
         const float p = 1.0f/(1.0f + expf(-args.logits[tid]));
@@ -5370,7 +5428,7 @@ static __device__ __forceinline__ void ik_finish_route(const ik_router_args & ar
     if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); }
 }
 
-template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false, bool input_only = false, bool bf16 = false, int fast_rows = 0> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false, bool input_only = false, bool bf16 = false, int fast_rows = 0, int staged = 0> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
     if constexpr (MR) {
@@ -5427,7 +5485,15 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         nw[j] = ok ? ((const float4 *) args.norm_w)[k] : z;
     }
     float4 weights[register_rows ? rows : 1][register_rows ? C4 : 1];
-    if constexpr (register_rows) {
+    constexpr int row_words=bf16 ? 2 : 4;
+    if constexpr (staged) {
+        const char * src=bf16 ? (const char *)args.bf16 : (const char *)args.gate_inp;
+        src+=e0*576*row_words*4;
+        for (int k=tid;k<rows*576*row_words/4;k+=256) {
+            cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(r2_smem+k),src+k*16);
+        }
+        cp_async_commit_group();
+    } else if constexpr (register_rows) {
 #pragma unroll
         for (int r = 0; r < rows; ++r) {
 #pragma unroll
@@ -5596,6 +5662,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         }
     }
     if constexpr (!(fast_rows && NS == 1)) { __syncthreads(); }
+    if constexpr (staged) { cp_async_wait_all(); __syncthreads(); }
     IK_RDBG_T(9); // weights ready
 
     // ===== the normalized input: shared memory for the logits; the F32 and Q8_1 outputs spread over the blocks
@@ -5621,8 +5688,14 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
                 if constexpr (register_rows) {
 #pragma unroll
                     for (int r = 0; r < rows; ++r) {
-                        const float4 w = weights[r][j];
-                        ((float *) r2_smem)[r*576 + k] = w.x*v.x + w.y*v.y + w.z*v.z + w.w*v.w;
+                        float4 w;
+                        if constexpr (!staged) { w=weights[r][j]; }
+                        else if constexpr (bf16) {
+                            const uint2 u=((const uint2 *)r2_smem)[r*576+k];
+                            w=make_float4(__uint_as_float(u.x<<16),__uint_as_float(u.x&0xffff0000u),__uint_as_float(u.y<<16),__uint_as_float(u.y&0xffff0000u));
+                        } else { w=r2_smem[r*576+k]; }
+                        const int offset=staged==1 ? (r*576+k)*row_words : staged==2 ? rows*576*row_words+r*576+k : r*576+k;
+                        ((float *)r2_smem)[offset]=w.x*v.x+w.y*v.y+w.z*v.z+w.w*v.w;
                     }
                 } else if constexpr (!input_only) {
                     s_x[k] = v;
@@ -5648,7 +5721,8 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         if constexpr (register_rows) {
 #pragma unroll
             for (int j = 0; j < 18; ++j) {
-                dot += ((float *) r2_smem)[warp*576 + j*32 + lane];
+                const int k=warp*576+j*32+lane;
+                dot+=((float *)r2_smem)[staged==1 ? k*row_words : staged==2 ? rows*576*row_words+k : k];
             }
         } else {
             const float4 * row = s_rows + warp*(IK_R2_MAX_EMBD/4);
@@ -5752,6 +5826,31 @@ static void inkling_router2_launch_rows(ggml_backend_cuda_context & ctx, const i
 
 template <int NS>
 static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
+    static const int stage=getenv("IK_ROUTE_STAGE") ? atoi(getenv("IK_ROUTE_STAGE")) : 0;
+    if (stage && !a.wo_out && ik_dependency_fusion(ctx) && a.warp_topk && a.n_embd==2304 && a.n_expert==128 && a.n_used==8 && (NS!=1 || !a.query)) {
+        auto run=[&](auto width,auto pack,auto layout) {
+            constexpr int nr=decltype(width)::value, form=decltype(layout)::value;
+            constexpr bool bf=decltype(pack)::value;
+            constexpr int smem=nr*576*((bf ? 2 : 4)+(form==2))*4;
+            const auto kernel=inkling_router2_kernel<NS,0,false,true,true,false,bf,nr,form>;
+            static bool attr[GGML_CUDA_MAX_DEVICES]{};
+            if (!attr[ctx.device]) { CUDA_CHECK(cudaFuncSetAttribute(kernel,cudaFuncAttributeMaxDynamicSharedMemorySize,smem)); attr[ctx.device]=true; }
+            kernel<<<128/nr,256,smem,ctx.stream()>>>(a);
+        };
+        auto choose=[&](auto pack,auto form) {
+            if ((stage&15)==2) { run(std::integral_constant<int,2>{},pack,form); }
+            else if ((stage&15)==8) { run(std::integral_constant<int,8>{},pack,form); }
+            else { run(std::integral_constant<int,4>{},pack,form); }
+        };
+        if (stage&16) {
+            if (a.bf16) { choose(std::true_type{},std::integral_constant<int,2>{}); }
+            else { choose(std::false_type{},std::integral_constant<int,2>{}); }
+        } else {
+            if (a.bf16) { choose(std::true_type{},std::integral_constant<int,1>{}); }
+            else { choose(std::false_type{},std::integral_constant<int,1>{}); }
+        }
+        return;
+    }
     static const int fast = getenv("IK_ROUTER_WARP") ? atoi(getenv("IK_ROUTER_WARP")) : 0;
     if (fast && !a.wo_out && ik_dependency_fusion(ctx) && a.warp_topk && a.n_embd == 2304 && a.n_expert == 128 && a.n_used == 8 && (NS != 1 || !a.query)) {
         auto launch = [&](auto r, auto packed) {
