@@ -2417,7 +2417,9 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         }
     }
     if constexpr (HAS_TAPS >= 0) {
-        args_m = args_in;
+        if constexpr (!MR) {
+            args_m = args_in;
+        }
         args_m.n_conv = 4;
         args_m.has_taps = HAS_TAPS;
         args_m.n_head_kv = 8;
@@ -3124,7 +3126,7 @@ static void inkling_attn2_launch(const ik_attn_args & a, const dim3 grid, cudaSt
 // The K and V of every row of a window: the convolution over [state, the rows so far], the post-normalization, the cache
 // store and the rollback planes of the recurrent state. One block per kv head, a thread per K or V channel walks the rows
 // in order, so each value is computed exactly as the single-token kernel computes it (same statements, same reductions).
-template <typename cache_t>
+template <typename cache_t, int HAS_TAPS = -1> // HAS_TAPS >= 0: the shape constants of the specialized single-token instance
 static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kernel(const ik_attn_args args) {
     constexpr int HD = IK_ATTN_HD;
     const int g      = blockIdx.x;
@@ -3133,7 +3135,8 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
     const int warp   = tid / WARP_SIZE;
     const int which  = tid/HD;    // 0: a K channel, 1: a V channel
     const int ci     = tid % HD;
-    const int n_conv = args.n_conv;
+    const int  n_conv   = HAS_TAPS >= 0 ? 4 : args.n_conv;
+    const bool has_taps = HAS_TAPS >= 0 ? HAS_TAPS != 0 : has_taps != 0;
     __shared__ float s_red[2][IK_A2_WARPS];
 
     const int64_t ch   = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
@@ -3150,14 +3153,14 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
             x[j]   = j < n_conv - 1 ? past[j] : 0.0f;
         }
     }
-    const float scale = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
+    const float scale = 1.0f/sqrtf((has_taps ? 2 : 1)*n_conv + 1);
     for (int row = 0; row < args.mr_rows; ++row) {
         const float * pr = args.proj + ((int64_t) col*args.mr_rows + row)*args.proj_s1;
         const float cur_in = pr[off + (int64_t) g*HD + ci];
         float taps[8];
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
-            taps[j] = args.has_taps && j < n_conv ? pr[offt + (int64_t) g*n_conv + j] : 0.0f;
+            taps[j] = has_taps && j < n_conv ? pr[offt + (int64_t) g*n_conv + j] : 0.0f;
             if (j == n_conv - 1) {
                 x[j] = cur_in;
             }
@@ -3169,7 +3172,7 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
                 out += x[j]*w_c[j];
             }
         }
-        if (args.has_taps) {
+        if (has_taps) {
 #pragma unroll
             for (int lag = 0; lag < 8; ++lag) {
                 if (lag < n_conv) {
@@ -3341,11 +3344,15 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     }
     static const bool fixed_enabled = !getenv("IK_ATTN_FIXED") || atoi(getenv("IK_ATTN_FIXED"));
     static const bool short_enabled = !getenv("IK_ATTN_SHORT") || atoi(getenv("IK_ATTN_SHORT"));
-    const bool fixed = fixed_enabled && mma && !ext && n_rows == 1 && !ik_mr_enabled() && dst->type == GGML_TYPE_Q8_1 &&
+    // Windows (IK_MR) take the same shape-specialized instance per row, so rows stay bit-identical to single tokens;
+    // the short 256-cell schedule groups the partial sums differently and has no window form: it is off under IK_MR
+    // (IK_ATTN_FIXED_MR=0: the generic instances for windows and for single tokens under IK_MR, as before the merge).
+    static const bool fixed_mr = !getenv("IK_ATTN_FIXED_MR") || atoi(getenv("IK_ATTN_FIXED_MR"));
+    const bool fixed = fixed_enabled && mma && !ext && (fixed_mr || (n_rows == 1 && !ik_mr_enabled())) && dst->type == GGML_TYPE_Q8_1 &&
             ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X && !a.dbg_skip && !a.dbg_times &&
             a.n_head == 24 && a.n_head_kv == 8 && a.n_conv == 4 && a.n_rel == 16 && a.n_extent == 1024 &&
             a.kc_nb2 == 32*sizeof(block_q8_0) && a.vc_nb2 == a.kc_nb2;
-    const bool short_scan = fixed && short_enabled && a.n_kv == 256;
+    const bool short_scan = fixed && short_enabled && a.n_kv == 256 && n_rows == 1 && !ik_mr_enabled();
     if (short_scan) {
         a.n_split = 1;
     }
@@ -3381,8 +3388,13 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             inkling_attn_kv_rows_kernel<half><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a);
             if (q8) { inkling_attn2_launch<half, true, false, true>(a, grid_mr, stream); } else { inkling_attn2_launch<half, false, false, true>(a, grid_mr, stream); }
         } else {
-            inkling_attn_kv_rows_kernel<block_q8_0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a);
-            if (mma) {
+            if (!fixed)          { inkling_attn_kv_rows_kernel<block_q8_0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
+            else if (a.has_taps) { inkling_attn_kv_rows_kernel<block_q8_0, 1><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
+            else                 { inkling_attn_kv_rows_kernel<block_q8_0, 0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
+            if (fixed) {
+                if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, true, 1><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a); }
+                else            { inkling_attn2_kernel<block_q8_0, true, 3, true, true, 0><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a); }
+            } else if (mma) {
                 if (q8) { inkling_attn2_launch<block_q8_0, true, true, true>(a, grid_mr, stream); } else { inkling_attn2_launch<block_q8_0, false, true, true>(a, grid_mr, stream); }
             } else {
                 if (q8) { inkling_attn2_launch<block_q8_0, true, false, true>(a, grid_mr, stream); } else { inkling_attn2_launch<block_q8_0, false, false, true>(a, grid_mr, stream); }
