@@ -4576,6 +4576,15 @@ struct ik_expert_task {
     const block_q2_K * weights;
     float * out;
     int * flags;
+    const block_q2_0 * down;
+    block_q8_1 * act;
+    const float * coeff;
+    float * state;
+    const int * ids;
+    const float * residual;
+    float * dst;
+    int stride, cell, offset;
+    float scale, beta, lb;
 };
 
 static __device__ __forceinline__ float ik_up_dot(const block_q2_K * w, const block_q8_1 * x, int row) {
@@ -4595,7 +4604,84 @@ static __device__ __forceinline__ float ik_up_dot(const block_q2_K * w, const bl
     return warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(part[0], part[1]), part[2]), part[3]));
 }
 
-template<int NS>
+static __device__ __forceinline__ void ik_ffn_tile(ik_router_args args, ik_expert_task t) {
+    const int slot = blockIdx.x%8, worker = blockIdx.x/8, workers = gridDim.x/8;
+    const int warp = threadIdx.x/32, lane = threadIdx.x%32;
+    const int id = args.route[slot];
+    const block_q2_K * up = t.weights + id*(2304*2304/QK_K);
+    __shared__ float activations[32];
+    __shared__ int last;
+    for (int group = worker; group < 36; group += workers) {
+#pragma unroll
+        for (int j = warp; j < 32; j += 8) {
+            const int r = group*32 + j;
+            const float g = ik_up_dot(up, args.xq, r);
+            const float u = ik_up_dot(up, args.xq, 1152 + r);
+            if (lane == (r%4)) {
+                const float gate = tanhf(g*(1.0f/t.beta))*t.beta*(1.0f/(1.0f + expf(-g)));
+                activations[j] = gate*(t.lb > 0 ? tanhf(u*(1.0f/t.lb))*t.lb : u);
+            }
+        }
+        __syncthreads();
+        if (warp == 0) { ik_warp_store_q8_1(activations[lane], t.act + slot*36 + group, lane, true); }
+        __syncthreads();
+    }
+    int * arrivals = t.flags + gridDim.x;
+    if (threadIdx.x == 0) { last = ik_atomic_add_acq_rel(arrivals + slot, 1) + 1 == workers; }
+    __syncthreads();
+    if (last) {
+        if (!threadIdx.x) { ik_st_relaxed(arrivals + slot, 0); }
+        if (threadIdx.x < workers) { ik_st_release(t.flags + threadIdx.x*8 + slot, 1); }
+    }
+    if (!threadIdx.x) {
+        while (!ik_ld_acquire(t.flags + blockIdx.x)) {}
+        ik_st_relaxed(t.flags + blockIdx.x, 0);
+    }
+    __syncthreads();
+    for (int group = worker; group < 72; group += workers) {
+#pragma unroll
+        for (int j = warp*2; j < 32; j += 16) {
+            const int r = group*32 + j;
+            float acc[2]{};
+#pragma unroll
+            for (int k = lane; k < (1152/QK2_0)*QI2_0; k += 32) {
+                const int b = k/QI2_0;
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int bi = ((id*2304 + r + h)*(1152/QK2_0)) + b;
+                    acc[h] = __fadd_rn(acc[h], vec_dot_q2_0_q8_1(t.down, t.act + slot*36 + b*(QK2_0/QK8_1), bi, lane%QI2_0));
+                }
+            }
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                float v = warp_reduce_sum(acc[h]);
+                if (lane == (r + h)%4) { t.out[slot*2304 + r + h] = v; }
+            }
+        }
+        __syncthreads();
+        if (!threadIdx.x) { last = ik_atomic_add_acq_rel(arrivals + 8 + group, 1) == 7; }
+        __syncthreads();
+        if (last && warp == 0) {
+            const int c = 32*group + lane;
+            float sum = 0;
+#pragma unroll
+            for (int e = 0; e < 8; ++e) { sum += t.out[e*2304 + c]*__int_as_float(args.route[8 + e]); }
+            const int off = 3*(t.offset + c);
+            const float * src = t.state + t.ids[0]*t.stride + off;
+            float * dst = t.state + t.cell*t.stride + off;
+            const float p0 = src[0], p1 = src[1], p2 = src[2];
+            const float * w = t.coeff + 4*c;
+            float y = 0;
+            y += p0*w[0]; y += p1*w[1]; y += p2*w[2]; y += sum*w[3];
+            t.dst[c] = t.residual[c] + (sum + y)*t.scale;
+            dst[0] = p1; dst[1] = p2; dst[2] = sum;
+            if (!lane) { ik_st_relaxed(arrivals + 8 + group, 0); }
+        }
+        __syncthreads();
+    }
+}
+
+template<int NS, bool full>
 static __global__ void __launch_bounds__(256) ik_route_experts(ik_router_args args, ik_expert_task task) {
     constexpr int router_blocks = 64;
     if (blockIdx.x < router_blocks && ik_router_tile<NS, 0, false, 2>(args, router_blocks)) {
@@ -4607,6 +4693,7 @@ static __global__ void __launch_bounds__(256) ik_route_experts(ik_router_args ar
         ik_st_relaxed(task.flags + blockIdx.x, 0);
     }
     __syncthreads();
+    if constexpr (full) { ik_ffn_tile(args, task); return; }
     for (int tile = blockIdx.x; tile < 8*2304/16; tile += gridDim.x) {
         const int slot = tile/(2304/16);
         const int row = tile%(2304/16)*16 + threadIdx.x/32;
@@ -4620,16 +4707,40 @@ static __global__ void __launch_bounds__(256) ik_route_experts(ik_router_args ar
 }
 
 template<int NS>
-static void ik_launch_route_experts(ggml_backend_cuda_context & ctx, ik_router_args args, ggml_tensor * up) {
+static void ik_launch_route_experts(ggml_backend_cuda_context & ctx, ik_router_args args, ggml_tensor * up, ggml_tensor * sum) {
     constexpr size_t smem = 3*2304*sizeof(float);
     static const int requested = atoi(getenv("IK_ROUTE_VISIT"));
+    auto kernel = sum ? ik_route_experts<NS, true> : ik_route_experts<NS, false>;
     int resident;
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, ik_route_experts<NS>, 256, smem));
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, kernel, 256, smem));
     int blocks = std::min(requested, resident)*ggml_cuda_info().devices[ctx.device].nsm;
+    if (sum) { blocks = blocks/8*8; }
     GGML_ASSERT(blocks >= 64 && blocks <= 6*82);
-    ik_expert_task task{(const block_q2_K *) up->src[0]->data, (float *) up->data, ik_counters(ctx, 256, blocks)};
+    ik_expert_task task{};
+    task.weights = (const block_q2_K *)up->src[0]->data;
+    task.out = (float *)up->data;
+    task.flags = ik_counters(ctx, 256, blocks + 80);
+    ggml_cuda_pool_alloc<float> buf(ctx.pool());
+    ggml_cuda_pool_alloc<block_q8_1> act(ctx.pool());
+    if (sum) {
+        ggml_tensor * down = sum->src[0], * situ = down->src[1];
+        task.out = buf.alloc(8*2304);
+        task.act = act.alloc(8*36);
+        task.down = (const block_q2_0 *)down->src[0]->data;
+        task.beta = ggml_get_op_params_f32(situ, 2);
+        task.lb = ggml_get_op_params_f32(situ, 3);
+        task.coeff = (const float *)sum->src[2]->data;
+        task.state = (float *)sum->src[3]->data;
+        task.stride = sum->src[3]->nb[1]/sizeof(float);
+        task.ids = (const int *)sum->src[4]->data;
+        task.residual = (const float *)sum->src[5]->data;
+        task.dst = (float *)sum->data;
+        task.cell = ggml_get_op_params_i32(sum, 0);
+        task.offset = ggml_get_op_params_i32(sum, 1);
+        task.scale = ggml_get_op_params_f32(sum, 2);
+    }
     void * params[] = { &args, &task };
-    CUDA_CHECK(cudaLaunchCooperativeKernel((void *) ik_route_experts<NS>, blocks, 256, params, smem, ctx.stream()));
+    CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, blocks, 256, params, smem, ctx.stream()));
 }
 
 template <int NS, int NC, int rows = IK_R2_WARPS>
@@ -4670,7 +4781,7 @@ static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_rou
     }
 }
 
-void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * up) {
+void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * up, ggml_tensor * sum) {
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
     const ggml_tensor * consts   = dst->src[1 + n_states];
@@ -4761,11 +4872,11 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
     if (up) {
         switch (n_states) {
-            case 1: ik_launch_route_experts<1>(ctx, a, up); break;
-            case 2: ik_launch_route_experts<2>(ctx, a, up); break;
-            case 3: ik_launch_route_experts<3>(ctx, a, up); break;
-            case 4: ik_launch_route_experts<4>(ctx, a, up); break;
-            default: ik_launch_route_experts<5>(ctx, a, up); break;
+            case 1: ik_launch_route_experts<1>(ctx, a, up, sum); break;
+            case 2: ik_launch_route_experts<2>(ctx, a, up, sum); break;
+            case 3: ik_launch_route_experts<3>(ctx, a, up, sum); break;
+            case 4: ik_launch_route_experts<4>(ctx, a, up, sum); break;
+            default: ik_launch_route_experts<5>(ctx, a, up, sum); break;
         }
         return;
     }

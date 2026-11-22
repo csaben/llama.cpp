@@ -4683,6 +4683,40 @@ static int ik_ctrl_branch(ggml_backend_cuda_context & ctx, ggml_cgraph * graph, 
     return j - i;
 }
 
+static int ik_expert_visit_end(const ggml_cgraph * g, int j, const ggml_tensor * route, int device) {
+    const auto * up = g->nodes[j];
+    const int h = ik_next_compute(g, j);
+    if (h == g->n_nodes) { return j; }
+    const auto * act = g->nodes[h];
+    if (act->op != GGML_OP_GLU || ggml_get_glu_op(act) != GGML_GLU_OP_SITU || act->type != GGML_TYPE_Q8_1 ||
+            !act->src[1] || act->src[0]->view_src != up || act->src[1]->view_src != up ||
+            act->src[0]->view_offs != 0 || act->src[1]->view_offs != 1152*sizeof(float) || act->ne[0] != 1152 ||
+            act->ne[1] != 8 || !ggml_is_matrix(act) || !ggml_is_contiguous(act)) { return j; }
+    const int d = ik_next_compute(g, h);
+    if (d == g->n_nodes) { return j; }
+    const auto * down = g->nodes[d];
+    if (down->op != GGML_OP_MUL_MAT_ID || down->src[1] != act || down->src[2] != up->src[2] ||
+            down->src[0]->type != GGML_TYPE_Q2_0 || down->src[0]->ne[2] != 128 ||
+            !ggml_is_contiguous(down->src[0]) || !down->src[0]->buffer ||
+            ggml_backend_buffer_get_type(down->src[0]->buffer) != ggml_backend_cuda_buffer_type(device) ||
+            down->ne[0] != 2304 || down->ne[1] != 8 || !ggml_is_matrix(down)) { return j; }
+    int end = ik_next_compute(g, d);
+    if (end == g->n_nodes) { return j; }
+    const auto * sum = g->nodes[end];
+    if (sum->op != GGML_OP_INKLING_MOE_SUM_CONV || sum->src[0] != down || !ggml_is_vector(sum) ||
+            sum->src[2]->ne[0] != 4 || sum->src[1]->data != (const int *)route->data + 8 ||
+            !(sum->flags & GGML_TENSOR_FLAG_COMPUTE)) { return j; }
+    for (int k = j; k < end; ++k) {
+        if (g->nodes[k]->flags & GGML_TENSOR_FLAG_OUTPUT) { return j; }
+    }
+    for (int k = end + 1; k < g->n_nodes; ++k) {
+        for (auto * src : g->nodes[k]->src) {
+            if (src && (src == up || src == act || src == down || src->view_src == up || src->view_src == act || src->view_src == down)) { return j; }
+        }
+    }
+    return end;
+}
+
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
@@ -4717,8 +4751,10 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
                     node->src[2 + states]->ne[1] == 128 && node->src[4 + states] && up->src[1]->data == node->src[4 + states]->data &&
                     up->src[1]->type == GGML_TYPE_Q8_1 && ggml_is_vector(up->src[1]) && ggml_is_contiguous(up->src[1]) &&
                     up->src[2]->data == node->src[3 + states]->data && ggml_nelements(up->src[2]) == 8 && ggml_is_contiguous(up->src[2])) {
-                ggml_cuda_op_inkling_router(*cuda_ctx, node, up);
-                return j - i;
+                static const bool full = ggml_cuda_env_flag("IK_FULL_FFN");
+                const int end = full ? ik_expert_visit_end(cgraph, j, node->src[3 + states], cuda_ctx->device) : j;
+                ggml_cuda_op_inkling_router(*cuda_ctx, node, up, end > j ? cgraph->nodes[end] : nullptr);
+                return end - i;
             }
         }
     }

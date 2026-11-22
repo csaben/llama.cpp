@@ -1,0 +1,5 @@
+r3-control.sqlite       router + gate/up      42 visits/token  26.703 us/visit
+r3-control.sqlite       five FFN stages       42 visits/token  40.585 us/visit
+r3-match-3.sqlite       router + gate/up      42 visits/token  30.921 us/visit
+r3-match-3.sqlite       five FFN stages       42 visits/token  44.830 us/visit
+r3-full-3.sqlite        five FFN stages       42 visits/token  62.171 us/visit

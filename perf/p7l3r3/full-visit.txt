@@ -1,0 +1,12 @@
+ik_route_experts                      42.0   62.171  2611.171
+ik_q2_down_rows                        2.0   10.012    20.024
+inkling_moe_sum_conv_kernel            6.0    2.070    12.419
+residency=3 exact
+ik_route_experts                      42.0   62.250  2614.486
+ik_q2_down_rows                        2.0    9.975    19.950
+inkling_moe_sum_conv_kernel            6.0    2.060    12.359
+residency=2 exact
+ik_route_experts                      42.0   85.387  3586.234
+ik_q2_down_rows                        2.0    9.918    19.837
+inkling_moe_sum_conv_kernel            6.0    2.041    12.246
+residency=1 exact
