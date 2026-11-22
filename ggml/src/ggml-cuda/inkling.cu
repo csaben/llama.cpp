@@ -2848,6 +2848,161 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
     }
 }
 
+template <int G>
+static __device__ __forceinline__ void ik_mma_scores(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
+        const char * kb, const int64_t k_nb2, const int row0, const int row_max,
+        const int kt, const int w1, const int64_t kv_idx, float (&s)[2]) {
+    const int  lane = threadIdx.x % WARP_SIZE;
+    const int  gr = lane >> 2, tq = lane & 3;
+    const int ht = min(tq, G - 1);
+    const bool head_ok = tq < G;
+    const float * table = args.consts + args.c_table;
+    const int     n_rel = args.n_rel;
+    const int     last  = args.n_kv - 1;
+
+    // ---- every load of the step ----
+    uint32_t kh[2][2], kl[2][2], kq[2][4][2];
+    float    mk[2];
+    int      dk[2];
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        const int cell = kt + gr + 8*i;
+        const int cc   = min(cell, last);
+        const ik_q8row r = { (const uint32_t *) (kb + (int64_t) min(cell - row0, row_max)*k_nb2) };
+#pragma unroll
+        for (int P = 0; P < 2; ++P) {
+            kh[i][P] = r.head(P);
+            kl[i][P] = r.tail(P);
+        }
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+#pragma unroll
+            for (int hf = 0; hf < 2; ++hf) {
+                kq[i][b][hf] = r.quad(b, 4*hf + tq, kh[i][b >> 1]);
+            }
+        }
+        const float mv = args.mask_f16 ? __half2float(((const half *) args.mask)[cc]) : ((const float *) args.mask)[cc];
+        mk[i] = head_ok && cell < w1 && cell != kv_idx ? mv : -INFINITY;
+        dk[i] = args.rel_pos[cc];
+    }
+    // ---- Q K^T: C[16 cells][8 columns] += A[16 cells][16 dims] B[16 dims][8 columns], block by block ----
+    s[0] = 0; s[1] = 0;
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+        float cb[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+#pragma unroll
+        for (int hf = 0; hf < 2; ++hf) {
+            const uint32_t x0 = kq[0][b][hf] ^ 0x80808080u, x1 = kq[1][b][hf] ^ 0x80808080u;
+            const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(x0, 0x64u, 0x4140u)), ik_u8x2_to_h2(__byte_perm(x1, 0x64u, 0x4140u)),
+                                    ik_u8x2_to_h2(__byte_perm(x0, 0x64u, 0x4342u)), ik_u8x2_to_h2(__byte_perm(x1, 0x64u, 0x4342u)) };
+            ik_mma16816(cb, a, st.qf[b][hf][0], st.qf[b][hf][1]);
+        }
+        s[0] += ik_q8row::scale(b, kh[0][b >> 1], kl[0][b >> 1])*(cb[0] + cb[1]);
+        s[1] += ik_q8row::scale(b, kh[1][b >> 1], kl[1][b >> 1])*(cb[2] + cb[3]);
+    }
+    // ---- the logits: scale, relative bias (within the extent), sink, mask ----
+    const bool e0 = dk[0] >= 0 && dk[0] < args.n_extent, e1 = dk[1] >= 0 && dk[1] < args.n_extent;
+    float bias[2] = { 0.0f, 0.0f };
+    if (__ballot_sync(0xffffffffu, e0 || e1)) {
+        const float * t0 = table + (int64_t) (e0 ? dk[0] : 0)*n_rel;
+        const float * t1 = table + (int64_t) (e1 ? dk[1] : 0)*n_rel;
+#pragma unroll
+        for (int j = 0; j < 16; ++j) {
+            if (j < n_rel) {
+                const float rj = s_r[ht][j];
+                bias[0] += t0[j]*rj;
+                bias[1] += t1[j]*rj;
+            }
+        }
+        bias[0] = e0 ? bias[0] : 0.0f;
+        bias[1] = e1 ? bias[1] : 0.0f;
+    }
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        s[i] = mk[i] == -INFINITY ? -INFINITY : args.kq_scale*s[i] + bias[i] - st.sink + mk[i];
+    }
+}
+
+template <int G>
+static __device__ __forceinline__ void ik_mma_values(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
+        const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
+        const int kt, const int w1, const int64_t kv_idx, const float2 cached) {
+    constexpr float PS = IK_MMA_PS;
+    const int  lane = threadIdx.x % WARP_SIZE;
+    const int  gr = lane >> 2, tq = lane & 3;
+    const int hq = min(gr >> 1, G - 1);
+    const bool col_ok = (gr >> 1) < G, head_ok = tq < G;
+    const bool lo_limb = gr & 1;
+    float s[2]={cached.x,cached.y};
+    uint32_t vh[4][2], vl[4][2], vq[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
+        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
+#pragma unroll
+        for (int P = 0; P < 2; ++P) {
+            vh[i][P] = r.head(P);
+            vl[i][P] = r.tail(P);
+        }
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+            vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
+        }
+    }
+    float mx = fmaxf(s[0], s[1]); // over the lanes of the same head
+#pragma unroll
+    for (int sh = 4; sh < 32; sh <<= 1) {
+        mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, sh));
+    }
+    if (__ballot_sync(0xffffffffu, mx > st.mm)) { // a new maximum: rescale (rare after the first steps)
+        const float mn = fmaxf(st.mm, mx);
+        const float c  = st.mm == -INFINITY ? 0.0f : expf(st.mm - mn);
+        st.mm  = mn;
+        st.ll *= c;
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+#pragma unroll
+            for (int hf = 0; hf < 2; ++hf) {
+                st.o[b][hf][0] *= c; st.o[b][hf][1] *= c; st.o[b][hf][2] *= c; st.o[b][hf][3] *= c;
+            }
+        }
+    }
+    const float u  = st.mm == -INFINITY ? 0.0f : st.mm;
+    const float p0 = expf(s[0] - u), p1 = expf(s[1] - u);
+    st.ll += p0 + p1;
+    // ---- P to the lanes of its operand: head gr/2 of the cells 2 tq, 2 tq + 1, 2 tq + 8, 2 tq + 9 ----
+    const int src = 8*tq + hq;
+    const float pv[4] = { __shfl_sync(0xffffffffu, p0, src), __shfl_sync(0xffffffffu, p0, src + 4),
+                          __shfl_sync(0xffffffffu, p1, src), __shfl_sync(0xffffffffu, p1, src + 4) };
+    const float pvz[4] = { col_ok ? pv[0] : 0.0f, col_ok ? pv[1] : 0.0f, col_ok ? pv[2] : 0.0f, col_ok ? pv[3] : 0.0f };
+    // ---- P V: C[16 dims][8 columns] += A[16 dims][16 cells] B[16 cells][8 columns]; an mma takes 16 dims of one block
+    //      (two per lane group), so the block's scales ride on P. A cell without weight may be past the end: no scale. ----
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+        float w[4];
+        uint32_t el[4], eh[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const float d = ik_q8row::scale(b, vh[i][b >> 1], vl[i][b >> 1]);
+            w[i] = ik_limb(pvz[i]*(pvz[i] > 0.0f ? d : 0.0f)*PS, lo_limb);
+            const uint32_t x = vq[i][b] ^ 0x80808080u;
+            el[i] = __byte_perm(x, 0x64u, 0x4140u);
+            eh[i] = __byte_perm(x, 0x64u, 0x4342u);
+        }
+        const uint32_t B0 = ik_pack_h2(w[0], w[1]), B1 = ik_pack_h2(w[2], w[3]);
+        {
+            const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(el[0], el[1], 0x5410u)), ik_u8x2_to_h2(__byte_perm(el[0], el[1], 0x7632u)),
+                                    ik_u8x2_to_h2(__byte_perm(el[2], el[3], 0x5410u)), ik_u8x2_to_h2(__byte_perm(el[2], el[3], 0x7632u)) };
+            ik_mma16816(st.o[b][0], a, B0, B1);
+        }
+        {
+            const uint32_t a[4] = { ik_u8x2_to_h2(__byte_perm(eh[0], eh[1], 0x5410u)), ik_u8x2_to_h2(__byte_perm(eh[0], eh[1], 0x7632u)),
+                                    ik_u8x2_to_h2(__byte_perm(eh[2], eh[3], 0x5410u)), ik_u8x2_to_h2(__byte_perm(eh[2], eh[3], 0x7632u)) };
+            ik_mma16816(st.o[b][1], a, B0, B1);
+        }
+    }
+}
+
 template<bool async>
 static __device__ __forceinline__ void ik_stage_cache_tile(const char * src, int64_t stride, int max_row, uint2 * tile) {
     const int lane=threadIdx.x%32;
@@ -3023,7 +3178,7 @@ static __device__ __forceinline__ bool ik_attention_tail(ik_attn_args a, int g, 
     return true;
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false, int sched = 0, bool subgroup = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false, int sched = 0, bool subgroup = false, bool ahead = false>
 static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -3100,6 +3255,28 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     __shared__ float s_l[G][IK_A2_WARPS];
     __shared__ float s_acc[G][IK_A2_WARPS][HD];
     __shared__ int   s_last;
+    __shared__ float2 future[ahead ? 256 : 1];
+    if constexpr (ahead) {
+        if (tid>=256) {
+            const int w=warp-8, start=split*args.kv_per_split, end=min(args.n_kv,start+args.kv_per_split);
+            const int per=(end-start+7)/8;
+            const int k0=start+w*per, w1=min(end,k0+per), kt=k0+16;
+            const int64_t idx=args.kv_idxs[0];
+            const int cell=kt+lane;
+            const bool valid=cell<w1 && cell!=idx && (args.mask_f16 ? __half2float(((const half *)args.mask)[cell]) : ((const float *)args.mask)[cell])!=-INFINITY;
+            const bool live=__any_sync(0xffffffffu,valid);
+            asm volatile("bar.sync 3, 512;" ::: "memory");
+            float v[2]={-INFINITY,-INFINITY};
+            if (live) {
+                ik_mma_lane<G> look;
+                ik_mma_init(look,s_q,s_sink);
+                ik_mma_scores(args,look,s_r,args.k_cache+g*args.kc_nb1,args.kc_nb2,0,args.n_kv-1,kt,w1,idx,v);
+            }
+            future[tid-256]=make_float2(v[0],v[1]);
+            asm volatile("bar.sync 3, 512;" ::: "memory");
+            return;
+        }
+    }
     IK_DBG_T(0);
 
     // ===== round 1: every load that does not depend on the recurrent cell =====
@@ -3272,6 +3449,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         }
     }
     ik_scan_sync<warp_split || subgroup>();
+    if constexpr (ahead) { asm volatile("bar.sync 3, 512;" ::: "memory"); }
     IK_DBG_T(2);
 
     // ===== the attention over the cells of this warp (online softmax per head, a lane holds 4 dims), the current
@@ -3393,7 +3571,19 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         const int ht = min(lane & 3, G - 1);
         ik_mma_lane<G> st;
         ik_mma_init<G>(st, s_q, s_sink);
-        if (has_cells && !(args.dbg_skip & 2)) {
+        if constexpr (ahead) {
+            const char * kb=args.k_cache+g*args.kc_nb1, * vb=args.v_cache+g*args.vc_nb1;
+            const int cell=w0+lane;
+            const bool valid=lane<16 && cell<w1 && cell!=kv_idx && (args.mask_f16 ? __half2float(((const half *)args.mask)[cell]) : ((const float *)args.mask)[cell])!=-INFINITY;
+            if (__any_sync(0xffffffffu,valid)) {
+                ik_mma_step<G,false,true>(args,st,s_r,kb,args.kc_nb2,vb,args.vc_nb2,0,args.n_kv-1,w0,w1,kv_idx);
+            }
+            asm volatile("bar.sync 3, 512;" ::: "memory");
+            const float2 v=future[tid];
+            if (__any_sync(0xffffffffu,v.x!=-INFINITY || v.y!=-INFINITY)) {
+                ik_mma_values(args,st,s_r,kb,args.kc_nb2,vb,args.vc_nb2,0,args.n_kv-1,w0+16,w1,kv_idx,v);
+            }
+        } else if (has_cells && !(args.dbg_skip & 2)) {
             const char * kb = args.k_cache + g*args.kc_nb1;
             const char * vb = args.v_cache + g*args.vc_nb1;
             if constexpr (SHORT_SCAN) {

@@ -253,6 +253,21 @@ static __global__ void __launch_bounds__(threads) ik_short_geometry(ik_attn_args
     }
 }
 
+template<int gates,int sched>
+static __global__ void __launch_bounds__(512+gates*32) ik_ahead_gate_scan(ik_attn_args a,const block_iq4_nl * w,const block_q8_1 * x,int * ctr) {
+    const int t=threadIdx.x,g=blockIdx.x,split=blockIdx.y;
+    if (t<512) {
+        a.proj_ncols=1;
+        ik_attention_tile<block_q8_0,true,3,true,false,0,false,false,true,false,true,sched,false,true>(a,g,split,ctr+g,a.n_split);
+    } else {
+        for (int i=split*gates+(t-512)/32;i<384;i+=a.n_split*gates) {
+            ik_project_row(w,x,(float *)a.proj,a.off_gate+g*384+i);
+        }
+        asm volatile("bar.sync 2, %0;" :: "n"(32*gates) : "memory");
+        if (t==512) { ik_atomic_add_acq_rel(ctr+g,1); }
+    }
+}
+
 template<int taps>
 static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
@@ -278,6 +293,18 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
         return;
     }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+    static const int ahead=getenv("IK_SCORE_AHEAD") ? atoi(getenv("IK_SCORE_AHEAD")) : 0;
+    if (ahead && !taps && !short_scan && a.kv_per_split<=256) {
+        auto run=[&](auto n,auto order) {
+            constexpr int gates=decltype(n)::value, sched=decltype(order)::value;
+            ik_ahead_gate_scan<gates,sched><<<dim3(8,a.n_split),512+32*gates,0,ctx.stream()>>>(a,w,x,counters);
+        };
+        if (ahead==1) { run(std::integral_constant<int,4>{},std::integral_constant<int,0>{}); }
+        else if (ahead==2) { run(std::integral_constant<int,4>{},std::integral_constant<int,8>{}); }
+        else if (ahead==3) { run(std::integral_constant<int,8>{},std::integral_constant<int,8>{}); }
+        else { run(std::integral_constant<int,2>{},std::integral_constant<int,8>{}); }
+        return;
+    }
     static const int cached=getenv("IK_STAGE_CACHE") ? atoi(getenv("IK_STAGE_CACHE")) : 0;
     if (cached && !short_scan && (uintptr_t)a.k_cache%8==0 && (uintptr_t)a.v_cache%8==0) {
         auto launch=[&](auto setting) {
