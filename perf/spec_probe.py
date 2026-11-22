@@ -8,6 +8,7 @@
 # Compare with perf/p6/r4_cmp.py, which refuses empty messages. SPEC_KINDS=code,edit limits the prompts,
 # SPEC_REPS=n repeats each request (median rate; all n messages must be equal), SPEC_PROBS=1 also saves the tokens with
 # their top-3 log-probabilities as <label>.<kind>.probs.json, SPEC_CTX sets -c (default 32768).
+# SPEC_SERVER_LOG saves stderr from the server for CUDA timing or LLAMA_SPEC_PROF.
 # SPEC_TOKEN_IDS=1 saves the emitted IDs even for requests that stop naturally (tool grammars require EOS).
 import glob, json, os, struct, subprocess, sys, time, urllib.request
 args = sys.argv[1:]
@@ -32,7 +33,8 @@ def post(path, body):
 M = os.path.expanduser(os.environ["MODEL"])
 cmd = [os.path.join(ROOT, "build/bin/llama-server"), "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", os.environ.get("SPEC_CTX", "32768"),
        "-np", "1", "--port", "8041", "--host", "127.0.0.1"] + extra
-proc = subprocess.Popen(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=os.environ.get("GPU", "1")), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+with open(os.environ.get("SPEC_SERVER_LOG", os.devnull), "wb") as log:
+    proc = subprocess.Popen(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=os.environ.get("GPU", "1")), stdout=subprocess.DEVNULL, stderr=log)
 try:
     for _ in range(1200):
         if proc.poll() is not None:
