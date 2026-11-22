@@ -4748,7 +4748,7 @@ static __device__ __forceinline__ void ik_finish_route(const ik_router_args & ar
     if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); }
 }
 
-template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false, bool input_only = false, bool bf16 = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false, bool input_only = false, bool bf16 = false, int fast_rows = 0> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
     if constexpr (MR) {
@@ -4784,7 +4784,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
     const int warp = tid / WARP_SIZE;
     const int n_embd  = args.n_embd;
     const int n_embd4 = n_embd/4;
-    constexpr int rows = register_rows ? 4 : IK_R2_WARPS;
+    constexpr int rows = fast_rows ? fast_rows : register_rows ? 4 : IK_R2_WARPS;
     const int e0 = blockIdx.x*rows;
     IK_RDBG_T(0);
 
@@ -4915,26 +4915,36 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         }
     }
     __syncthreads();
+    float moment = 0.0f;
     if (tid < NP) {
         float v = 0.0f;
 #pragma unroll
         for (int w = 0; w < IK_R2_WARPS; ++w) {
             v += s_red[w][tid];
         }
-        s_tot[tid] = v;
+        if constexpr (fast_rows > 0) { moment = v; } else { s_tot[tid] = v; }
     }
-    __syncthreads();
+    if constexpr (fast_rows == 0) { __syncthreads(); }
     IK_RDBG_T(1);
-    if (warp == 0) {
+    float direct_factor = 1.0f;
+    if constexpr (fast_rows && NS == 1) {
+        float ss = 0.0f;
+#pragma unroll
+        for (int w=0; w<IK_R2_WARPS; ++w) { ss += s_red[w][0]; }
+        direct_factor = rsqrtf(ss/n_embd + args.norm_eps);
+    } else if (warp == 0) {
         // lane i < NS: state i
         auto gram = [&](const int i, const int k) -> float {
             const int lo = min(i, k), hi = max(i, k);
-            return s_tot[lo*NS - lo*(lo - 1)/2 + (hi - lo)];
+            const int idx = lo*NS - lo*(lo - 1)/2 + (hi - lo);
+            if constexpr (fast_rows > 0) { return __shfl_sync(0xffffffff, moment, idx); }
+            return s_tot[idx];
         };
         float r = 1.0f, wgt = 0.0f;
         if (args.query) {
-            const float ss = lane < NS ? gram(lane, lane) : 0.0f;
-            const float dt = lane < NS ? s_tot[NG + lane] : 0.0f;
+            const int h = min(lane, NS-1);
+            const float ss = gram(h,h);
+            const float dt = fast_rows ? __shfl_sync(0xffffffff, moment, NG+h) : s_tot[NG+h];
             r = rsqrtf(ss/n_embd + args.eps);
             float       sc = lane < NS ? dt*r*args.scale : -INFINITY;
             const float mx = warp_reduce_max(sc);
@@ -4949,8 +4959,9 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
 #pragma unroll
         for (int k = 0; k < NS; ++k) {
             const float wk = __shfl_sync(0xffffffff, wgt, k);
+            const float g = gram(min(lane,NS-1), k);
             if (lane < NS) {
-                ssy += wgt*wk*gram(lane, k);
+                ssy += wgt*wk*g;
             }
         }
         ssy = warp_reduce_sum(ssy);
@@ -4962,13 +4973,13 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             s_w[2*NS] = rsqrtf(ssy/n_embd + args.norm_eps);
         }
     }
-    __syncthreads();
+    if constexpr (!(fast_rows && NS == 1)) { __syncthreads(); }
     IK_RDBG_T(9); // weights ready
 
     // ===== the normalized input: shared memory for the logits; the F32 and Q8_1 outputs spread over the blocks
     //       (block b stores the Q8_1 blocks k/8 with (k/8) % gridDim.x == b) =====
     {
-        const float factor = s_w[2*NS];
+        const float factor = fast_rows && NS == 1 ? direct_factor : s_w[2*NS];
 #pragma unroll
         for (int j = 0; j < C4; ++j) {
             const int  k  = tid + j*IK_R2_BLOCK;
@@ -4976,7 +4987,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             float4 y = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 #pragma unroll
             for (int i = 0; i < NS; ++i) {
-                const float f0 = s_w[i], f1 = s_w[NS + i];
+                const float f0 = fast_rows && NS == 1 ? 1.0f : s_w[i], f1 = fast_rows && NS == 1 ? 1.0f : s_w[NS + i];
                 y.x += (x[i][j].x*f0)*f1;
                 y.y += (x[i][j].y*f0)*f1;
                 y.z += (x[i][j].z*f0)*f1;
@@ -5114,6 +5125,21 @@ static void inkling_router2_launch_rows(ggml_backend_cuda_context & ctx, const i
 
 template <int NS>
 static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
+    static const int fast = getenv("IK_ROUTER_WARP") ? atoi(getenv("IK_ROUTER_WARP")) : 0;
+    if (fast && !a.wo_out && ik_dependency_fusion(ctx) && a.warp_topk && a.n_embd == 2304 && a.n_expert == 128 && a.n_used == 8 && (NS != 1 || !a.query)) {
+        auto launch = [&](auto r, auto packed) {
+            constexpr int n = decltype(r)::value;
+            inkling_router2_kernel<NS,0,false,true,true,false,decltype(packed)::value,n><<<128/n,256,n*576*sizeof(float),ctx.stream()>>>(a);
+        };
+        auto run = [&](auto packed) {
+            if (fast == 1) { launch(std::integral_constant<int,1>{},packed); }
+            else if (fast == 2) { launch(std::integral_constant<int,2>{},packed); }
+            else if (fast == 8) { launch(std::integral_constant<int,8>{},packed); }
+            else { launch(std::integral_constant<int,4>{},packed); }
+        };
+        if (a.bf16) { run(std::true_type{}); } else { run(std::false_type{}); }
+        return;
+    }
     if (a.bf16 && a.warp_topk && !a.wo_out && ik_dependency_fusion(ctx)) {
         inkling_router2_kernel<NS,0,false,true,true,false,true><<<32,256,4*576*sizeof(float),ctx.stream()>>>(a);
         return;
