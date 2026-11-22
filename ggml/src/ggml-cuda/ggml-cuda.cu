@@ -4718,6 +4718,17 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         const int extra = ik_try_attention_visit(*cuda_ctx, cgraph, i);
         if (extra) { return extra; }
     }
+    static const bool up_quant = ggml_cuda_env_flag("IK_UP_QUANT") && !ggml_cuda_env_flag("IK_MR");
+    if (up_quant && node->op == GGML_OP_MUL_MAT_ID && node->src[0]->type == GGML_TYPE_Q2_K && i + 3 < cgraph->n_nodes &&
+            ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X && cuda_ctx->stream_context().concurrent_events.empty()) {
+        int end = i + 3;
+        auto * situ = cgraph->nodes[end];
+        if (situ->op == GGML_OP_GLU && ggml_get_glu_op(situ) == GGML_GLU_OP_SITU &&
+                ggml_can_fuse_subgraph(cgraph, i, {GGML_OP_MUL_MAT_ID, GGML_OP_VIEW, GGML_OP_VIEW, GGML_OP_GLU}, {end}) &&
+                ggml_cuda_check_fusion_memory_ranges(cgraph, i, 4, &end, 1) && ggml_cuda_inkling_up_quant(*cuda_ctx, node, situ)) {
+            return 3;
+        }
+    }
     static const bool proj_conv = ggml_cuda_env_flag("IK_PROJ_CONV") && !ggml_cuda_env_flag("IK_MR");
     if (proj_conv && node->op == GGML_OP_MUL_MAT && ggml_is_vector(node) && node->src[1]->type == GGML_TYPE_Q8_1 &&
             ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X && cuda_ctx->stream_context().concurrent_events.empty() &&

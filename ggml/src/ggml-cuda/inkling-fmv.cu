@@ -1197,3 +1197,58 @@ bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const gg
     }
     return true;
 }
+
+template<int warps>
+static __global__ void ik_up_quant(const block_q2_K * weights, const block_q8_1 * x, const int32_t * ids, block_q8_1 * out, float beta, float lb) {
+    const int slot = blockIdx.y;
+    const int first = blockIdx.x*32;
+    const int warp = threadIdx.x/WARP_SIZE, lane = threadIdx.x%WARP_SIZE;
+    const int base = (2304*ids[slot] + first)*9;
+    __shared__ float value[32];
+    constexpr int group = 32/warps;
+    float gs[group] = {}, us[group] = {};
+#pragma unroll
+    for (int i = 0; i < 72; i += 32) {
+        const int k = (i + lane)/8;
+        if (k < 9) {
+#pragma unroll
+            for (int j = 0; j < group; ++j) {
+                int b = base + (warp*group + j)*9 + k;
+                gs[j] = __fadd_rn(gs[j], vec_dot_q2_K_q8_1(weights, x + k*8, b, 2*(lane%8)));
+                us[j] = __fadd_rn(us[j], vec_dot_q2_K_q8_1(weights, x + k*8, b + 1152*9, 2*(lane%8)));
+            }
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < group; ++j) {
+        const int row = warp*group + j;
+        const float gate = warp_reduce_sum(gs[j]), up = warp_reduce_sum(us[j]);
+        if (lane == row%4) { value[row] = ggml_cuda_op_situ_single(gate, up, beta, lb); }
+    }
+    __syncthreads();
+    if (warp == 0) { ik_warp_store_q8_1(value[lane], out + slot*36 + blockIdx.x, lane, true); }
+}
+
+bool ggml_cuda_inkling_up_quant(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * situ) {
+    const auto * w = mm->src[0], * x = mm->src[1], * ids = mm->src[2];
+    const auto * gate = situ->src[0], * up = situ->src[1];
+    if (!gate || !up || gate->view_src != mm || up->view_src != mm || gate->view_offs || up->view_offs != 1152*sizeof(float) ||
+            !ggml_are_same_shape(gate, up) || gate->nb[1] != 2304*sizeof(float) || up->nb[1] != gate->nb[1] ||
+            w->type != GGML_TYPE_Q2_K || w->ne[0] != 2304 || w->ne[1] != 2304 || w->ne[2] != 128 || w->ne[3] != 1 ||
+            !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device) ||
+            x->type != GGML_TYPE_Q8_1 || !ggml_is_vector(x) || ids->type != GGML_TYPE_I32 || !ggml_is_vector(ids) || ids->ne[0] != 8 ||
+            situ->type != GGML_TYPE_Q8_1 || situ->ne[0] != 1152 || situ->ne[1] != 8 || !ggml_is_matrix(situ) ||
+            !ggml_is_contiguous(w) || !ggml_is_contiguous(x) || !ggml_is_contiguous(ids) || !ggml_is_contiguous(situ)) {
+        return false;
+    }
+    auto launch = [&](auto warps) {
+        ik_up_quant<decltype(warps)::value><<<dim3(36, 8), WARP_SIZE*warps, 0, ctx.stream()>>>((const block_q2_K *) w->data, (const block_q8_1 *) x->data, (const int32_t *) ids->data,
+                (block_q8_1 *) situ->data, ggml_get_op_params_f32(situ, 2), ggml_get_op_params_f32(situ, 3));
+    };
+    static const int warps = getenv("IK_UP_QUANT") ? atoi(getenv("IK_UP_QUANT")) : 0;
+    if (warps == 4) { launch(std::integral_constant<int, 4>{}); }
+    else if (warps == 16) { launch(std::integral_constant<int, 16>{}); }
+    else if (warps == 32) { launch(std::integral_constant<int, 32>{}); }
+    else { launch(std::integral_constant<int, 8>{}); }
+    return true;
+}

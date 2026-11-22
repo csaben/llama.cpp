@@ -21,3 +21,4 @@ bool ggml_cuda_inkling_segmented_projection_rows(ggml_backend_cuda_context & ctx
 bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 bool ggml_cuda_inkling_resident_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst);
+bool ggml_cuda_inkling_up_quant(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * situ);
