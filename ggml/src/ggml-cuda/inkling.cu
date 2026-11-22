@@ -274,8 +274,38 @@ static __global__ void res_mix_f32(const float * __restrict__ query, const ik_st
     }
 }
 
+// Each shuffle reduces two moments and leaves one in each half of the warp.
+template<int n, int delta = 16>
+static __device__ __forceinline__ float ik_reduce_moments(const float (&v)[n], int lane) {
+    if constexpr (n == 1) {
+        return warp_reduce_sum<2*delta>(v[0]);
+    } else {
+        float next[(n+1)/2];
+#pragma unroll
+        for (int i = 0; i < n/2; ++i) {
+            const bool upper = (lane & delta) != 0;
+            const float own = upper ? v[2*i+1] : v[2*i];
+            const float peer = upper ? v[2*i] : v[2*i+1];
+            next[i] = own + __shfl_xor_sync(0xffffffffu, peer, delta);
+        }
+        if constexpr (n%2 != 0) {
+            next[n/2] = v[n-1] + __shfl_xor_sync(0xffffffffu, v[n-1], delta);
+        }
+        if constexpr (delta == 1) {
+            return next[0];
+        } else {
+            return ik_reduce_moments<(n+1)/2, delta/2>(next, lane);
+        }
+    }
+}
+
+static int ik_moments_mode() {
+    static const int mode = getenv("IK_MOMENTS") ? atoi(getenv("IK_MOMENTS")) : 0;
+    return mode;
+}
+
 // n_embd % 4 == 0 and n_embd/4 <= block_size: one float4 of every state per thread, a single pass of loads
-template <int block_size, bool q8, int NS = 0>
+template <int block_size, bool q8, int NS = 0, bool compact = false>
 static __device__ __forceinline__ void ik_mix_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
         const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
         const ik_res_mix_norm norm, int t, int iq) {
@@ -308,9 +338,9 @@ static __device__ __forceinline__ void ik_mix_vec4(const float4 * __restrict__ q
     if (query) {
         const float4 * q = (const float4 *) ((const char *) query + iq*q_nb1);
 
-        float acc[2*IK_MAX_STATES];
+        float acc[2*(NS ? NS : IK_MAX_STATES)];
 #pragma unroll
-        for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+        for (int i = 0; i < 2*(NS ? NS : IK_MAX_STATES); ++i) {
             acc[i] = 0.0f;
         }
 
@@ -325,8 +355,13 @@ static __device__ __forceinline__ void ik_mix_vec4(const float4 * __restrict__ q
             }
         }
 
+        if constexpr (compact) {
+            const float v = ik_reduce_moments(acc, lane);
+            const int moment = __brev(lane) >> 27;
+            if (moment < 2*NS) { red[wid][moment] = v; }
+        } else {
 #pragma unroll
-        for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+        for (int i = 0; i < 2*(NS ? NS : IK_MAX_STATES); ++i) {
             if (i < 2*n_states) {
                 acc[i] = warp_reduce_sum(acc[i]);
             }
@@ -334,12 +369,13 @@ static __device__ __forceinline__ void ik_mix_vec4(const float4 * __restrict__ q
         if (lane < 2*n_states) {
             float v = 0.0f;
 #pragma unroll
-            for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+            for (int i = 0; i < 2*(NS ? NS : IK_MAX_STATES); ++i) {
                 if (i == lane) {
                     v = acc[i];
                 }
             }
             red[wid][lane] = v;
+        }
         }
         __syncthreads();
 
@@ -405,11 +441,11 @@ static __device__ __forceinline__ void ik_mix_vec4(const float4 * __restrict__ q
     }
 }
 
-template <int block_size, bool q8, int NS = 0>
+template <int block_size, bool q8, int NS = 0, bool compact = false>
 static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
         const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
         const ik_res_mix_norm norm) {
-    ik_mix_vec4<block_size, q8, NS>(query, st, dst_v, n_embd4, n_tok, state_count, q_nb1, eps, scale, norm, blockIdx.x, blockIdx.y);
+    ik_mix_vec4<block_size, q8, NS, compact>(query, st, dst_v, n_embd4, n_tok, state_count, q_nb1, eps, scale, norm, blockIdx.x, blockIdx.y);
 }
 
 // The trailing normalization weight is a source but never a mixed state.
@@ -482,6 +518,13 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                 static const bool specialize = getenv("IK_MIX_SPECIALIZE") && atoi(getenv("IK_MIX_SPECIALIZE")) != 0;
                 auto launch_mix = [&](auto state_count) {
                     constexpr int ns = decltype(state_count)::value;
+                    if constexpr (ns != 0) {
+                        if ((ik_moments_mode() & 4) && ik_dependency_fusion(ctx) && n_tok == 1) {
+                            res_mix_f32_vec4<640, kQ8, ns, true><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
+                                    n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
+                            return;
+                        }
+                    }
                     res_mix_f32_vec4<640, kQ8, ns><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
                             n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
                 };
@@ -984,12 +1027,12 @@ struct ik_mix_ctrl_args {
     float eps, scale, ctrl_eps;
 };
 
-template <int ns>
+template <int ns, bool compact = false>
 static __global__ void __launch_bounds__(640) ik_mix_down(ik_mix_ctrl_args a) {
     const int b = blockIdx.y, t = threadIdx.x, k = t%256;
     const int col = a.cols == 1 ? 0 : b;
     __shared__ __align__(16) float mixed[2304];
-    ik_mix_vec4<640, false, ns>(a.query + col*a.q_stride, a.st, mixed, 576, 1, ns, 0, a.eps, a.scale, {}, 0, 0);
+    ik_mix_vec4<640, false, ns, compact>(a.query + col*a.q_stride, a.st, mixed, 576, 1, ns, 0, a.eps, a.scale, {}, 0, 0);
     __syncthreads();
     // The mix also feeds later nodes. Write each column once.
     if (blockIdx.x == 0 && b == col && t < 576) {
@@ -1076,6 +1119,10 @@ bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml
     a.ctrl_eps = ggml_get_op_params_f32(down, 0);
     auto launch = [&](auto count) {
         constexpr int n = decltype(count)::value;
+        if (ik_moments_mode() & 2) {
+            ik_mix_down<n, true><<<dim3(32, down->ne[2]), 640, 0, ctx.stream()>>>(a);
+            return;
+        }
         ik_mix_down<n><<<dim3(32, down->ne[2]), 640, 0, ctx.stream()>>>(a);
     };
     switch (states) {
@@ -4387,7 +4434,7 @@ static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long 
     return key;
 }
 
-template <int NS, int NC, bool MR = false, bool register_rows = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
     if constexpr (MR) {
@@ -4525,6 +4572,11 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             acc[NG + i] = v;
         }
         IK_RDBG_T(7); // the loads landed (the products need them)
+        if constexpr (compact) {
+            const float v = ik_reduce_moments(acc, lane);
+            const int moment = __brev(lane) >> 27;
+            if (moment < NP) { s_red[warp][moment] = v; }
+        } else {
 #pragma unroll
         for (int i = 0; i < NP; ++i) {
             acc[i] = warp_reduce_sum(acc[i]);
@@ -4539,6 +4591,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
                 }
             }
             s_red[warp][lane] = v;
+        }
         }
     }
     __syncthreads();
@@ -4774,6 +4827,10 @@ static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_rou
         GGML_ASSERT(a.cv_n_conv == 4);
         inkling_router2_launch_nc<NS, 4>(ctx, a);
     } else if (a.query && ik_dependency_fusion(ctx) && a.n_embd == 2304 && a.n_expert == 128 && a.n_used == 8 && a.warp_topk && !a.dbg_times) {
+        if (ik_moments_mode() & 1) {
+            inkling_router2_kernel<NS, 0, false, true, true><<<32, IK_R2_BLOCK, 4*576*sizeof(float), ctx.stream()>>>(a);
+            return;
+        }
         inkling_router2_kernel<NS, 0, false, true><<<32, IK_R2_BLOCK, 4*576*sizeof(float), ctx.stream()>>>(a);
     } else {
         inkling_router2_launch_nc<NS, 0>(ctx, a);

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 . perf/p5env.sh
-export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0 LD_LIBRARY_PATH="$PWD/build/bin"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0 LD_LIBRARY_PATH=${R4_BIN:-"$PWD/build/bin"}
 work=build/p7l3r4
 out=perf/p7l3r4
 mkdir -p "$work" "$out"
