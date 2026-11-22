@@ -1,0 +1,51 @@
+119 warmed head-to-head intervals; output head included; signed gaps in us
+kernel  calls/token  busy_us/call  busy_us/token
+ik_dense_warp_roles                   48.0   34.824  1671.542
+mul_mat_vec_q[576,8]                  48.0   19.172   920.255
+ik_dense_scan_inputs                  48.0   10.936   524.934
+ik_q2_down_rows                       44.0   10.081   443.579
+ik_projection_conv_kernel             48.0    6.952   333.681
+inkling_router2_kernel                48.0    6.936   332.918
+ik_mix_down                           46.0    6.924   318.517
+mul_mat_vec_q[100512,1]                1.0  298.655   298.655
+ik_ctrl_apply_pack                    24.0    6.804   163.301
+res_mix_f32_vec4                      29.0    4.275   123.981
+mul_mat_vec_q[1152,8]                  4.0   30.424   121.697
+inkling_moe_sum_conv_kernel           48.0    2.080    99.846
+situ_q8_1_kernel                      48.0    1.859    89.248
+ik_ctrl_apply8                        24.0    2.458    58.986
+loop_ctrl_down_f32                     2.0    4.981     9.961
+rms_norm_f32                           1.0    3.226     3.226
+softcap_f32                            1.0    2.559     2.559
+k_get_rows_float                       1.0    1.711     1.711
+quantize_q8_1                          1.0    1.390     1.390
+producer -> consumer  calls/token  mean_gap_us  mean_consumer_us  total_gap_us/token
+softcap_f32                 -> rms_norm_f32                  1.0  319.312    3.226   319.312
+ik_dense_warp_roles         -> ik_projection_conv_kernel    48.0    0.124    6.952     5.966
+inkling_router2_kernel      -> mul_mat_vec_q[576,8]         42.0    0.135   19.463     5.682
+res_mix_f32_vec4            -> ik_dense_scan_inputs         24.0    0.085   10.865     2.045
+ik_mix_down                 -> ik_ctrl_apply8               24.0    0.081    2.458     1.950
+ik_ctrl_apply8              -> inkling_router2_kernel       24.0    0.079    6.204     1.905
+ik_mix_down                 -> ik_ctrl_apply_pack           22.0    0.082    6.804     1.807
+ik_ctrl_apply_pack          -> ik_dense_scan_inputs         24.0    0.075   11.007     1.790
+ik_projection_conv_kernel   -> ik_mix_down                  24.0    0.041    5.359     0.988
+ik_q2_down_rows             -> inkling_moe_sum_conv_kernel  44.0    0.022    2.075     0.973
+ik_projection_conv_kernel   -> inkling_router2_kernel       24.0    0.027    7.668     0.655
+inkling_router2_kernel      -> mul_mat_vec_q[1152,8]         4.0    0.086   30.424     0.342
+res_mix_f32_vec4            -> mul_mat_vec_q[576,8]          2.0    0.086   19.488     0.171
+res_mix_f32_vec4            -> loop_ctrl_down_f32            2.0    0.081    4.981     0.161
+inkling_router2_kernel      -> res_mix_f32_vec4              2.0    0.080    2.742     0.159
+loop_ctrl_down_f32          -> ik_ctrl_apply_pack            2.0    0.068    6.802     0.136
+quantize_q8_1               -> mul_mat_vec_q[100512,1]       1.0    0.089  298.655     0.089
+res_mix_f32_vec4            -> k_get_rows_float              1.0    0.073    1.711     0.073
+k_get_rows_float            -> quantize_q8_1                 1.0    0.071    1.390     0.071
+rms_norm_f32                -> res_mix_f32_vec4              1.0    0.067    3.034     0.067
+inkling_moe_sum_conv_kernel -> ik_mix_down                  22.0    0.001    8.632     0.022
+mul_mat_vec_q[100512,1]     -> softcap_f32                   1.0   -0.090    2.559    -0.090
+inkling_moe_sum_conv_kernel -> res_mix_f32_vec4             26.0   -0.008    4.441    -0.213
+situ_q8_1_kernel            -> mul_mat_vec_q[576,8]          4.0   -0.061   15.960    -0.245
+mul_mat_vec_q[576,8]        -> inkling_moe_sum_conv_kernel   4.0   -0.063    2.139    -0.252
+mul_mat_vec_q[1152,8]       -> situ_q8_1_kernel              4.0   -0.071    1.859    -0.286
+situ_q8_1_kernel            -> ik_q2_down_rows              44.0   -0.055   10.081    -2.427
+mul_mat_vec_q[576,8]        -> situ_q8_1_kernel             44.0   -0.060    1.859    -2.633
+ik_dense_scan_inputs        -> ik_dense_warp_roles          48.0   -0.060   34.824    -2.868

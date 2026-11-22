@@ -228,6 +228,23 @@ At `p7l3r2-late-gate-221tok`, mode 5 selects the single-launch late gate and mod
 
 ## Round 3 on GPU0
 
+### Final plain decode
+
+The default reached **224.77 / 206.57 / 193.43 / 178.68 tok/s** at context depths 0 / 4096 / 16384 / 32768 on GPU0. Depth zero took 4.449 ms/token, leaving 1.116 ms/token to the 300 tok/s target. The measured complete visit was slower than its graph, so work on that schedule stopped at the visit scale. Selected source `812b439`, results tag `p7l3r3-final-225tok`. [Fresh 16264c6 baseline](p7l3r3/final/official-base.txt), [final default](p7l3r3/final/official-on.txt), [matched full visit](p7l3r3/layer-and-pass.txt)
+
+| Cache depth | 16264c6, tok/s | Final default, tok/s | Gain vs 16264c6 | Round 2 path, paired | Round 3 path, paired | Incremental gain |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 215.91 +/- 1.98 | 224.77 +/- 1.36 | +4.10% | 222.75 | 224.80 | +0.92% |
+| 4096 | 198.06 +/- 3.56 | 206.57 +/- 3.31 | +4.30% | 205.46 | 207.51 | +1.00% |
+| 16384 | 186.16 +/- 2.30 | 193.43 +/- 2.11 | +3.91% | 192.78 | 194.37 | +0.82% |
+| 32768 | 170.45 +/- 2.00 | 178.68 +/- 2.10 | +4.83% | 178.15 | 179.81 | +0.93% |
+
+The first two rate columns use the specified four-depth tg128 command with three repetitions and show the reported sample standard deviation. The paired columns average two three-repetition runs per setting, in off/on/on/off order separately at each depth. Off selects the Round 2 path in the same binary. All 16 paired runs began at or below 63 C. The earlier opt-in build also improved all four per-depth paired means. [Final paired runs](p7l3r3/final/paired.txt), [earlier paired runs](p7l3r3/paired.txt), [benchmark and validation driver](p7l3r3/validate.sh)
+
+The final Release sm_86 build uses the two-rank mixed-state controller down kernel at 46 sites, cooperative controller apply/RMS/Q8 at 24 sites, and four-row register routing for the 24 queried routers. It keeps the existing eight-row kernel at the 24 single-state routers. The 82-SM GA10x device and shape guards select these paths with the brief's plain-decode environment. `IK_DEPENDENCY_FUSION=0` runs the Round 2 control. Both the depth-zero and 32K traces cover the selected controller kernels. [Short launch geometry](p7l3r3/final/coverage.txt), [32K trace](p7l3r3/final/32k-edges.txt), [implementation](../ggml/src/ggml-cuda/inkling.cu)
+
+The final default and 16264c6 measured prefill/decode PPL **3.0530 / 4.1979** on the requested workloads. All 88 full-vocabulary rows matched bit for bit, including eight rows after each long prefix. All **2,834 DSpark rows** matched the single-token reference across 12 checks, including trace replay and rollback. All **3,988 supported backend cases** passed. Six fallback settings matched their same-configuration controls for eight additional vocabulary rows each. [PPL](p7l3r3/final/ppl.txt), [logit hashes](p7l3r3/final/logits.txt), [DSpark](p7l3r3/final/mr.txt), [CUDA operators](p7l3r3/final/ops.txt), [fallbacks](p7l3r3/final/fallbacks.txt)
+
 ### Cost of a dependency
 
 At 82 blocks on the RTX 3090, one point-to-point handoff took 0.352 us, 47% less than an empty CUDA graph edge. A cooperative grid barrier took 0.651 us. A single producer waking every block and waiting for acknowledgements took 0.817 us. For four dependencies per visit across 48 visits, replacing graph edges with ideal point-to-point handoffs would save 0.061 ms/token. Round 2 needed 1.150 ms/token to reach 300 tok/s. The scope of the dependency matters when projecting that saving onto decode. [Microbenchmark](p7l3r3/dependency.cu), [raw event times](p7l3r3/dependency.txt), [Round 2 rates](p7l3r2/default.txt)
