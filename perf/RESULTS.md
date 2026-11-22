@@ -1635,3 +1635,18 @@ Combined runtime source `f7f505c` (`p8m-merged`), physical GPU1 (03:00.0). The f
 At target/draft microbatches 512/512 on the merged build, median client TTFT at 4K / 16K / 32K was 1.458 / 5.738 / 12.498 s plain, 1.500 / 5.868 / 12.838 s with adaptive cap 3 and 1.500 / 5.877 / 12.850 s with adaptive cap 6. Three uncached tool follow-ups per depth, after warmup, with 128 reply tokens. At cap 6 the 2,048/512 split measured 1.425 / 5.673 / 12.675 s. Minimum whole-device free memory was 7,816 MiB for 512/512 and 2,084 MiB for 2,048/512, sampled every 250 ms. [Samples and memory](p8m/ttft/), [replay driver](p8m/ttft.sh).
 
 The main short suite matched all 126 drafted replies and the five additional prose prompts matched all 100. On the short agent replay, plain / adaptive cap 3 / adaptive cap 6 measured 218.3 / 300.5 / 303.1 tok/s. At 32K edit depth the same settings measured 186.1 / 257.7 / 255.0. Cap 6 was within 0.1% of plain on the lighthouse prompt and the letter, and 1.1% behind plain on dialogue. [Main medians](p8m/matrix/main/384/), [extra prose medians](p8m/matrix/prose/384/), [GPU assignment](p8m/device.txt).
+
+### Merged served decode
+
+Decode tok/s. The 384-token columns are three-request medians. Long columns are single uncached 3,000-token requests. All six guarded width-2/3/4 configurations and adaptive cap 6 matched every main plain message and emitted ID.
+
+| Prompt | Plain 384 | Cap 6 384 | Plain 3,000 | Cap 6 3,000 |
+|---|---:|---:|---:|---:|
+| Code | 224.6 | 254.8 | 219.3 | 277.5 |
+| Edit | 220.0 | 350.5 | 217.3 | 310.9 |
+| Prose | 224.3 | 224.1 | 219.1 | 306.7 |
+| Edit at 16K | 201.8 | 291.7 | 200.5 | 305.2 |
+| Edit at 32K | 186.1 | 255.0 | 185.1 | 306.3 |
+| Agent tool replay | 218.3 | 303.1 | 217.4 | 330.5 |
+
+Cap 6 exceeded cap 3 on five of the six long prompts, and cap 3 was 2.2 tok/s faster on long code. Short cap 3 was 3.5 / 2.7 tok/s faster than cap 6 on edit at 16K / 32K. [384-token captures](p8m/matrix/main/384/), [3,000-token captures](p8m/matrix/main/3000/).
