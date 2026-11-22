@@ -2462,8 +2462,8 @@ static __global__ void inkling_window_scan(ik_attn_args a, float * parts) {
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
 #endif
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false>
-static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in, const float * scan = nullptr) {
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false, bool STAGED = false>
+static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, const float * scan, const int row, const char * tile) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
@@ -2472,7 +2472,6 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     // with the cells of the earlier rows), so this kernel neither convolves nor stores nor touches the recurrent state.
     ik_attn_args args_m;
     if constexpr (MR) {
-        const int row = blockIdx.x;
         args_m = args_in;
         args_m.proj    += (int64_t) row*args_in.proj_s1;
         args_m.kv_idxs += row;
@@ -2800,7 +2799,12 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
                     }
                 } else {
                     for (int kt = w0; kt < w1; kt += 16) {
-                        ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                        if (STAGED && args.n_kv == args_in.n_kv) {
+                            const int stride = 4*sizeof(block_q8_0);
+                            ik_mma_step<G>(args, st, s_r, tile, stride, tile + args_in.kv_per_split*stride, stride, kv0, kv1 - kv0 - 1, kt, w1, kv_idx);
+                        } else {
+                            ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                        }
                     }
                 }
             }
@@ -3087,6 +3091,28 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         }
     }
     IK_DBG_T(7);
+}
+
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false>
+static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in, const float * scan = nullptr) {
+    ik_attn2<cache_t, q8_out, G, MMA, MR, HAS_TAPS, SHORT_SCAN, SHARED_SCAN>(args_in, scan, blockIdx.x, nullptr);
+}
+
+template <int TAPS>
+static __global__ void __launch_bounds__(IK_A2_BLOCK, 1) inkling_attn_window_tile(const ik_attn_args a, const int rows) {
+    extern __shared__ uint2 cache[];
+    const int base = blockIdx.z*a.kv_per_split;
+    const int count = min(a.n_kv - base, a.kv_per_split);
+    for (int i = threadIdx.x; i < count*17; i += blockDim.x) {
+        const int64_t off = (int64_t) (base + i/17)*a.kc_nb2 + blockIdx.y*a.kc_nb1 + i%17*sizeof(uint2);
+        cache[i] = *(const uint2 *) (a.k_cache + off);
+        cache[a.kv_per_split*17 + i] = *(const uint2 *) (a.v_cache + off);
+    }
+    __syncthreads();
+    for (int r = blockIdx.x*rows; r < min(int(blockIdx.x + 1)*rows, a.mr_rows); ++r) {
+        ik_attn2<block_q8_0, true, 3, true, true, TAPS, false, false, true>(a, nullptr, r, (const char *) cache);
+        __syncthreads();
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3482,7 +3508,20 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             else if (a.has_taps) { inkling_attn_kv_rows_kernel<block_q8_0, 1><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
             else                 { inkling_attn_kv_rows_kernel<block_q8_0, 0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
             static const int shared_min = getenv("IK_WINDOW_SCAN_MIN") ? atoi(getenv("IK_WINDOW_SCAN_MIN")) : 0;
-            if (fixed && shared_min > 0 && a.n_kv >= shared_min && (uintptr_t) a.k_cache % 8 == 0 && (uintptr_t) a.v_cache % 8 == 0) {
+            static const int tile_rows = getenv("IK_WINDOW_TILE_ROWS") ? atoi(getenv("IK_WINDOW_TILE_ROWS")) : 0;
+            if (fixed && tile_rows >= 2 && a.kv_per_split <= 256 && (uintptr_t) a.k_cache % 8 == 0 && (uintptr_t) a.v_cache % 8 == 0) {
+                const int rows = std::min(n_rows, tile_rows);
+                const size_t smem = 2*4*sizeof(block_q8_0)*a.kv_per_split;
+                static const bool opt_in = [] {
+                    CUDA_CHECK(cudaFuncSetAttribute(inkling_attn_window_tile<0>, cudaFuncAttributeMaxDynamicSharedMemorySize, 256*272));
+                    CUDA_CHECK(cudaFuncSetAttribute(inkling_attn_window_tile<1>, cudaFuncAttributeMaxDynamicSharedMemorySize, 256*272));
+                    return true;
+                }();
+                (void) opt_in;
+                const dim3 grid((n_rows + rows - 1)/rows, a.n_head_kv, a.n_split);
+                if (a.has_taps) { inkling_attn_window_tile<1><<<grid, IK_A2_BLOCK, smem, stream>>>(a, rows); }
+                else            { inkling_attn_window_tile<0><<<grid, IK_A2_BLOCK, smem, stream>>>(a, rows); }
+            } else if (fixed && shared_min > 0 && a.n_kv >= shared_min && (uintptr_t) a.k_cache % 8 == 0 && (uintptr_t) a.v_cache % 8 == 0) {
                 ggml_cuda_pool_alloc<float> scan(ctx.pool(), (size_t) n_rows*8*a.n_split*IK_A2_WARPS*3*(IK_ATTN_HD + 2));
                 inkling_window_scan<<<dim3(IK_A2_WARPS, 8, a.n_split), n_rows*WARP_SIZE, 0, stream>>>(a, scan.get());
                 if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, true, 1, false, true><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a, scan.get()); }
