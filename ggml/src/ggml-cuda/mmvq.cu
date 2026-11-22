@@ -1727,11 +1727,42 @@ void ggml_cuda_op_mul_mat_vec_q(
 // So each distinct expert of a layer visit is streamed once for the whole window.
 
 #define IK_MR_MAX_COLS 8
+#define IK_MR_PLAN     (IK_MR_MAX_COLS + 1) // ints per (token, slot) pair: the number of columns (0: not the owner), their pairs
 
-template <ggml_type type, bool small_k>
+// The plan of a window's expert visit: pair s = (token, slot) owns its expert when no earlier token selected it; its
+// columns are the pairs of the window with that expert (itself first). One thread per pair.
+static __global__ void ik_mmvq_mr_plan(const int32_t * GGML_CUDA_RESTRICT ids, int32_t * GGML_CUDA_RESTRICT plan,
+        const uint32_t n_tok, const uint32_t n_used, const uint32_t ids_stride) {
+    const uint32_t s = threadIdx.x;
+    if (s >= n_tok*n_used) {
+        return;
+    }
+    const uint32_t t0 = s / n_used;
+    const uint32_t k0 = s - t0*n_used;
+    const int32_t  e  = ids[k0 + t0*ids_stride];
+    int32_t * p = plan + s*IK_MR_PLAN;
+    int ncol = 1;
+    for (uint32_t t = 0; t < n_tok; ++t) {
+        for (uint32_t k = 0; k < n_used; ++k) {
+            if (t != t0 && ids[k + t*ids_stride] == e) {
+                if (t < t0) {
+                    ncol = 0;
+                } else if (ncol > 0) {
+                    p[1 + ncol++] = t*n_used + k;
+                }
+            }
+        }
+    }
+    p[0] = ncol;
+    p[1] = s;
+}
+
+// NC: the most columns of a block (the tokens of the window, rounded up)
+template <ggml_type type, bool small_k, int NC>
 __launch_bounds__(calc_nwarps(type, 1, get_device_table_id(), small_k, false)*ggml_cuda_get_physical_warp_size(), 1)
 static __global__ void ik_mmvq_mr(
         const void * GGML_CUDA_RESTRICT vx, const block_q8_1 * GGML_CUDA_RESTRICT vy, const int32_t * GGML_CUDA_RESTRICT ids,
+        const int32_t * GGML_CUDA_RESTRICT plan,
         float * GGML_CUDA_RESTRICT dst, const uint32_t ncols_x, const uint32_t nrows_x, const uint32_t stride_row_x,
         const uint32_t stride_expert_x, const uint32_t n_tok, const uint32_t n_used, const uint32_t ids_stride,
         const uint32_t y_stride_tok, const uint32_t y_stride_slot, const uint32_t dst_stride_tok, const uint32_t dst_stride_slot) {
@@ -1751,53 +1782,33 @@ static __global__ void ik_mmvq_mr(
     constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
 
     // the columns of this block: (activation, output) pairs
-    int ncol = 0;
+    int ncol = n_tok;
     uint32_t expert = 0;
-    const block_q8_1 * ys[IK_MR_MAX_COLS];
-    float            * ds[IK_MR_MAX_COLS];
-    if (ids) {
-        const uint32_t t0 = blockIdx.y / n_used;
-        const uint32_t k0 = blockIdx.y - t0*n_used;
-        expert = ids[k0 + t0*ids_stride];
-        for (uint32_t t = 0; t < t0; ++t) {
-            for (uint32_t k = 0; k < n_used; ++k) {
-                if ((uint32_t) ids[k + t*ids_stride] == expert) {
-                    return; // an earlier row owns the expert
-                }
-            }
+    uint32_t yo[NC], dof[NC]; // offsets of the columns in vy (blocks) and dst
+    if (plan) {
+        const int32_t * p = plan + blockIdx.y*IK_MR_PLAN;
+        ncol = p[0];
+        if (ncol == 0) {
+            return; // an earlier token owns the expert
         }
+        expert = ids[blockIdx.y % n_used + (blockIdx.y / n_used)*ids_stride];
 #pragma unroll
-        for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
-            ys[j] = vy; ds[j] = dst;
-        }
-        ys[0] = vy + t0*y_stride_tok + k0*y_stride_slot;
-        ds[0] = dst + t0*dst_stride_tok + k0*dst_stride_slot;
-        ncol  = 1;
-        for (uint32_t t = t0 + 1; t < n_tok; ++t) {
-            for (uint32_t k = 0; k < n_used; ++k) {
-                if ((uint32_t) ids[k + t*ids_stride] == expert) {
-#pragma unroll
-                    for (int j = 1; j < IK_MR_MAX_COLS; ++j) {
-                        if (j == ncol) {
-                            ys[j] = vy + t*y_stride_tok + k*y_stride_slot;
-                            ds[j] = dst + t*dst_stride_tok + k*dst_stride_slot;
-                        }
-                    }
-                    ++ncol;
-                }
-            }
+        for (int j = 0; j < NC; ++j) {
+            const uint32_t s = p[1 + min(j, ncol - 1)];
+            const uint32_t t = s / n_used, k = s - t*n_used;
+            yo[j]  = t*y_stride_tok + k*y_stride_slot;
+            dof[j] = t*dst_stride_tok + k*dst_stride_slot;
         }
     } else {
-        ncol = n_tok;
 #pragma unroll
-        for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
-            ys[j] = vy + min((uint32_t) j, n_tok - 1)*y_stride_tok;
-            ds[j] = dst + min((uint32_t) j, n_tok - 1)*dst_stride_tok;
+        for (int j = 0; j < NC; ++j) {
+            yo[j]  = min((uint32_t) j, n_tok - 1)*y_stride_tok;
+            dof[j] = min((uint32_t) j, n_tok - 1)*dst_stride_tok;
         }
     }
 
     // partial sum for each thread
-    float tmp[IK_MR_MAX_COLS][rows_per_cuda_block] = {{0.0f}};
+    float tmp[NC][rows_per_cuda_block] = {{0.0f}};
 
     const int kbx_offset = expert*stride_expert_x + row0*stride_row_x;
 
@@ -1808,24 +1819,26 @@ static __global__ void ik_mmvq_mr(
         const int kqs = vdr * (tid % (qi/vdr));
 
 #pragma unroll
-        for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
+        for (int j = 0; j < NC; ++j) {
             if (j < ncol) {
 #pragma unroll
                 for (int i = 0; i < rows_per_cuda_block; ++i) {
-                    tmp[j][i] += vec_dot_q_cuda(vx, &ys[j][kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                    tmp[j][i] += vec_dot_q_cuda(vx, &vy[yo[j] + kby], kbx_offset + i*stride_row_x + kbx, kqs);
                 }
             }
         }
     }
 
-    __shared__ float tmp_shared[nwarps-1 > 0 ? nwarps-1 : 1][IK_MR_MAX_COLS][rows_per_cuda_block][warp_size];
+    __shared__ float tmp_shared[nwarps-1 > 0 ? nwarps-1 : 1][NC][rows_per_cuda_block][warp_size];
 
     if (threadIdx.y > 0) {
 #pragma unroll
-        for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
+        for (int j = 0; j < NC; ++j) {
+            if (j < ncol) {
 #pragma unroll
-            for (int i = 0; i < rows_per_cuda_block; ++i) {
-                tmp_shared[threadIdx.y-1][j][i][threadIdx.x] = tmp[j][i];
+                for (int i = 0; i < rows_per_cuda_block; ++i) {
+                    tmp_shared[threadIdx.y-1][j][i][threadIdx.x] = tmp[j][i];
+                }
             }
         }
     }
@@ -1836,7 +1849,7 @@ static __global__ void ik_mmvq_mr(
 
     // sum up partial sums and write back result
 #pragma unroll
-    for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
+    for (int j = 0; j < NC; ++j) {
         if (j < ncol) {
 #pragma unroll
             for (int i = 0; i < rows_per_cuda_block; ++i) {
@@ -1847,7 +1860,7 @@ static __global__ void ik_mmvq_mr(
                 tmp[j][i] = warp_reduce_sum<warp_size>(tmp[j][i]);
 
                 if (threadIdx.x == i && (rows_per_cuda_block == 1 || uint32_t(row0 + i) < nrows_x)) {
-                    ds[j][row0 + i] = tmp[j][i];
+                    dst[dof[j] + row0 + i] = tmp[j][i];
                 }
             }
         }
@@ -1856,7 +1869,7 @@ static __global__ void ik_mmvq_mr(
 
 template <ggml_type type>
 static void ik_mmvq_mr_launch(
-        const void * vx, const block_q8_1 * vy, const int32_t * ids, float * dst, const uint32_t ncols_x, const uint32_t nrows_x,
+        const void * vx, const block_q8_1 * vy, const int32_t * ids, const int32_t * plan, float * dst, const uint32_t ncols_x, const uint32_t nrows_x,
         const uint32_t stride_row_x, const uint32_t stride_expert_x, const uint32_t n_tok, const uint32_t n_used, const uint32_t ids_stride,
         const uint32_t y_stride_tok, const uint32_t y_stride_slot, const uint32_t dst_stride_tok, const uint32_t dst_stride_slot,
         const int warp_size, const mmvq_parameter_table_id table_id, cudaStream_t stream) {
@@ -1867,18 +1880,28 @@ static void ik_mmvq_mr_launch(
     const int  nwarps1 = calc_nwarps(type, 1, table_id);
     const bool small_k = nwarps1 > 1 && (int) (ncols_x/qk) < nwarps1*(vdr*warp_size/qi) && type != GGML_TYPE_IQ3_XXS && type != GGML_TYPE_IQ3_S;
     const int  n_slots = ids ? n_tok*n_used : 1;
+    auto launch = [&](auto SK, auto NCT) {
+        constexpr bool sk = decltype(SK)::value;
+        constexpr int  nc = decltype(NCT)::value;
+        const int nwarps = calc_nwarps(type, 1, table_id, sk, false);
+        const int rpb    = calc_rows_per_block(type, 1, table_id, sk, nwarps, false);
+        ik_mmvq_mr<type, sk, nc><<<dim3((nrows_x + rpb - 1)/rpb, n_slots, 1), dim3(warp_size, nwarps, 1), 0, stream>>>(
+                vx, vy, ids, plan, dst, ncols_x, nrows_x, stride_row_x, stride_expert_x, n_tok, n_used, ids_stride,
+                y_stride_tok, y_stride_slot, dst_stride_tok, dst_stride_slot);
+    };
+    auto launch_nc = [&](auto SK) {
+        if (n_tok <= 2) {
+            launch(SK, std::integral_constant<int, 2>{});
+        } else if (n_tok <= 4) {
+            launch(SK, std::integral_constant<int, 4>{});
+        } else {
+            launch(SK, std::integral_constant<int, 8>{});
+        }
+    };
     if (small_k) {
-        const int nwarps = calc_nwarps(type, 1, table_id, true, false);
-        const int rpb    = calc_rows_per_block(type, 1, table_id, true, nwarps, false);
-        ik_mmvq_mr<type, true><<<dim3((nrows_x + rpb - 1)/rpb, n_slots, 1), dim3(warp_size, nwarps, 1), 0, stream>>>(
-                vx, vy, ids, dst, ncols_x, nrows_x, stride_row_x, stride_expert_x, n_tok, n_used, ids_stride,
-                y_stride_tok, y_stride_slot, dst_stride_tok, dst_stride_slot);
+        launch_nc(std::true_type{});
     } else {
-        const int nwarps = calc_nwarps(type, 1, table_id, false, false);
-        const int rpb    = calc_rows_per_block(type, 1, table_id, false, nwarps, false);
-        ik_mmvq_mr<type, false><<<dim3((nrows_x + rpb - 1)/rpb, n_slots, 1), dim3(warp_size, nwarps, 1), 0, stream>>>(
-                vx, vy, ids, dst, ncols_x, nrows_x, stride_row_x, stride_expert_x, n_tok, n_used, ids_stride,
-                y_stride_tok, y_stride_slot, dst_stride_tok, dst_stride_slot);
+        launch_nc(std::false_type{});
     }
 }
 
@@ -1895,7 +1918,7 @@ bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * s
     }
     switch (src0->type) {
         case GGML_TYPE_Q2_0: case GGML_TYPE_Q4_0: case GGML_TYPE_Q8_0: case GGML_TYPE_Q2_K: case GGML_TYPE_Q3_K:
-        case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K: case GGML_TYPE_Q6_K: case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_Q6_K: case GGML_TYPE_IQ4_NL:
             break;
         default:
             return false;
@@ -1937,11 +1960,18 @@ bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * s
     const uint32_t d_slot = ids ? d1 : 0;
     GGML_ASSERT(!ids || (ids->ne[0] == n_used && ids->ne[1] == n_tok && (src1->ne[1] == 1 || src1->ne[1] == n_used) && src1->ne[2] == n_tok));
 
-#define IK_MR_CASE(T) case T: ik_mmvq_mr_launch<T>(src0->data, y, ids_d, (float *) dst->data, src0->ne[0], src0->ne[1], s01, s02, n_tok, n_used, \
+    ggml_cuda_pool_alloc<int32_t> plan(ctx.pool());
+    if (ids) {
+        GGML_ASSERT(n_tok*n_used <= 64);
+        plan.alloc((size_t) n_tok*n_used*IK_MR_PLAN);
+        ik_mmvq_mr_plan<<<1, 64, 0, stream>>>(ids_d, plan.get(), n_tok, n_used, ids_stride);
+    }
+    const int32_t * plan_d = ids ? plan.get() : nullptr;
+#define IK_MR_CASE(T) case T: ik_mmvq_mr_launch<T>(src0->data, y, ids_d, plan_d, (float *) dst->data, src0->ne[0], src0->ne[1], s01, s02, n_tok, n_used, \
         ids_stride, y_tok, y_slot, d_tok, d_slot, warp_size, table_id, stream); break;
     switch (src0->type) {
         IK_MR_CASE(GGML_TYPE_Q2_0) IK_MR_CASE(GGML_TYPE_Q4_0) IK_MR_CASE(GGML_TYPE_Q8_0) IK_MR_CASE(GGML_TYPE_Q2_K) IK_MR_CASE(GGML_TYPE_Q3_K)
-        IK_MR_CASE(GGML_TYPE_Q4_K) IK_MR_CASE(GGML_TYPE_Q5_K) IK_MR_CASE(GGML_TYPE_Q6_K) IK_MR_CASE(GGML_TYPE_IQ4_NL)
+        IK_MR_CASE(GGML_TYPE_Q6_K) IK_MR_CASE(GGML_TYPE_IQ4_NL)
         default: GGML_ABORT("ik_mmvq_mr: unsupported type");
     }
 #undef IK_MR_CASE
