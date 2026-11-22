@@ -51,7 +51,7 @@ def footprint(name, params, grid, pos, full):
         ns = params[0]
         return F * (128 + ns + (ns > 1) + 1 + 1) + Q + 128 * 4 + 16 * 4
     if name == 'res_mix_f32_vec4':
-        _, q8, ns = params
+        _, q8, ns = params[:3]
         queries = 0 if ns == 1 else gy
         norm = gy if q8 or ns == 5 else 0
         return F * (queries + ns + norm) + (Q if q8 else F) * gy

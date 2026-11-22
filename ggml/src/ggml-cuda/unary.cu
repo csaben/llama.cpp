@@ -1,4 +1,5 @@
 #include "unary.cuh"
+#include "inkling.cuh"
 #include "convert.cuh"
 
 static __device__ __forceinline__ float op_abs(float x) {
@@ -583,17 +584,17 @@ static __global__ void situ_kernel(const float * gate, const float * up, float *
 }
 
 // one warp per 32 consecutive outputs, written as a Q8_1 block
-template <bool is_situ, bool fixed=false>
+template <bool is_situ, bool fixed = false>
 static __global__ void situ_q8_1_kernel(const float * gate, const float * up, block_q8_1 * dst, const int64_t n_blocks, const int64_t n, const int64_t o0, const int64_t o1, const float beta, const float lb) {
-    const int c=blockIdx.x*blockDim.x+threadIdx.x;
-    const int64_t b = fixed ? blockIdx.y*36+c/32 : (int64_t) blockIdx.x*(blockDim.x/WARP_SIZE) + threadIdx.x/WARP_SIZE;
+    const int c = blockIdx.x*blockDim.x + threadIdx.x;
+    const int64_t b = fixed ? blockIdx.y*36 + c/32 : (int64_t) blockIdx.x*(blockDim.x/WARP_SIZE) + threadIdx.x/WARP_SIZE;
     const int lane = threadIdx.x % WARP_SIZE;
-    if (fixed ? c>=1152 : b >= n_blocks) {
+    if (fixed ? c >= 1152 : b >= n_blocks) {
         return;
     }
     const int64_t i  = b*QK8_1 + lane; // output index
-    const int64_t j0 = fixed ? blockIdx.y*o0+c : (i / n) * o0 + (i % n);
-    const int64_t j1 = fixed ? blockIdx.y*o1+c : o0 == o1 ? j0 : (i / n) * o1 + (i % n);
+    const int64_t j0 = fixed ? blockIdx.y*o0 + c : (i / n) * o0 + (i % n);
+    const int64_t j1 = fixed ? blockIdx.y*o1 + c : o0 == o1 ? j0 : (i / n) * o1 + (i % n);
     const float g = gate[j0];
     float       u = up[j1];
     const float sig = 1.0f / (1.0f + expf(-g));
@@ -661,11 +662,9 @@ static void ggml_cuda_op_situ_impl(ggml_backend_cuda_context & ctx, ggml_tensor 
     if (dst->type == GGML_TYPE_Q8_1) {
         GGML_ASSERT(nc % QK8_1 == 0);
         const int64_t n_blocks = k/QK8_1;
-        static const int width = getenv("IK_SITU_WIDTH") ? atoi(getenv("IK_SITU_WIDTH")) : 0;
-        static const bool plain = !getenv("IK_MR") || !atoi(getenv("IK_MR"));
-        const auto & dev = ggml_cuda_info().devices[ctx.device];
-        if ((width==32 || width==64 || width==128 || width==256) && plain && dev.nsm==82 && dev.cc==GGML_CUDA_CC_AMPERE_GA10X && nc==1152 && k==8*1152) {
-            situ_q8_1_kernel<is_situ,true><<<dim3((1152+width-1)/width,8),width,0,stream>>>(src0_p,src1_p,(block_q8_1 *)dst_d,n_blocks,nc,src0_o/4,src1_o/4,beta,lb);
+        if (is_situ && nc == 1152 && k == 8*1152 && ggml_cuda_inkling_fast_glue(ctx)) {
+            const dim3 grid((1152 + CUDA_GLU_BLOCK_SIZE - 1)/CUDA_GLU_BLOCK_SIZE, 8);
+            situ_q8_1_kernel<true, true><<<grid, CUDA_GLU_BLOCK_SIZE, 0, stream>>>(src0_p, src1_p, (block_q8_1 *) dst_d, n_blocks, nc, src0_o/sizeof(float), src1_o/sizeof(float), beta, lb);
             return;
         }
         const int64_t num_blocks = (n_blocks*WARP_SIZE + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
