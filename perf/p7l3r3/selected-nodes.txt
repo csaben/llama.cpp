@@ -1,0 +1,51 @@
+119 warmed head-to-head intervals; output head included; signed gaps in us
+kernel  calls/token  busy_us/call  busy_us/token
+mul_mat_vec_q[576,8]                  48.0   19.089   916.287
+ik_dense_gate_scan                    48.0   12.314   591.081
+ik_dense_scan_inputs                  48.0   10.877   522.088
+ik_q2_down_rows                       44.0   10.047   442.069
+ik_projection_conv_kernel             48.0    6.992   335.625
+inkling_router2_kernel                48.0    6.970   334.580
+ik_mix_down                           46.0    6.802   312.881
+mul_mat_vec_q[100512,1]                1.0  298.605   298.605
+ik_ctrl_apply_pack                    24.0    7.119   170.853
+res_mix_f32_vec4                      29.0    4.253   123.348
+mul_mat_vec_q[1152,8]                  4.0   30.226   120.905
+inkling_moe_sum_conv_kernel           48.0    2.047    98.247
+situ_q8_1_kernel                      48.0    1.837    88.156
+ik_ctrl_apply8                        24.0    2.423    58.145
+loop_ctrl_down_f32                     2.0    4.788     9.575
+rms_norm_f32                           1.0    3.341     3.341
+softcap_f32                            1.0    2.572     2.572
+k_get_rows_float                       1.0    1.699     1.699
+quantize_q8_1                          1.0    1.378     1.378
+producer -> consumer  calls/token  mean_gap_us  mean_consumer_us  total_gap_us/token
+softcap_f32                 -> rms_norm_f32                  1.0  226.877    3.341   226.877
+inkling_router2_kernel      -> mul_mat_vec_q[576,8]         42.0    0.131   19.378     5.487
+res_mix_f32_vec4            -> ik_dense_scan_inputs         24.0    0.085   10.790     2.048
+ik_ctrl_apply8              -> inkling_router2_kernel       24.0    0.080    6.349     1.923
+ik_mix_down                 -> ik_ctrl_apply8               24.0    0.080    2.423     1.915
+ik_mix_down                 -> ik_ctrl_apply_pack           22.0    0.081    7.119     1.792
+ik_ctrl_apply_pack          -> ik_dense_scan_inputs         24.0    0.075   10.964     1.789
+ik_projection_conv_kernel   -> ik_mix_down                  24.0    0.036    5.296     0.857
+ik_projection_conv_kernel   -> inkling_router2_kernel       24.0    0.030    7.592     0.711
+ik_q2_down_rows             -> inkling_moe_sum_conv_kernel  44.0    0.014    2.039     0.631
+inkling_moe_sum_conv_kernel -> ik_mix_down                  22.0    0.015    8.444     0.340
+inkling_router2_kernel      -> mul_mat_vec_q[1152,8]         4.0    0.084   30.226     0.338
+res_mix_f32_vec4            -> mul_mat_vec_q[576,8]          2.0    0.086   19.386     0.172
+inkling_router2_kernel      -> res_mix_f32_vec4              2.0    0.082    2.723     0.165
+res_mix_f32_vec4            -> loop_ctrl_down_f32            2.0    0.080    4.788     0.161
+loop_ctrl_down_f32          -> ik_ctrl_apply_pack            2.0    0.068    7.120     0.136
+quantize_q8_1               -> mul_mat_vec_q[100512,1]       1.0    0.092  298.605     0.092
+res_mix_f32_vec4            -> k_get_rows_float              1.0    0.079    1.699     0.079
+rms_norm_f32                -> res_mix_f32_vec4              1.0    0.079    3.058     0.079
+k_get_rows_float            -> quantize_q8_1                 1.0    0.070    1.378     0.070
+mul_mat_vec_q[100512,1]     -> softcap_f32                   1.0   -0.064    2.572    -0.064
+mul_mat_vec_q[1152,8]       -> situ_q8_1_kernel              4.0   -0.056    1.832    -0.224
+situ_q8_1_kernel            -> mul_mat_vec_q[576,8]          4.0   -0.058   15.906    -0.230
+mul_mat_vec_q[576,8]        -> inkling_moe_sum_conv_kernel   4.0   -0.069    2.130    -0.274
+inkling_moe_sum_conv_kernel -> res_mix_f32_vec4             26.0   -0.018    4.417    -0.471
+situ_q8_1_kernel            -> ik_q2_down_rows              44.0   -0.052   10.047    -2.270
+ik_dense_gate_scan          -> ik_projection_conv_kernel    48.0   -0.051    6.992    -2.427
+mul_mat_vec_q[576,8]        -> situ_q8_1_kernel             44.0   -0.058    1.837    -2.554
+ik_dense_scan_inputs        -> ik_dense_gate_scan           48.0   -0.056   12.314    -2.682

@@ -4622,104 +4622,6 @@ static int ik_attention_projection_end(ggml_backend_cuda_context & ctx, const gg
            attn->ne[0] == 3072 && ggml_is_vector(attn) && ggml_is_contiguous(attn) && (attn->flags & GGML_TENSOR_FLAG_COMPUTE) ? j : i;
 }
 
-static int ik_next_compute(const ggml_cgraph * graph, int i) {
-    do { ++i; } while (i < graph->n_nodes && ggml_cuda_is_view_or_noop(graph->nodes[i]));
-    return i;
-}
-
-static int ik_ctrl_branch(ggml_backend_cuda_context & ctx, ggml_cgraph * graph, int i, int mode) {
-    int m = i;
-    int attn = i, proj = i, conv = i;
-    if (mode >= 2 && graph->nodes[i]->op == GGML_OP_INKLING_MOE_SUM_CONV) {
-        m = ik_next_compute(graph, i);
-    } else if (mode >= 2 && graph->nodes[i]->op == GGML_OP_MUL_MAT) {
-        if (mode >= 3) { attn = ik_attention_projection_end(ctx, graph, i); }
-        proj = attn == i ? i : ik_next_compute(graph, attn);
-        if (proj >= graph->n_nodes) { return 0; }
-        conv = ik_projection_conv_end(ctx, graph, proj);
-        if (conv == proj) { return 0; }
-        m = ik_next_compute(graph, conv);
-    }
-    if (m >= graph->n_nodes || graph->nodes[m]->op != GGML_OP_RES_MIX) { return 0; }
-    const int j = ik_next_compute(graph, m);
-    if (j == graph->n_nodes) { return 0; }
-    ggml_tensor * down = graph->nodes[j];
-    if (down->op != GGML_OP_LOOP_CTRL_DOWN || down->ne[1] != 1 || down->ne[0] != 64 ||
-            down->src[0]->type != GGML_TYPE_F16 || down->src[0]->ne[0] != 4608 ||
-            down->src[1]->data != graph->nodes[m]->data ||
-            !(down->flags & GGML_TENSOR_FLAG_COMPUTE) || !(graph->nodes[m]->flags & GGML_TENSOR_FLAG_COMPUTE)) { return 0; }
-    if (mode < 0) {
-        return ggml_cuda_mix_down(ctx, graph->nodes[m], down, -mode) ? j - i : 0;
-    }
-    const ggml_tensor * message = down->src[2]->view_src;
-    if (!message || message->op != GGML_OP_RES_MIX) { return 0; }
-    for (int h = i; h <= m; ++h) {
-        if (graph->nodes[h] == message) { return 0; }
-    }
-
-    ggml_cuda_pool_alloc<float2> terms(ctx.pool(), ggml_nelements(down));
-    cudaEvent_t fork, join;
-    cudaStream_t primary = ctx.stream(), side = ctx.stream(ctx.device, 1);
-    CUDA_CHECK(cudaEventCreateWithFlags(&fork, cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventCreateWithFlags(&join, cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventRecord(fork, primary));
-    CUDA_CHECK(cudaStreamWaitEvent(side, fork));
-    ggml_cuda_ctrl_half(side, down, terms.get(), true);
-    CUDA_CHECK(cudaEventRecord(join, side));
-    if (graph->nodes[i]->op == GGML_OP_INKLING_MOE_SUM_CONV) {
-        ggml_cuda_op_inkling_moe_sum_conv(ctx, graph->nodes[i]);
-    } else if (conv > proj) {
-        if (attn > i && !ggml_cuda_inkling_project_attention(ctx, graph->nodes[attn])) {
-            GGML_ASSERT(ggml_cuda_compute_forward(ctx, graph->nodes[i]));
-            GGML_ASSERT(ggml_cuda_compute_forward(ctx, graph->nodes[attn]));
-        }
-        if (!ggml_cuda_inkling_projection_conv(ctx, graph->nodes[proj], graph->nodes[conv])) {
-            GGML_ASSERT(ggml_cuda_compute_forward(ctx, graph->nodes[proj]));
-            GGML_ASSERT(ggml_cuda_compute_forward(ctx, graph->nodes[conv]));
-        }
-    }
-    ggml_cuda_op_res_mix(ctx, graph->nodes[m]);
-    CUDA_CHECK(cudaStreamWaitEvent(primary, join));
-    ggml_cuda_ctrl_half(primary, down, terms.get(), false);
-    CUDA_CHECK(cudaEventDestroy(join));
-    CUDA_CHECK(cudaEventDestroy(fork));
-    return j - i;
-}
-
-static int ik_expert_visit_end(const ggml_cgraph * g, int j, const ggml_tensor * route, int device) {
-    const auto * up = g->nodes[j];
-    const int h = ik_next_compute(g, j);
-    if (h == g->n_nodes) { return j; }
-    const auto * act = g->nodes[h];
-    if (act->op != GGML_OP_GLU || ggml_get_glu_op(act) != GGML_GLU_OP_SITU || act->type != GGML_TYPE_Q8_1 ||
-            !act->src[1] || act->src[0]->view_src != up || act->src[1]->view_src != up ||
-            act->src[0]->view_offs != 0 || act->src[1]->view_offs != 1152*sizeof(float) || act->ne[0] != 1152 ||
-            act->ne[1] != 8 || !ggml_is_matrix(act) || !ggml_is_contiguous(act)) { return j; }
-    const int d = ik_next_compute(g, h);
-    if (d == g->n_nodes) { return j; }
-    const auto * down = g->nodes[d];
-    if (down->op != GGML_OP_MUL_MAT_ID || down->src[1] != act || down->src[2] != up->src[2] ||
-            down->src[0]->type != GGML_TYPE_Q2_0 || down->src[0]->ne[2] != 128 ||
-            !ggml_is_contiguous(down->src[0]) || !down->src[0]->buffer ||
-            ggml_backend_buffer_get_type(down->src[0]->buffer) != ggml_backend_cuda_buffer_type(device) ||
-            down->ne[0] != 2304 || down->ne[1] != 8 || !ggml_is_matrix(down)) { return j; }
-    int end = ik_next_compute(g, d);
-    if (end == g->n_nodes) { return j; }
-    const auto * sum = g->nodes[end];
-    if (sum->op != GGML_OP_INKLING_MOE_SUM_CONV || sum->src[0] != down || !ggml_is_vector(sum) ||
-            sum->src[2]->ne[0] != 4 || sum->src[1]->data != (const int *)route->data + 8 ||
-            !(sum->flags & GGML_TENSOR_FLAG_COMPUTE)) { return j; }
-    for (int k = j; k < end; ++k) {
-        if (g->nodes[k]->flags & GGML_TENSOR_FLAG_OUTPUT) { return j; }
-    }
-    for (int k = end + 1; k < g->n_nodes; ++k) {
-        for (auto * src : g->nodes[k]->src) {
-            if (src && (src == up || src == act || src == down || src->view_src == up || src->view_src == act || src->view_src == down)) { return j; }
-        }
-    }
-    return end;
-}
-
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
@@ -4729,74 +4631,13 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
-    static const int tail_mix = ggml_cuda_env_int("IK_TAIL_MIX", 0);
-    if (tail_mix && node->op == GGML_OP_INKLING_MOE_SUM_CONV && !ggml_cuda_env_flag("IK_MR") &&
-            cuda_ctx->stream_context().concurrent_events.empty() && ggml_cuda_info().devices[cuda_ctx->device].nsm == 82) {
-        const int j = ik_next_compute(cgraph, i);
-        if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_RES_MIX &&
-                ggml_cuda_tail_mix(*cuda_ctx, node, cgraph->nodes[j], tail_mix)) { return j-i; }
-    }
-    static const int ctrl_pair = ggml_cuda_env_int("IK_CTRL_PAIR", 0);
-    if (ctrl_pair && !ggml_cuda_env_flag("IK_MR") && node->op == GGML_OP_LOOP_CTRL_DOWN &&
-            cuda_ctx->stream_context().concurrent_events.empty() && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X) {
-        const int j = ik_next_compute(cgraph, i);
-        if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_LOOP_CTRL_APPLY &&
-                ggml_cuda_ctrl_pair(*cuda_ctx, node, cgraph->nodes[j], ctrl_pair)) { return j - i; }
-    }
-    static const int ctrl_branch = ggml_cuda_env_int("IK_CTRL_BRANCH", 0);
-    if (ctrl_branch && !ggml_cuda_env_flag("IK_MR") && cuda_ctx->stream_context().concurrent_events.empty() &&
-            cuda_ctx->curr_stream_no == 0 && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X) {
-        const int skip = ik_ctrl_branch(*cuda_ctx, cgraph, i, ctrl_branch);
-        if (skip) { return skip; }
-    }
-
-    static const int route_visit = ggml_cuda_env_int("IK_ROUTE_VISIT", 0);
-    static const bool whole_layer = ggml_cuda_env_flag("IK_COMPLETE_LAYER");
-    if (whole_layer && route_visit > 0 && node->op == GGML_OP_MUL_MAT && cuda_ctx->stream_context().concurrent_events.empty() &&
-            ggml_cuda_info().devices[cuda_ctx->device].nsm == 82) {
-        const int a = ik_attention_projection_end(*cuda_ctx, cgraph, i);
-        const int w = a > i ? ik_next_compute(cgraph, a) : cgraph->n_nodes;
-        if (w < cgraph->n_nodes && cgraph->nodes[w]->src[1] == cgraph->nodes[a] && ggml_node_has_n_uses(cgraph, a, 1)) {
-            const int c = ik_projection_conv_end(*cuda_ctx, cgraph, w);
-            const int r = c > w ? ik_next_compute(cgraph, c) : cgraph->n_nodes;
-            const int u = r < cgraph->n_nodes ? ik_next_compute(cgraph, r) : cgraph->n_nodes;
-            if (u < cgraph->n_nodes && cgraph->nodes[r]->op == GGML_OP_INKLING_ROUTER && cgraph->nodes[u]->op == GGML_OP_MUL_MAT_ID) {
-                ggml_tensor * router = cgraph->nodes[r], * up = cgraph->nodes[u];
-                const int ns = ggml_get_op_params_i32(router, 6);
-                if (ns >= 1 && ns <= 5 && router->src[ns]->data == cgraph->nodes[c]->data && !ggml_get_op_params_i32(router, 10) &&
-                        ggml_is_vector(router) && router->ne[0] == 2304 && router->src[ns+2]->ne[1] == 128 && ggml_get_op_params_i32(router, 3) == 8 &&
-                        up->src[0]->type == GGML_TYPE_Q2_K && up->src[0]->ne[0] == 2304 && up->src[0]->ne[1] == 2304 &&
-                        up->src[0]->ne[2] == 128 && ggml_is_contiguous(up->src[0]) && router->src[ns+4] &&
-                        up->src[1]->data == router->src[ns+4]->data && ggml_is_contiguous(up->src[1]) && ggml_is_vector(up->src[1]) &&
-                        up->src[2]->data == router->src[ns+3]->data && ggml_nelements(up->src[2]) == 8 && ggml_is_contiguous(up->src[2])) {
-                    const int e = ik_expert_visit_end(cgraph, u, router->src[ns+3], cuda_ctx->device);
-                    if (e > u && ggml_cuda_inkling_layer(*cuda_ctx, cgraph->nodes[a], cgraph->nodes[w], cgraph->nodes[c], router, up, cgraph->nodes[e])) { return e-i; }
-                }
-            }
-        }
-    }
-    if (route_visit > 0 && node->op == GGML_OP_INKLING_ROUTER && !ggml_cuda_env_flag("IK_MR") &&
-            cuda_ctx->stream_context().concurrent_events.empty() && ggml_is_vector(node) && node->ne[0] == 2304 &&
-            ggml_get_op_params_i32(node, 10) == 0 && ggml_get_op_params_i32(node, 3) == 8 &&
-            ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X &&
-            ggml_cuda_info().devices[cuda_ctx->device].nsm == 82) {
+    if (node->op == GGML_OP_RES_MIX && (node->flags & GGML_TENSOR_FLAG_COMPUTE) &&
+            cuda_ctx->curr_stream_no == 0 && cuda_ctx->stream_context().concurrent_events.empty()) {
         int j = i + 1;
         while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j])) { ++j; }
-        const int states = ggml_get_op_params_i32(node, 6);
-        if (j < cgraph->n_nodes && states >= 1 && states <= 5) {
-            ggml_tensor * up = cgraph->nodes[j];
-            if (up->op == GGML_OP_MUL_MAT_ID && (up->flags & GGML_TENSOR_FLAG_COMPUTE) &&
-                    up->ne[0] == 2304 && up->ne[1] == 8 && ggml_is_matrix(up) && up->type == GGML_TYPE_F32 && ggml_is_contiguous(up) &&
-                    up->src[0]->type == GGML_TYPE_Q2_K && up->src[0]->ne[0] == 2304 && up->src[0]->ne[2] == 128 &&
-                    ggml_is_contiguous(up->src[0]) && up->src[0]->buffer && ggml_backend_buffer_get_type(up->src[0]->buffer) == ggml_backend_cuda_buffer_type(cuda_ctx->device) &&
-                    node->src[2 + states]->ne[1] == 128 && node->src[4 + states] && up->src[1]->data == node->src[4 + states]->data &&
-                    up->src[1]->type == GGML_TYPE_Q8_1 && ggml_is_vector(up->src[1]) && ggml_is_contiguous(up->src[1]) &&
-                    up->src[2]->data == node->src[3 + states]->data && ggml_nelements(up->src[2]) == 8 && ggml_is_contiguous(up->src[2])) {
-                static const bool full = ggml_cuda_env_flag("IK_FULL_FFN");
-                const int end = full ? ik_expert_visit_end(cgraph, j, node->src[3 + states], cuda_ctx->device) : j;
-                ggml_cuda_op_inkling_router(*cuda_ctx, node, up, end > j ? cgraph->nodes[end] : nullptr);
-                return end - i;
-            }
+        if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_LOOP_CTRL_DOWN &&
+                (cgraph->nodes[j]->flags & GGML_TENSOR_FLAG_COMPUTE) && ggml_cuda_mix_down(*cuda_ctx, node, cgraph->nodes[j])) {
+            return j - i;
         }
     }
 
@@ -5678,60 +5519,6 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     return 0;
 }
 
-struct ik_pass_work {
-    ggml_cuda_pool_alloc<float2> terms;
-    std::unordered_map<int, float2 *> slices;
-    int passes = 0, join_at = -1;
-    cudaEvent_t joined = nullptr;
-    explicit ik_pass_work(ggml_cuda_pool & pool) : terms(pool) {}
-};
-
-static void ik_schedule_pass(ggml_backend_cuda_context & ctx, ggml_cgraph * graph, int i, int mode, ik_pass_work & work) {
-    auto * messages = graph->nodes[i];
-    if (work.passes == 2 || messages->type != GGML_TYPE_F32 || messages->ne[0] != 2304 || messages->ne[1] != 1 ||
-            messages->ne[2] != 48 || !ggml_is_contiguous(messages) || work.joined) { return; }
-    ik_message_pass pass{};
-    int first = graph->n_nodes, calls = 0;
-    std::vector<std::pair<int,int>> jobs;
-    for (int j = i+1; j < graph->n_nodes; ++j) {
-        auto * d = graph->nodes[j];
-        if (d->op != GGML_OP_LOOP_CTRL_DOWN || d->src[2]->view_src != messages || d->ne[1] != 1 || d->ne[0] != 64 ||
-                !(d->flags & GGML_TENSOR_FLAG_COMPUTE) || d->src[0]->ne[0] != 4608 || d->src[0]->type != GGML_TYPE_F16 ||
-                !d->src[0]->buffer || ggml_backend_buffer_get_type(d->src[0]->buffer) != ggml_backend_cuda_buffer_type(ctx.device) ||
-                ggml_backend_buffer_get_usage(d->src[0]->buffer) != GGML_BACKEND_BUFFER_USAGE_WEIGHTS) { continue; }
-        if (++calls <= (mode == 1 ? 0 : 2)) { continue; }
-        const auto * input = d->src[2];
-        if (input->view_offs%messages->nb[2] || !ggml_is_contiguous(input)) { continue; }
-        const int col = input->view_offs/messages->nb[2];
-        if (col+d->ne[2] > 48) { return; }
-        for (int b = 0; b < d->ne[2]; ++b) {
-            if (pass.weights[col+b]) { return; }
-            pass.weights[col+b] = (const half *)d->src[0]->data + b*64*4608;
-            pass.inputs[col+b] = (const float *)input->data + b*2304;
-            pass.eps[col+b] = ggml_get_op_params_f32(d, 0);
-        }
-        int prev = j-1;
-        while (prev > i && ggml_cuda_is_view_or_noop(graph->nodes[prev])) { --prev; }
-        first = std::min(first, prev);
-        jobs.emplace_back(j, col);
-    }
-    if (jobs.empty()) { return; }
-    if (!work.terms.get()) { work.terms.alloc(2*48*64); }
-    float2 * terms = work.terms.get() + (work.passes++)*48*64;
-    for (auto job : jobs) { work.slices.emplace(job.first, terms+64*job.second); }
-    if (mode == 1) { ggml_cuda_message_pass(ctx.stream(), pass, terms); return; }
-    cudaEvent_t fork;
-    cudaStream_t side = ctx.stream(ctx.device, 1);
-    CUDA_CHECK(cudaEventCreateWithFlags(&fork, cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventCreateWithFlags(&work.joined, cudaEventDisableTiming));
-    CUDA_CHECK(cudaEventRecord(fork, ctx.stream()));
-    CUDA_CHECK(cudaStreamWaitEvent(side, fork));
-    ggml_cuda_message_pass(side, pass, terms);
-    CUDA_CHECK(cudaEventRecord(work.joined, side));
-    CUDA_CHECK(cudaEventDestroy(fork));
-    work.join_at = first;
-}
-
 static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
     bool graph_evaluated_or_captured = false;
 
@@ -5773,10 +5560,6 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
         // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
         if (!use_cuda_graph || cuda_graph_update_required) {
-            static const int pass_mode = ggml_cuda_env_int("IK_MESSAGE_PASS", 0);
-            const int pass = !ggml_cuda_fusion_disabled() && !ggml_cuda_env_flag("IK_MR") && stream_ctx.concurrent_events.empty() &&
-                    ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X ? pass_mode : 0;
-            ik_pass_work pass_work(cuda_ctx->pool());
             [[maybe_unused]] int prev_i = 0;
 
             if (stream_ctx.concurrent_events.size() > 0) {
@@ -5843,15 +5626,10 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 
             for (int i = 0; i < cgraph->n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];
-                if (pass_work.joined && i >= pass_work.join_at) {
-                    CUDA_CHECK(cudaStreamWaitEvent(cuda_ctx->stream(), pass_work.joined));
-                    CUDA_CHECK(cudaEventDestroy(pass_work.joined));
-                    pass_work.joined = nullptr;
-                }
 #ifdef USE_CUDA_GRAPH
                 // fused nodes are skipped together, so a cut never splits a fusion
                 // a concurrent region must join before its capture can end
-                if (use_cuda_graph && chunk_size > 0 && i >= chunk_end && !is_concurrent_event_active && !pass_work.joined) {
+                if (use_cuda_graph && chunk_size > 0 && i >= chunk_end && !is_concurrent_event_active) {
                     ggml_cuda_graph_launch_chunk(cuda_ctx, graph, n_chunks++);
                     CUDA_CHECK(cudaStreamBeginCapture(cuda_ctx->stream(), cudaStreamCaptureModeRelaxed));
                     chunk_end = i + chunk_size;
@@ -5897,24 +5675,6 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     continue;
                 }
 
-                if (pass && node->op == GGML_OP_RES_MIX && node->ne[2] == 48) {
-                    ggml_cuda_op_res_mix(*cuda_ctx, node);
-                    ik_schedule_pass(*cuda_ctx, cgraph, i, pass, pass_work);
-                    continue;
-                }
-                if (pass && node->op == GGML_OP_LOOP_CTRL_DOWN) {
-                    auto found = pass_work.slices.find(i);
-                    if (found != pass_work.slices.end()) {
-                        ggml_cuda_ctrl_half(cuda_ctx->stream(), node, found->second, false);
-                        continue;
-                    }
-                }
-                if (pass >= 3 && node->op == GGML_OP_RES_MIX) {
-                    int j = ik_next_compute(cgraph, i);
-                    auto found = pass_work.slices.find(j);
-                    if (found != pass_work.slices.end() && cgraph->nodes[j]->src[1]->data == node->data &&
-                            ggml_cuda_mix_down(*cuda_ctx, node, cgraph->nodes[j], 1, found->second)) { i = j; continue; }
-                }
                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
 
                 if (nodes_to_skip != 0) {

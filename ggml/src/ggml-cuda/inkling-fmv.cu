@@ -950,6 +950,15 @@ bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     return true;
 }
 
+struct ik_projection_conv {
+    const float * past;
+    const float * taps;
+    const float * residual;
+    float * state;
+    const int32_t * ids;
+    int64_t past_cell;
+    float scale;
+};
 
 static __global__ void ik_projection_conv_kernel(const block_iq4_nl * weights, const block_q8_1 * x, float * out, ik_projection_conv conv) {
     constexpr int blocks = 3072/QK4_NL;
@@ -993,7 +1002,7 @@ static __global__ void ik_projection_conv_kernel(const block_iq4_nl * weights, c
     }
 }
 
-bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst, ik_projection_conv * params) {
+bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst) {
     const auto * w = mm->src[0], * x = mm->src[1];
     const auto * past = dst->src[0], * taps = dst->src[1], * residual = dst->src[4], * state = dst->src[5], * ids = dst->src[6];
     if (!state || !ids || dst->src[2] != mm || dst->src[3] || ggml_get_op_params_i32(dst, 1) != 0 || state->ne[1] != 1 || ggml_nelements(ids) != 1 ||
@@ -1015,7 +1024,6 @@ bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const gg
     }
     ik_projection_conv conv = {(const float *) past->data, (const float *) taps->data, residual ? (const float *) residual->data : nullptr,
                                (float *) state->data, (const int32_t *) ids->data, int64_t(past->nb[2]/sizeof(float)), ggml_get_op_params_f32(dst, 0)};
-    if (params) { *params = conv; return true; }
     ik_projection_conv_kernel<<<2304/4, dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
             (const block_iq4_nl *) w->data, (const block_q8_1 *) x->data, (float *) dst->data, conv);
     return true;

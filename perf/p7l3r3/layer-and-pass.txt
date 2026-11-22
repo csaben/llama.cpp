@@ -1,0 +1,10 @@
+r3-control complete layer                       19.0 calls/token  71.734 us/call
+r3-layer-2 complete layer                       19.0 calls/token  96.104 us/call
+r3-layer-3 complete layer                       19.0 calls/token  96.101 us/call
+r3-pass-1  complete layer                       19.0 calls/token  71.584 us/call
+r3-pass-1  message dot duration                  2.0 calls/token  19.550 us/call
+r3-pass-1  total message overlap                 2.0 calls/token   0.000 us/call
+r3-pass-2  complete layer                       19.0 calls/token  71.637 us/call
+r3-pass-2  message dot duration                  2.0 calls/token  19.512 us/call
+r3-pass-2  total message overlap                 2.0 calls/token   4.207 us/call
+r3-pass-2  overlap loop_ctrl_down_f32            2.0 calls/token   4.207 us/call
