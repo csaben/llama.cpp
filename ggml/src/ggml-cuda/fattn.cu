@@ -782,6 +782,18 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     return BEST_FATTN_KERNEL_TILE;
 }
 
+static bool fattn_use_q8_tiles(int device, const ggml_tensor * dst) {
+    const ggml_tensor * q = dst->src[0];
+    const ggml_tensor * k = dst->src[1];
+    const ggml_tensor * v = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+    const int cc = ggml_cuda_info().devices[device].cc;
+    return cc == GGML_CUDA_CC_AMPERE_GA10X && ampere_mma_available(cc) &&
+        k->type == GGML_TYPE_Q8_0 && v->type == GGML_TYPE_Q8_0 && q->ne[0] == 128 && v->ne[0] == 128 &&
+        k->nb[1] % sizeof(block_q8_0) == 0 && v->nb[1] % sizeof(block_q8_0) == 0 &&
+        q->ne[1] >= 128 && mask && mask->op == GGML_OP_REL_BIAS && mask->ne[2] > 1 && !dst->src[5];
+}
+
 size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * dst) {
     GGML_ASSERT(dst->op == GGML_OP_FLASH_ATTN_EXT);
 
@@ -798,8 +810,12 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
     bool need_f16_V = false;
 
     switch (kernel) {
-        case BEST_FATTN_KERNEL_TILE:
         case BEST_FATTN_KERNEL_MMA_F16:
+            if (fattn_use_q8_tiles(device, dst)) {
+                break;
+            }
+            [[fallthrough]];
+        case BEST_FATTN_KERNEL_TILE:
             need_f16_K = true;
             need_f16_V = true;
             break;
@@ -830,7 +846,11 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
             ggml_cuda_flash_attn_ext_vec(ctx, dst);
             break;
         case BEST_FATTN_KERNEL_MMA_F16:
-            ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+            if (fattn_use_q8_tiles(ctx.device, dst)) {
+                ggml_cuda_flash_attn_ext_mma_f16_case_impl<128, 128, 64, 1, block_q8_0>(ctx, dst);
+            } else {
+                ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+            }
             break;
     }
 }

@@ -72,7 +72,7 @@ chances calibrated per confidence bin, the window maximizing expected tokens per
 Phase 9 compared Unsloth's pinned CUDA banded attention implementation in local benchmark builds.
 The source is https://github.com/unslothai/llama.cpp/blob/6348de261e825d9abcd9cbc33d578c4ff076f1cd/ggml/src/ggml-cuda/fattn-banded.cu
 from pin set cfc9ea3709ca048d21aea67cd34be1eb7cd5cd92. The benchmark adapter uses this fork's actual cell-to-query
-distances for padded and sliding caches. The separate Q8_0 tile-load trial uses the upstream per-tile dequantization idea.
+distances for padded and sliding caches. The SM86 Q8_0 prefill loader in fattn-mma-f16.cuh adapts the per-tile dequantization idea to this fork's existing MMA attention kernel.
 
 MIT License
 

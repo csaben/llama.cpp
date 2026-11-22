@@ -10106,6 +10106,22 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+struct test_flash_attn_ext_rel_bias : public test_flash_attn_ext {
+    explicit test_flash_attn_ext_rel_bias(int64_t n_kv)
+        : test_flash_attn_ext(128, 128, 1, {3, 1}, n_kv, 129, false, true, 0, 0, GGML_PREC_F32,
+                              GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * out = test_flash_attn_ext::build_graph(ctx);
+        out->src[3] = test_rel_bias(16, nh*nr23[0], nb, kv).build_graph(ctx);
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_rel_bias().initialize_tensors(ctx);
+    }
+};
+
 // large Q values, so the online softmax has to rescale the partial results
 struct test_flash_attn_ext_large_logits : public test_flash_attn_ext {
     static constexpr int q_range = 20;
@@ -14316,6 +14332,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 2},  1025,   1, true, true,  8, 30, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1},  1025,  64, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}));
     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {16, 1}, 16384,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+
+    test_cases.emplace_back(new test_flash_attn_ext_rel_bias(513));
+    test_cases.emplace_back(new test_flash_attn_ext_rel_bias(4096));
+    test_cases.emplace_back(new test_flash_attn_ext_rel_bias(4097));
 
     // Dense Q8 KV pre-dequantization: both query thresholds and a partial final tile.
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 1, {8, 1}, 4096, 1024, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}, false));
