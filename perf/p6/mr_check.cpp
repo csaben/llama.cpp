@@ -4,6 +4,7 @@
 // build: g++ -O2 -std=c++17 perf/p6/mr_check.cpp -Iinclude -Iggml/include -Lbuild/bin -lllama -lggml -lggml-base -o build/bin/mr_check
 // run:   . perf/p5env.sh; IK_MR=1 LD_LIBRARY_PATH=build/bin build/bin/mr_check $Q2 perf/ppl.txt [prefix_tokens=300] [n_windows=24]
 #include "llama.h"
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -72,20 +73,29 @@ int main(int argc, char ** argv) {
     {
         llama_context * ctx = make_ctx(model);
         decode(ctx, toks.data(), n_prefix, 0, false);
+        double ms1 = 0.0;
         for (int i = 0; i < n_total; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
             decode(ctx, toks.data() + n_prefix + i, 1, n_prefix + i, true);
+            llama_synchronize(ctx);
+            if (i >= 8) ms1 += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             memcpy(ref.data() + (size_t) i*n_vocab, llama_get_logits_ith(ctx, 0), n_vocab*sizeof(float));
         }
+        if (n_total > 8) printf("single token: %.2f ms per step\n", ms1/(n_total - 8));
         llama_free(ctx);
     }
     // B: windows
     llama_context * ctx = make_ctx(model);
     decode(ctx, toks.data(), n_prefix, 0, false);
     int pos = 0, bad_rows = 0, rows = 0;
+    double win_ms[9] = {0}; int win_n[9] = {0};
     double max_diff = 0.0;
     for (size_t wi = 0; wi < wins.size(); ++wi) {
         const win w = wins[wi];
+        const auto t0 = std::chrono::steady_clock::now();
         decode(ctx, toks.data() + n_prefix + pos, w.n, n_prefix + pos, true);
+        llama_synchronize(ctx);
+        if (wi >= sizes.size()) { win_ms[w.n] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); win_n[w.n]++; }
         const int keep = w.n - w.rollback;
         for (int r = 0; r < w.n; ++r) {
             // rows past the kept ones are compared too: they are valid continuations in the text
@@ -106,6 +116,7 @@ int main(int argc, char ** argv) {
         }
         pos += keep;
     }
+    for (int n = 2; n <= 8; ++n) if (win_n[n]) printf("window of %d: %.2f ms per step (%d steps, all logits read back)\n", n, win_ms[n]/win_n[n], win_n[n]);
     printf("%d rows in %zu windows after a %d-token prefix: %d rows differ from single-token decode, max |logit diff| %.3g\n", rows, wins.size(), n_prefix, bad_rows, max_diff);
     llama_free(ctx);
     llama_model_free(model);
