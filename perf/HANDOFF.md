@@ -1,8 +1,8 @@
 # Phase 7c hand-off
 
-07:08 EST, physical GPU1. Local tag `p7c-verify-windows` (`69443c6`) specializes the dense and segmented IQ4_NL verifier. On 384-token replies, the clean build reached 254.0-255.0 / 348.8-349.6 / 220.1 tok/s on code / edit / prose. Both halves of the frozen-candidate crossover improved on all five prompts at both lengths. All full messages and IDs matched same-flags plain and the frozen Phase 7b reference. [Part A tables and captures](RESULTS.md#phase-7c).
+07:11 EST. The lever 3 unit was inactive at 07:10. Combined source `401460d` (`p7c-merged`) merges `p7l3r4-final-233tok` (`954dd4a`), including round 3, with `p7c-verify-windows` (`69443c6`). The merge retains both the four-row packed verifier and the new plain decoder schedule. GPU1 is assigned to the served matrices and paired benchmarks. GPU0 is assigned to rollback, depth, PPL, operator and cross-build logit checks. Phase 7b remains the release pending verification. The release decision is due at 08:50 and the report at 09:00.
 
-Lever 3 is active. Phase 7b remains staged. The verifier passed the 2,714-row rollback/boundary battery, six greedy probes, PPL and 1,108 CUDA operator cases. Calibration, expert tiling, narrower shortlists and shortened mask blocks yielded no consistent additional served gain. A separate draft-head reduction trial is running. Part B starts when the unit becomes inactive. The release decision is due at 08:50 and the report at 09:00.
+Part A improved cap-3 throughput on all five prompts at 384 and 3,000 tokens. The two clean candidate passes matched plain on 40 replies and 41,520 IDs. The Part A rollback, greedy, PPL and operator battery passed. [Part A results](RESULTS.md#phase-7c).
 
 # Phase 7b hand-off
 

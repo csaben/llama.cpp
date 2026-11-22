@@ -1,0 +1,2 @@
+before         code      prompt     47  1200 tok   261.6 tok/s    3904 chars  accepted/proposed 689/1020  runs 261/262/262
+before         prose     prompt     36  1200 tok   215.4 tok/s    4685 chars  accepted/proposed 579/1239  runs 215/215/215
