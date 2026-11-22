@@ -1,6 +1,8 @@
 # Phase 6 hand-off (keep current; newest status first)
 
-## Round 4 status (2026-11-22)
+## Round 4 status (2026-11-22, complete)
+
+Phase 5 is restored. The active `inkling-3090-experiment` service is running `~/inkling-live-bin-p5/llama-server` on GPU1. Its health check on port 8031 returned OK. The Round 4 snapshot is staged for manual deployment.
 
 - **Inference build `399b61a`**, local milestone `p6-r4-final-long-edit-274tok`. Both padded KV extent (`dca9008`) and SWA ring rewind (`06d9abb`) are fixed. The old edit diverged at token 1689 after the first bad logit row at position 2561. Original trace: 163/1699 bad rows became 0/1699. Two ring-wrap tests went from 70/73 and 71/73 to zero. A new adaptive edit trace has 0/2999 bad rows, maximum logit error 0, and zero greedy-choice differences.
 - **Exactness:** 24/24 at 3000 tokens, 24/24 at 384 tokens with three repeats, full JSON and token IDs. Reference: backend sampling, `IK_MR=1 IK_MMA=3`, no drafter. Flag-free plain has different long answers. The separate character-214 edit difference between plain sampler modes starts in prefill, and both modes agree with CUDA fusion disabled. See `perf/p6/r4_checks/sampling.txt`.
