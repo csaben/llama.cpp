@@ -36,6 +36,8 @@ struct ik_dense_visit {
     ik_projection_conv conv;
     int * counters;
     int mode, prefetch;
+    ggml_tensor * router;
+    ggml_tensor * mix;
 };
 
 bool ggml_cuda_inkling_dense_visit(ggml_backend_cuda_context & ctx, ggml_tensor * attn, ik_dense_visit visit);
