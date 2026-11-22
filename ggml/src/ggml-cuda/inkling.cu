@@ -2202,7 +2202,7 @@ static __device__ __forceinline__ void ik_mma_init(ik_mma_lane<G> & st, const fl
 // One step: the 16 cells kt .. kt + 15, of which the cells below w1 other than kv_idx (the current token's, not stored
 // yet) count. The Q8_0 rows of the kv head are at kb + row*k_nb2 and vb + row*v_nb2, row = min(cell - row0, row_max):
 // the cache itself, or a tile of it in shared memory.
-template <int G>
+template <int G, bool ROW_COLS = false>
 static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
         const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
         const int kt, const int w1, const int64_t kv_idx) {
@@ -2237,9 +2237,10 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
                 kq[i][b][hf] = r.quad(b, 4*hf + tq, kh[i][b >> 1]);
             }
         }
-        const float mv = args.mask_f16 ? __half2float(((const half *) args.mask)[cc]) : ((const float *) args.mask)[cc];
-        mk[i] = head_ok && cell < w1 && cell != kv_idx ? mv : -INFINITY;
-        dk[i] = args.rel_pos[cc];
+        const int idx = cc + (ROW_COLS ? tq*args.n_kv : 0);
+        const float mv = args.mask_f16 ? __half2float(((const half *) args.mask)[idx]) : ((const float *) args.mask)[idx];
+        mk[i] = head_ok && cell < w1 && cell != (ROW_COLS ? args.kv_idxs[tq] : kv_idx) ? mv : -INFINITY;
+        dk[i] = args.rel_pos[idx];
     }
     uint32_t vh[4][2], vl[4][2], vq[4][4];
 #pragma unroll
@@ -2462,7 +2463,7 @@ static __global__ void inkling_window_scan(ik_attn_args a, float * parts) {
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
 #endif
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false, bool STAGED = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false, bool STAGED = false, bool ROW_COLS = false>
 static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, const float * scan, const int row, const char * tile) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -2507,6 +2508,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
     const ik_attn_args & args = MR || HAS_TAPS >= 0 ? args_m : args_in;
 
     const int g     = MR ? blockIdx.y : blockIdx.x;
+    const int part_g = ROW_COLS ? 3*g + blockIdx.x : g;
     const int split = MR ? blockIdx.z : blockIdx.y;
     const int tid   = threadIdx.x;
     const int lane  = tid % WARP_SIZE;
@@ -2564,16 +2566,17 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
     float qv[G], gate_v[G], rv[G], sink_v[G];
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
-        const int h = g*G + hh;
+        const int h = ROW_COLS ? part_g : g*G + hh;
+        const float * prh = pr0 + (ROW_COLS ? hh*args.proj_s1 : 0);
         qv[hh] = gate_v[hh] = rv[hh] = sink_v[hh] = 0.0f;
         if (tid < HD) {
-            qv[hh]     = pr0[(int64_t) h*HD + tid]*args.consts[(int64_t) h*HD + tid];
-            gate_v[hh] = pr0[args.off_gate + (int64_t) h*HD + tid];
+            qv[hh]     = prh[(int64_t) h*HD + tid]*args.consts[(int64_t) h*HD + tid];
+            gate_v[hh] = prh[args.off_gate + (int64_t) h*HD + tid];
         } else if (warp == 4) {
             if (lane < args.n_rel) {
-                rv[hh] = pr0[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane];
+                rv[hh] = prh[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane];
             }
-            sink_v[hh] = pr0[args.off_sink + h];
+            sink_v[hh] = prh[args.off_sink + h];
         }
     }
     // the cells of this warp
@@ -2636,15 +2639,21 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
     __syncthreads();
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
+        float tau_h = tau;
+        if constexpr (ROW_COLS) {
+            if (args.pos) {
+                tau_h = 1.0f + args.tau_alpha*logf(fmaxf(1.0f, (args.pos[hh] + 1.0f)/args.tau_floor));
+            }
+        }
         if (tid < HD) {
             const float ssq  = s_ssq[hh][0] + s_ssq[hh][1] + s_ssq[hh][2] + s_ssq[hh][3];
             const float norm = sqrtf(ssq) + args.clip_eps;
             const float f    = fminf(fmaxf(args.qk_clip/norm, 0.0f), 1.0f);
-            s_q[hh][tid] = qv[hh]*f*tau;
+            s_q[hh][tid] = qv[hh]*f*tau_h;
         } else if (warp == 4) {
             const float norm = sqrtf(s_ssq[hh][4]) + args.clip_eps;
             const float f    = fminf(fmaxf(args.rel_clip/norm, 0.0f), 1.0f);
-            s_r[hh][lane] = lane < args.n_rel ? rv[hh]*f*tau : 0.0f;
+            s_r[hh][lane] = lane < args.n_rel ? rv[hh]*f*tau_h : 0.0f;
             if (lane == 0) {
                 s_sink[hh] = sink_v[hh];
             }
@@ -2803,7 +2812,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
                             const int stride = 4*sizeof(block_q8_0);
                             ik_mma_step<G>(args, st, s_r, tile, stride, tile + args_in.kv_per_split*stride, stride, kv0, kv1 - kv0 - 1, kt, w1, kv_idx);
                         } else {
-                            ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                            ik_mma_step<G, ROW_COLS>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
                         }
                     }
                 }
@@ -2820,7 +2829,9 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
 
     // ===== the K/V convolution of the token, the post-normalization, the cache store (split 0), the new state =====
     float x_new[7];
-    if constexpr (MR) {
+    if constexpr (ROW_COLS) {
+        // Each query row reads its current cell below.
+    } else if constexpr (MR) {
         const char * row = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
         float yq;
         if constexpr (std::is_same<cache_t, half>::value) {
@@ -2899,7 +2910,32 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         init_lane_state();
     }
     const bool owns_current = SHORT_SCAN ? (kv_idx/16)%IK_A2_WARPS == warp : args.ext_scan ? warp == 0 : (kv_idx >= w0 && kv_idx < w1);
-    if (owns_current && !(args.dbg_skip & 2)) {
+    if constexpr (ROW_COLS) {
+#pragma unroll
+        for (int r = 0; r < G; ++r) {
+            const int cell = (int) args.kv_idxs[r];
+            if (cell < w0 || cell >= w1) {
+                continue;
+            }
+            const int idx = r*args.n_kv + cell;
+            const float mask = args.mask_f16 ? __half2float(((const half *) args.mask)[idx]) : ((const float *) args.mask)[idx];
+            if (mask == -INFINITY) {
+                continue;
+            }
+            const int64_t off = cell*args.kc_nb2 + g*args.kc_nb1;
+            float k[4], v[4];
+            ik_attn_load4<block_q8_0>(args.k_cache + off, lane, k);
+            ik_attn_load4<block_q8_0>(args.v_cache + off, lane, v);
+            const float rb = 0.5f*table[lane%16];
+            const float score = args.kq_scale*(qreg[r][0]*k[0] + qreg[r][1]*k[1] + qreg[r][2]*k[2] + qreg[r][3]*k[3]) + rb*rreg[r];
+            m[r] = warp_reduce_sum(score) - sinks[r] + mask;
+            l[r] = 1.0f;
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                acc[r][e] = v[e];
+            }
+        }
+    } else if (owns_current && !(args.dbg_skip & 2)) {
         float kv4[4];
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
@@ -3003,7 +3039,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         if (tid < HD) {
 #pragma unroll
             for (int hh = 0; hh < G; ++hh) {
-                float * part = args.part + (((int64_t) g*args.n_split + (args.ext_scan ? args.n_split - 1 : split))*G + hh)*(HD + 2);
+                float * part = args.part + (((int64_t) part_g*args.n_split + (args.ext_scan ? args.n_split - 1 : split))*G + hh)*(HD + 2);
                 part[tid] = A[hh];
                 if (tid == 0) {
                     part[HD]     = M[hh];
@@ -3013,7 +3049,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         }
         __syncthreads();
         if (tid == 0) {
-            s_last = args.ext_scan ? 1 : ik_atomic_add_acq_rel(&args.counters[g], 1) == args.n_split - 1;
+            s_last = args.ext_scan ? 1 : ik_atomic_add_acq_rel(&args.counters[part_g], 1) == args.n_split - 1;
         }
         __syncthreads();
         IK_DBG_T(6);
@@ -3023,7 +3059,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         if (tid < HD) {
 #pragma unroll
             for (int hh = 0; hh < G; ++hh) {
-                const float * part0 = args.part + ((int64_t) g*args.n_split*G + hh)*(HD + 2);
+                const float * part0 = args.part + ((int64_t) part_g*args.n_split*G + hh)*(HD + 2);
                 const int64_t ps = (int64_t) G*(HD + 2); // stride between splits
                 float Mt = -INFINITY, Lt = 0.0f, At = 0.0f;
                 for (int sp0 = 0; sp0 < args.n_split; sp0 += 8) {
@@ -3059,7 +3095,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             }
         }
         if (tid == 0 && !args.ext_scan) {
-            args.counters[g] = 0;
+            args.counters[part_g] = 0;
         }
     }
 
@@ -3078,13 +3114,13 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
     if (tid < HD) {
 #pragma unroll
         for (int hh = 0; hh < G; ++hh) {
-            const int   h     = g*G + hh;
+            const int   h     = ROW_COLS ? part_g : g*G + hh;
             const float m_new = fmaxf(M[hh], 0.0f);
             const float corr  = expf(M[hh] - m_new);
             const float Lf    = L[hh]*corr + expf(0.0f - m_new);
             const float o     = A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate_v[hh])));
             if constexpr (q8_out) {
-                ik_warp_store_q8_1(o, (block_q8_1 *) args.dst + ((int64_t) h*HD)/QK8_1 + warp, lane, true);
+                ik_warp_store_q8_1(o, (block_q8_1 *) ((char *) args.dst + (ROW_COLS ? hh*args.mr_dst_rs : 0)) + ((int64_t) h*HD)/QK8_1 + warp, lane, true);
             } else {
                 ((float *) args.dst)[(int64_t) h*HD + tid] = o;
             }
@@ -3096,6 +3132,18 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
 template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false>
 static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in, const float * scan = nullptr) {
     ik_attn2<cache_t, q8_out, G, MMA, MR, HAS_TAPS, SHORT_SCAN, SHARED_SCAN>(args_in, scan, blockIdx.x, nullptr);
+}
+
+// The two limbs of four query rows occupy the eight MMA columns for one query head.
+template <int TAPS>
+static __global__ void __launch_bounds__(IK_A2_BLOCK, 1) inkling_attn_window_cols(const ik_attn_args a) {
+    ik_attn_args first = a;
+    ik_window_splits(first, a.kv_idxs, 0);
+    if (first.n_kv != a.n_kv) {
+        ik_attn2<block_q8_0, true, 3, true, true, TAPS>(a, nullptr, blockIdx.x, nullptr);
+    } else if (blockIdx.x < 3) {
+        ik_attn2<block_q8_0, true, 4, true, true, TAPS, false, false, false, true>(a, nullptr, 0, nullptr);
+    }
 }
 
 template <int TAPS>
@@ -3509,7 +3557,11 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             else                 { inkling_attn_kv_rows_kernel<block_q8_0, 0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
             static const int shared_min = getenv("IK_WINDOW_SCAN_MIN") ? atoi(getenv("IK_WINDOW_SCAN_MIN")) : 0;
             static const int tile_rows = getenv("IK_WINDOW_TILE_ROWS") ? atoi(getenv("IK_WINDOW_TILE_ROWS")) : 0;
-            if (fixed && tile_rows >= 2 && a.kv_per_split <= 256 && (uintptr_t) a.k_cache % 8 == 0 && (uintptr_t) a.v_cache % 8 == 0) {
+            static const bool cols = getenv("IK_WINDOW_COLS") && atoi(getenv("IK_WINDOW_COLS"));
+            if (fixed && cols && n_rows == 4) {
+                if (a.has_taps) { inkling_attn_window_cols<1><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a); }
+                else            { inkling_attn_window_cols<0><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a); }
+            } else if (fixed && tile_rows >= 2 && a.kv_per_split <= 256 && (uintptr_t) a.k_cache % 8 == 0 && (uintptr_t) a.v_cache % 8 == 0) {
                 const int rows = std::min(n_rows, tile_rows);
                 const size_t smem = 2*4*sizeof(block_q8_0)*a.kv_per_split;
                 static const bool opt_in = [] {
