@@ -61,7 +61,7 @@ case "$1" in
         done >"$out/logits.txt"
         ;;
     mr)
-        export IK_DENSE_VISIT=1 IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=4
+        export IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=4
         g++ -O2 -std=c++17 -Wno-deprecated-declarations perf/p6/mr_check.cpp -Iinclude -Iggml/include -Lbuild/bin -lllama -lggml -lggml-base -o "$work/mr_check"
         gzip -dc perf/p6/r4_repro/n3.trace.gz >"$work/r4.trace"
         (
@@ -78,7 +78,6 @@ case "$1" in
         rg 'rows differ' "$work/mr.log" >"$out/mr.txt"
         ;;
     ops)
-        export IK_DENSE_VISIT=1
         for ops in MUL_MAT,MUL_MAT_ID INKLING_ATTN,INKLING_ROUTER,SHORTCONV_RES,RES_MIX,LOOP_CTRL_DOWN,LOOP_CTRL_APPLY SITU CONCAT; do
             args=()
             # The expert sum and shortconv fixtures concatenate the state and output.

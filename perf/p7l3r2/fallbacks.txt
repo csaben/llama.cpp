@@ -1,0 +1,5 @@
+GGML_CUDA_DISABLE_GRAPHS=1 8 full vocabulary rows identical
+IK_ATTN_FIXED=0 8 full vocabulary rows identical
+IK_ATTN_SHORT=0 8 full vocabulary rows identical
+IK_ATTN_MMA=0 8 full vocabulary rows identical
+IK_PROJ_CONV=0 8 full vocabulary rows identical
