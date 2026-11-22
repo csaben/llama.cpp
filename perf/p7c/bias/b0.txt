@@ -1,0 +1,3 @@
+b0             code      prompt     47   384 tok   208.4 tok/s    1320 chars  accepted/proposed 136/228  runs 208/208/209
+b0             edit      prompt   1025   384 tok   330.4 tok/s    1115 chars  accepted/proposed 269/282  runs 329/330/331
+b0             prose     prompt     36   384 tok   194.4 tok/s    1474 chars  accepted/proposed 96/196  runs 193/194/195

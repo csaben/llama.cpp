@@ -1484,3 +1484,9 @@ For the default battery, use a fresh shell with only `perf/p5env.sh` and `CUDA_D
 ## Phase 7c
 
 Part A started at 06:15 EST on GPU1 against the frozen Phase 7b snapshot. Controls use the 64K release preset, greedy backend sampling, uncached prompts and exact-length token-ID captures.
+
+Frozen cap 3 measured 250.2 / 340.1 / 214.8 tok/s on short code / edit / prose; plain measured 213.4 / 202.5 / 211.8. The fixed cap-2 and cap-3 code timelines measured injection / draft / target at 0.107 / 0.736 / 7.797 ms and 0.115 / 0.806 / 9.250 ms respectively, one synchronization per retained round. [Control and CUDA events](p7c/baseline/).
+
+On the eight-cell history/confidence sweep, increasing the margin used in the acceptance estimate by 1.6 and removing the minimum raised accepted/proposed on code to 216/401, but throughput fell to 233.2 tok/s; short prose fell to 197.1. Lowering the estimate by 0.7 also lost on code. All captures matched the frozen plain server. Separately, scaling the recurrent head correction by 0.5 to 2.0 did not improve both code and prose; omitting it dropped both to 208.4 and 194.4. [Confidence and history](p7c/sweep/), [head correction](p7c/bias/).
+
+Computing only the consumed rows in the drafter's last FFN gave 243.8 / 247.2 tok/s on the two short-code measurements versus 249.3 / 249.5 for the surrounding controls. The exact Q2_K experiments tried one independent block per expert/token pair, a width-three specialization, a transposed shared-memory reduction, warp-local activation sums, and an integer MMA implementation retaining both original FP32 half-block reductions. The MMA matched all 864 logit rows, but took 6.96 / 8.73 / 10.19 ms at two / three / four target rows versus 6.45 / 8.23 / 9.72 ms. [FFN crossover](p7c/draft/), [window measurements](p7c/windows/).

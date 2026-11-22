@@ -1,0 +1,1 @@
+fixed2         code      prompt     47   384 tok   239.2 tok/s    1320 chars  accepted/proposed 203/357

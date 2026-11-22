@@ -1,0 +1,3 @@
+s8-g-.7-f1.8   code      prompt     47   384 tok   241.1 tok/s    1320 chars  accepted/proposed 171/202  runs 240/241/243
+s8-g-.7-f1.8   edit      prompt   1025   384 tok   341.3 tok/s    1115 chars  accepted/proposed 274/281  runs 341/341/342
+s8-g-.7-f1.8   prose     prompt     36   384 tok   211.6 tok/s    1474 chars  accepted/proposed 104/138  runs 210/212/212

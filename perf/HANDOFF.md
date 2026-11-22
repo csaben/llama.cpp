@@ -1,6 +1,6 @@
 # Phase 7c hand-off
 
-06:16 EST, in progress on physical GPU1. Starting release is `p7b-release`; its verified snapshot remains staged. Lever 3 is active. Part A is testing history acceptance, confidence thresholds and the cost of paid drafts and verification. The merge gate is the inactive lever 3 unit. The release decision is due at 08:50 and the report at 09:00.
+06:26 EST, in progress on physical GPU1. The first confidence, history and expert-kernel trials were exact but did not improve both code and prose. Testing draft reuse and verifier scheduling. Starting release is `p7b-release`; its verified snapshot remains staged. Lever 3 is active. Part A is testing history acceptance, confidence thresholds and the cost of paid drafts and verification. The merge gate is the inactive lever 3 unit. The release decision is due at 08:50 and the report at 09:00.
 
 # Phase 7b hand-off
 
