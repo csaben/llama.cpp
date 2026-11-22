@@ -898,16 +898,24 @@ static __global__ void ik_q2_down_rows(const block_q2_0 * weights, const block_q
     const int slot = blockIdx.y;
     const int lane = threadIdx.x;
     const int row = 2*(blockIdx.x*blockDim.y + threadIdx.y);
-    const int blocks = 1152/QK2_0;
-    weights += (ids[slot]*2304 + row)*blocks;
+    constexpr int blocks = 1152/QK2_0;
+    const int base = (ids[slot]*2304 + row)*blocks;
     x += slot*(1152/QK8_1);
+    float sums[2] = {};
+#pragma unroll
+    for (int start = 0; start < blocks*QI2_0; start += WARP_SIZE) {
+        const int b = (start + lane)/QI2_0;
+        if (b < blocks) {
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+                const float v = vec_dot_q2_0_q8_1(weights, x + b*(QK2_0/QK8_1), base + r*blocks + b, lane % QI2_0);
+                sums[r] = __fadd_rn(sums[r], v);
+            }
+        }
+    }
 #pragma unroll
     for (int r = 0; r < 2; ++r) {
-        float v = vec_dot_q2_0_q8_1(weights, x + 2*(lane/2), r*blocks + lane/2, lane%2);
-        if (lane < 4) {
-            v = __fadd_rn(v, vec_dot_q2_0_q8_1(weights, x + 32 + 2*(lane/2), r*blocks + 16 + lane/2, lane%2));
-        }
-        v = warp_reduce_sum(v);
+        const float v = warp_reduce_sum(sums[r]);
         if (lane == (row + r)%4) {
             out[slot*2304 + row + r] = v;
         }
