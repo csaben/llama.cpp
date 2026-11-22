@@ -1,0 +1,6 @@
+index, uuid, pci.bus_id, name, driver_version, memory.total [MiB]
+1, GPU-afe18a20-ce24-20de-9935-7b37fbd27581, 00000000:03:00.0, NVIDIA GeForce RTX 3090, 580.173.02, 24576 MiB
+Probe executable: /home/arelius/llama.cpp-fast/build/bin/llama-server
+CUDA device order: PCI_BUS_ID
+Visible physical device: 1
+Active compute UUID: GPU-afe18a20-ce24-20de-9935-7b37fbd27581
