@@ -2979,7 +2979,7 @@ static __device__ __forceinline__ bool ik_attention_tail(ik_attn_args a, int g, 
     return true;
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false, int sched = 0>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false, int sched = 0, bool subgroup = false>
 static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -3209,7 +3209,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             s_ssq[hh][warp] = v;
         }
     }
-    ik_scan_sync<warp_split>();
+    ik_scan_sync<warp_split || subgroup>();
     if constexpr (early) { if (run_kv) { normalize(); } }
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
@@ -3227,7 +3227,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             }
         }
     }
-    ik_scan_sync<warp_split>();
+    ik_scan_sync<warp_split || subgroup>();
     IK_DBG_T(2);
 
     // ===== the attention over the cells of this warp (online softmax per head, a lane holds 4 dims), the current
@@ -3409,7 +3409,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     } else {
         if constexpr (!early) {
             if (run_kv) { convolve(); }
-            ik_scan_sync<warp_split>();
+            ik_scan_sync<warp_split || subgroup>();
             if (run_kv) { normalize(); }
         }
         if (run_kv) {
@@ -3439,7 +3439,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         (which ? s_v : s_k)[ci] = yq;
         }
     }
-    ik_scan_sync<warp_split>();
+    ik_scan_sync<warp_split || subgroup>();
 
     // ===== the current token's cell, by the warp whose range holds it =====
     if constexpr (MMA) {
@@ -3531,7 +3531,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             }
         }
     }
-    ik_scan_sync<warp_split>();
+    ik_scan_sync<warp_split || subgroup>();
     IK_DBG_T(5);
 
     if constexpr (fast_tail) {
@@ -3576,11 +3576,11 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
                 }
             }
         }
-        ik_scan_sync<warp_split>();
+        ik_scan_sync<warp_split || subgroup>();
         if (tid == 0) {
             s_last = args.ext_scan ? 1 : ik_atomic_add_acq_rel(&args.counters[g], 1) == args.n_split - 1;
         }
-        ik_scan_sync<warp_split>();
+        ik_scan_sync<warp_split || subgroup>();
         IK_DBG_T(6);
         if (!s_last) {
             return;
@@ -3644,7 +3644,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             while (ik_ld_acquire(ready) != producers) {}
             ik_st_relaxed(ready, 0);
         }
-        ik_scan_sync<warp_split>();
+        ik_scan_sync<warp_split || subgroup>();
         if (tid < HD) {
 #pragma unroll
             for (int hh = 0; hh < G; ++hh) { gate_v[hh] = pr0[args.off_gate + (g*G + hh)*HD + tid]; }

@@ -221,6 +221,38 @@ static unsigned long long * ik_wave_times(int taps, bool short_scan) {
     return times ? times + (2*short_scan+taps)*2048*3 : nullptr;
 }
 
+template<int taps, int threads, int sched>
+static __global__ void __launch_bounds__(threads) ik_short_geometry(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x,
+        float * values, int * ctr, int gates, bool share, bool permute) {
+    const int t=threadIdx.x, bx=blockIdx.x;
+    const bool scan=permute ? bx%(gates+1)==0 : bx<8;
+    const int g=permute ? bx/(gates+1) : (scan ? bx : (bx-8)/gates);
+    const int chunk=permute ? bx%(gates+1)-1 : (bx-8)%gates;
+    block_q8_1 * dst=(block_q8_1 *)a.dst;
+    if (scan && t<256) {
+        a.proj_ncols=1; a.dst=values;
+        ik_attention_tile<block_q8_0,false,3,true,false,taps,true,true,false,false,false,sched,(threads>256)>(a,g,0);
+    } else if (!scan || share) {
+        const int extra=share ? (threads-256)/32 : 0;
+        const int warp=scan ? (t-256)/32 : extra+chunk*(threads/32)+t/32;
+        for (int i=warp;i<384;i+=extra+gates*(threads/32)) {
+            ik_project_row(w,x,(float *)a.proj,a.off_gate+384*g+i);
+        }
+    }
+    __shared__ int last;
+    __syncthreads();
+    if (t==0) { last=ik_atomic_add_acq_rel(ctr+g,1)==gates; }
+    __syncthreads();
+    if (last) {
+        if (t==0) { ik_st_relaxed(ctr+g,0); }
+        for (int i=t; i<384; i+=threads) {
+            const int c=384*g+i;
+            const float v=values[c]*(1.0f/(1.0f+expf(-a.proj[a.off_gate+c])));
+            ik_warp_store_q8_1(v,dst+c/32,t%32,true);
+        }
+    }
+}
+
 template<int taps>
 static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
@@ -246,6 +278,25 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
         return;
     }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+    static const int geometry=getenv("IK_GATE_THREADS") ? atoi(getenv("IK_GATE_THREADS")) : 0;
+    if (geometry && short_scan) {
+        static const int gates=getenv("IK_GEOMETRY_BLOCKS") ? std::min(48,std::max(1,atoi(getenv("IK_GEOMETRY_BLOCKS")))) : 8;
+        static const int opts=getenv("IK_GATE_OPTS") ? atoi(getenv("IK_GATE_OPTS")) : 1;
+        ggml_cuda_pool_alloc<float> values(ctx.pool(),3072);
+        auto run=[&](auto width,auto order) {
+            constexpr int nt=decltype(width)::value;
+            ik_short_geometry<taps,nt,decltype(order)::value><<<8*(gates+1),nt,0,ctx.stream()>>>(a,w,x,values.get(),counters,gates,opts&2,opts&4);
+        };
+        auto choose=[&](auto order) {
+            if (geometry==256) { run(std::integral_constant<int,256>{},order); return; }
+            if (geometry==288) { run(std::integral_constant<int,288>{},order); return; }
+            if (geometry==320) { run(std::integral_constant<int,320>{},order); return; }
+            if (geometry==384) { run(std::integral_constant<int,384>{},order); return; }
+            if (geometry==512) { run(std::integral_constant<int,512>{},order); return; }
+        };
+        if (opts&1) { choose(std::integral_constant<int,1>{}); } else { choose(std::integral_constant<int,0>{}); }
+        return;
+    }
     static const int local = getenv("IK_LOCAL_SCAN") ? atoi(getenv("IK_LOCAL_SCAN")) : 0;
     if (local && short_scan) {
         static const int gates = getenv("IK_LOCAL_GATES") ? std::min(48,std::max(1,atoi(getenv("IK_LOCAL_GATES")))) : 12;
