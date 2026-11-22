@@ -2783,7 +2783,7 @@ static __device__ __forceinline__ void ik_mma_init(ik_mma_lane<G> & st, const fl
 // One step: the 16 cells kt .. kt + 15, of which the cells below w1 other than kv_idx (the current token's, not stored
 // yet) count. The Q8_0 rows of the kv head are at kb + row*k_nb2 and vb + row*v_nb2, row = min(cell - row0, row_max):
 // the cache itself, or a tile of it in shared memory.
-template <int G, bool late = false, bool first = false>
+template <int G, bool late = false, bool first = false, int sparse = 0>
 static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
         const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
         const int kt, const int w1, const int64_t kv_idx) {
@@ -2797,6 +2797,13 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
     const int     n_rel = args.n_rel;
     const int     last  = args.n_kv - 1;
 
+    unsigned live=0xffffffffu;
+    if constexpr (sparse>=2) {
+        const int i=kt+lane;
+        const bool legal=lane<16 && i<w1 && i!=kv_idx;
+        const bool valid=legal && (sparse!=3 || (args.mask_f16 ? __half2float(((const half *)args.mask)[i]) : ((const float *)args.mask)[i])!=-INFINITY);
+        live=__ballot_sync(0xffffffffu,valid);
+    }
     // ---- every load of the step ----
     uint32_t kh[2][2], kl[2][2], kq[2][4][2];
     float    mk[2];
@@ -2804,8 +2811,9 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
 #pragma unroll
     for (int i = 0; i < 2; ++i) {
         const int cell = kt + gr + 8*i;
-        const int cc   = min(cell, last);
-        const ik_q8row r = { (const uint32_t *) (kb + (int64_t) min(cell - row0, row_max)*k_nb2) };
+        const int cc=min(cell,sparse==1 ? min(w1-1,last) : last);
+        const ik_q8row r = { (const uint32_t *) (kb + (int64_t) min((sparse==1 ? min(cell,w1-1) : cell)-row0,row_max)*k_nb2) };
+        if (sparse<2 || sparse==4 || (live & (1u<<(cell-kt)))) {
 #pragma unroll
         for (int P = 0; P < 2; ++P) {
             kh[i][P] = r.head(P);
@@ -2818,16 +2826,23 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
                 kq[i][b][hf] = r.quad(b, 4*hf + tq, kh[i][b >> 1]);
             }
         }
+        } else {
+#pragma unroll
+            for (int q=0;q<2;++q) { kh[i][q]=kl[i][q]=0; }
+#pragma unroll
+            for (int b=0;b<4;++b) { kq[i][b][0]=kq[i][b][1]=0; }
+        }
         const float mv = args.mask_f16 ? __half2float(((const half *) args.mask)[cc]) : ((const float *) args.mask)[cc];
         mk[i] = head_ok && cell < w1 && cell != kv_idx ? mv : -INFINITY;
-        dk[i] = args.rel_pos[cc];
+        dk[i]=sparse<2 || (live&(1u<<(cell-kt))) ? args.rel_pos[cc] : -1;
     }
     uint32_t vh[4][2], vl[4][2], vq[4][4];
     auto load_v = [&]() {
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
         const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
-        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
+        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min((sparse==1 ? min(cell,w1-1) : cell)-row0,row_max)*v_nb2) };
+        if (sparse<2 || (live&(1u<<(cell-kt)))) {
 #pragma unroll
         for (int P = 0; P < 2; ++P) {
             vh[i][P] = r.head(P);
@@ -2836,6 +2851,12 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
 #pragma unroll
         for (int b = 0; b < 4; ++b) {
             vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
+        }
+        } else {
+#pragma unroll
+            for (int q=0;q<2;++q) { vh[i][q]=vl[i][q]=0; }
+#pragma unroll
+            for (int b=0;b<4;++b) { vq[i][b]=0; }
         }
     }
     };
@@ -3106,11 +3127,11 @@ static __device__ __forceinline__ void ik_stage_cache_tile(const char * src, int
     }
 }
 
-template<int G, int stage, bool late, bool first=false>
+template<int G, int stage, bool late, bool first=false, int sparse=0>
 static __device__ __forceinline__ void ik_mma_cached(const ik_attn_args & a, ik_mma_lane<G> & st, const float (* rel)[32],
         const char * k, int64_t ks, const char * v, int64_t vs, int base, int max_row, int kt, int w1, int64_t index) {
     if constexpr (stage==0) {
-        ik_mma_step<G,late,first>(a,st,rel,k,ks,v,vs,base,max_row,kt,w1,index);
+        ik_mma_step<G,late,first,sparse>(a,st,rel,k,ks,v,vs,base,max_row,kt,w1,index);
     } else {
         extern __shared__ uint2 cache_tiles[];
         constexpr int matrices=(stage&3)==3 ? 2 : 1;
@@ -3125,7 +3146,7 @@ static __device__ __forceinline__ void ik_mma_cached(const ik_attn_args & a, ik_
         }
         if constexpr (stage&4) { cp_async_commit_group(); cp_async_wait_all(); }
         __syncwarp();
-        ik_mma_step<G,late,first>(a,st,rel,k,ks,v,vs,kt,last,kt,w1,index);
+        ik_mma_step<G,late,first,sparse>(a,st,rel,k,ks,v,vs,kt,last,kt,w1,index);
         __syncwarp();
     }
 }
@@ -3676,11 +3697,11 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
                     if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
                         if constexpr (sched & 2) {
                             if (tile < IK_A2_WARPS) {
-                                ik_mma_cached<G,(sched>>4),(sched&1)!=0,true>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
+                                ik_mma_cached<G,((sched>>4)&7),(sched&1)!=0,true,(sched>>8)>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
                                 continue;
                             }
                         }
-                        ik_mma_cached<G,(sched>>4),(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
+                        ik_mma_cached<G,((sched>>4)&7),(sched&1)!=0,false,(sched>>8)>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
                     }
                 }
             } else if constexpr (mask_tiles) {
@@ -3692,13 +3713,13 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 #pragma unroll
                     for (int j = 0; j < 2; ++j) {
                         if (mask & (0xffffu << (j*16))) {
-                            ik_mma_cached<G,(sched>>4),(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv-1, kt+j*16, w1, kv_idx);
+                            ik_mma_cached<G,((sched>>4)&7),(sched&1)!=0,false,(sched>>8)>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv-1, kt+j*16, w1, kv_idx);
                         }
                     }
                 }
             } else {
                 for (int kt = w0; kt < w1; kt += 16) {
-                    ik_mma_cached<G,(sched>>4),(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                    ik_mma_cached<G,((sched>>4)&7),(sched&1)!=0,false,(sched>>8)>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
                 }
             }
         }

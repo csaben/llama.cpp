@@ -345,6 +345,47 @@ static __global__ void __launch_bounds__(384) ik_join_gate_scan(ik_attn_args a,c
     }
 }
 
+static __global__ void __launch_bounds__(384) ik_window_balance(ik_attn_args a,const block_iq4_nl * w,const block_q8_1 * x,int * ctr,int boost,bool coop) {
+    const int t=threadIdx.x,lane=t%32,g=blockIdx.x,sp=blockIdx.y,n=a.n_split,per=a.kv_per_split;
+    const int start=sp*per,end=min(a.n_kv,start+per),cell=start+t;
+    const int64_t current=a.kv_idxs[0];
+    const bool visible=cell<end && (cell==current || (a.mask_f16 ? __half2float(((const half *)a.mask)[cell]) : ((const float *)a.mask)[cell])!=-INFINITY);
+    const bool empty=!__syncthreads_or(visible);
+    if (!empty && t<256) {
+        a.proj_ncols=1;
+        ik_attention_tile<block_q8_0,true,3,true,false,0,false,false,true,false,true,8,false,false,2>(a,g,sp);
+    } else {
+        if (empty && t<384) {
+            const int h=t/128,c=t%128, row=(g*3+h)*n+sp;
+            a.part[row*128+c]=0.0f;
+            if (!c) { ((float2 *)(a.part+24*n*128))[row]=make_float2(-INFINITY,0.0f); }
+        }
+        const int sample=min(a.n_kv-1,lane*per+per/2);
+        const bool padded=lane<n && (a.mask_f16 ? __half2float(((const half *)a.mask)[sample]) : ((const float *)a.mask)[sample])==-INFINITY;
+        const unsigned cold=__ballot_sync(0xffffffffu,padded);
+        const int cold_count=__popc(cold), prior=__popc(cold&((1u<<sp)-1u));
+        const int wc=boost, wh=(boost>=32 && cold_count) ? 0 : 1, slots=wc*cold_count+wh*(n-cold_count);
+        const int first=wc*prior+wh*(sp-prior), count=(cold&(1u<<sp)) ? wc : wh;
+        const int threads=empty ? 12 : 4, warp=empty ? t/32 : (t-256)/32;
+        for (int i=first*384/slots+warp;i<(first+count)*384/slots;i+=threads) {
+            ik_project_row(w,x,(float *)a.proj,a.off_gate+g*384+i);
+        }
+    }
+    if (coop) {
+        cooperative_groups::this_grid().sync();
+        for (int q=sp+t/32*n;q<12;q+=12*n) { ik_join_tile<true,false>(a,g,q); }
+    } else {
+        __shared__ int last;
+        __syncthreads();
+        if (!t) { last=ik_atomic_add_acq_rel(ctr+g,1)==n-1; }
+        __syncthreads();
+        if (last) {
+            if (!t) { ik_st_relaxed(ctr+g,0); }
+            ik_join_tile<true,false>(a,g,t/32);
+        }
+    }
+}
+
 template<int taps>
 static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
@@ -370,6 +411,34 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
         return;
     }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+    static const int sparse=getenv("IK_SPARSE_TAIL") ? atoi(getenv("IK_SPARSE_TAIL")) : 0;
+    if (sparse && !short_scan) {
+        auto run=[&](auto num) {
+            constexpr int n=decltype(num)::value;
+            ik_dense_warp_roles<taps,false,!taps,0,false,(n<<8)><<<dim3(8,a.n_split),384,0,ctx.stream()>>>(a,w,x,counters);
+        };
+        if (sparse==1) { run(std::integral_constant<int,1>{}); return; }
+        if (sparse==2) { run(std::integral_constant<int,2>{}); return; }
+        if (sparse==3) { run(std::integral_constant<int,3>{}); return; }
+        if (sparse==4) { run(std::integral_constant<int,4>{}); return; }
+    }
+    static const int boost=getenv("IK_WINDOW_BALANCE") ? atoi(getenv("IK_WINDOW_BALANCE")) : 0;
+    if (boost>0 && !taps && !short_scan && a.n_split>1 && a.n_split<=32 && a.kv_per_split<=256) {
+        int value=std::min(boost,64);
+        bool coop=getenv("IK_WINDOW_COOP") && atoi(getenv("IK_WINDOW_COOP"));
+        if (coop) {
+            int resident;
+            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident,ik_window_balance,384,0));
+            coop=ggml_cuda_info().devices[ctx.device].supports_cooperative_launch && 8*a.n_split<=resident*ggml_cuda_info().devices[ctx.device].nsm;
+        }
+        if (coop) {
+            void * params[]={&a,&w,&x,&counters,&value,&coop};
+            CUDA_CHECK(cudaLaunchCooperativeKernel((void *)ik_window_balance,dim3(8,a.n_split),384,params,0,ctx.stream()));
+        } else {
+            ik_window_balance<<<dim3(8,a.n_split),384,0,ctx.stream()>>>(a,w,x,counters,value,false);
+        }
+        return;
+    }
     static const int join=getenv("IK_JOIN_GATE") ? atoi(getenv("IK_JOIN_GATE")) : 0;
     if (join && !short_scan && a.n_split>1) {
         auto run=[&](auto opt) {
