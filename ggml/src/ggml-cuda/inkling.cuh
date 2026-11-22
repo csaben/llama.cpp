@@ -42,3 +42,5 @@ struct ik_dense_visit {
 
 bool ggml_cuda_inkling_dense_visit(ggml_backend_cuda_context & ctx, ggml_tensor * attn, ik_dense_visit visit);
 bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst, ik_projection_conv * params = nullptr);
+
+bool ggml_cuda_inkling_expert_tail(ggml_backend_cuda_context & ctx, const ggml_tensor * down, ggml_tensor * dst, int mode);

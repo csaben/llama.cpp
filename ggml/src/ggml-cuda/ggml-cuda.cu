@@ -4680,6 +4680,14 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     ggml_tensor * node = cgraph->nodes[i];
 
 
+    static const int tail_mode = ggml_cuda_env_int("IK_EXPERT_TAIL", 0);
+    if (tail_mode && node->op == GGML_OP_MUL_MAT_ID && !ggml_cuda_env_flag("IK_MR") && cuda_ctx->stream_context().concurrent_events.empty() &&
+            !(node->flags & GGML_TENSOR_FLAG_OUTPUT) && ggml_node_has_n_uses(cgraph, i, 1)) {
+        int j = i + 1;
+        while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j])) { ++j; }
+        if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_INKLING_MOE_SUM_CONV && cgraph->nodes[j]->src[0] == node &&
+                ggml_cuda_inkling_expert_tail(*cuda_ctx, node, cgraph->nodes[j], tail_mode)) { return j - i; }
+    }
     const int dense_end = ik_dense_end(cuda_ctx, cgraph, i);
     if (dense_end > i) { return dense_end - i; }
 

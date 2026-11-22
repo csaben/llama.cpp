@@ -933,6 +933,121 @@ static __global__ void ik_q2_down_rows(const block_q2_0 * weights, const block_q
     }
 }
 
+static __device__ __forceinline__ float ik_down_packed_dot(const char * weights, const block_q8_1 * x, int id, int block, int half_block) {
+    constexpr int blocks = (1152/64)*2304;
+    const char * expert = weights + size_t(id)*blocks*18;
+    const uint2 code = ((const uint2 *)expert)[2*block + half_block];
+    int sum = 0;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const uint32_t q = (j < 2 ? code.x : code.y) >> (16*(j%2));
+        const int lo = __byte_perm(0x020100ff, 0x020100ff, q);
+        const int hi = __byte_perm(0x020100ff, 0x020100ff, q >> 2);
+        sum = ggml_cuda_dp4a(get_int_b4(x->qs, 2*j), lo, sum);
+        sum = ggml_cuda_dp4a(get_int_b4(x->qs, 2*j+1), hi, sum);
+    }
+    return __half2float(((const half *)(expert + 16*blocks))[block])*__low2float(x->ds)*sum;
+}
+
+template<int rows, int groups, bool packed>
+static __global__ void ik_expert_tail(const block_q2_0 * weights, const block_q8_1 * x, const int * ids, const float * weights_used,
+        int stride, float * out, ik_projection_conv conv) {
+    constexpr int blocks = 1152/QK2_0;
+    const int warp = threadIdx.x/32, lane = threadIdx.x%32;
+    const int slot = warp/groups, start = (blockIdx.x*groups + warp%groups)*rows;
+    const int base = (ids[slot]*2304 + start)*blocks;
+    x += slot*(1152/QK8_1);
+    float sums[rows]{};
+#pragma unroll
+    for (int off = 0; off < blocks*QI2_0; off += 32) {
+        const int b = (off + lane)/QI2_0;
+        if (b < blocks) {
+#pragma unroll
+            for (int r = 0; r < rows; ++r) {
+                const float y = packed ? ik_down_packed_dot((const char *)weights, x + 2*b + lane%QI2_0, ids[slot], (start + r)*blocks + b, lane%QI2_0) :
+                        vec_dot_q2_0_q8_1(weights, x + 2*b, base + r*blocks + b, lane%QI2_0);
+                sums[r] = __fadd_rn(sums[r], y);
+            }
+        }
+    }
+    __shared__ float parts[8][rows*groups];
+#pragma unroll
+    for (int r = 0; r < rows; ++r) {
+        const float y = warp_reduce_sum(sums[r]);
+        if (lane == (start + r)%4) { parts[slot][warp%groups*rows + r] = y; }
+    }
+    __syncthreads();
+    if (threadIdx.x < rows*groups) {
+        float y = 0;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) { y += parts[i][threadIdx.x]*weights_used[i*stride]; }
+        ik_dense_store(conv, out, blockIdx.x*rows*groups + threadIdx.x, y);
+    }
+}
+
+bool ggml_cuda_inkling_expert_tail(ggml_backend_cuda_context & ctx, const ggml_tensor * down, ggml_tensor * dst, int mode) {
+    const auto * w = down->src[0], * x = down->src[1], * ids = down->src[2];
+    const auto * weights = dst->src[1], * taps = dst->src[2], * state = dst->src[3], * rs_ids = dst->src[4], * res = dst->src[5];
+    if (w->type != GGML_TYPE_Q2_0 || w->ne[0] != 1152 || w->ne[1] != 2304 || w->ne[2] != 128 || w->ne[3] != 1 ||
+            !ggml_is_contiguous(w) || !ggml_is_matrix(x) || !ggml_is_contiguous(x) || x->type != GGML_TYPE_Q8_1 ||
+            x->ne[0] != 1152 || x->ne[1] != 8 || ids->type != GGML_TYPE_I32 || !ggml_is_contiguous(ids) || ggml_nelements(ids) != 8 ||
+            !ggml_is_vector(dst) || dst->ne[0] != 2304 || dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst) ||
+            !ggml_is_contiguous(taps) || taps->type != GGML_TYPE_F32 || taps->ne[0] != 4 || taps->ne[1] != 2304 ||
+            ggml_nelements(res) != 2304 || res->type != GGML_TYPE_F32 || !ggml_is_contiguous(res) ||
+            (weights->type != GGML_TYPE_F32 && weights->type != GGML_TYPE_I32) || weights->ne[1] != 8 || rs_ids->type != GGML_TYPE_I32 || ggml_nelements(rs_ids) != 1 ||
+            state->type != GGML_TYPE_F32 || ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X) { return false; }
+    const uintptr_t y = uintptr_t(dst->data);
+    for (const auto * src : {x, ids, weights, rs_ids}) {
+        const uintptr_t a = uintptr_t(src->data);
+        if (a < y + ggml_nbytes(dst) && y < a + ggml_nbytes(src)) { return false; }
+    }
+    const size_t stride = state->nb[1]/sizeof(float);
+    const int offset = ggml_get_op_params_i32(dst, 1);
+    float * st = (float *)state->data + 3*offset;
+    ik_projection_conv conv{st, (const float *)taps->data, (const float *)res->data, st + ggml_get_op_params_i32(dst, 0)*stride,
+            (const int *)rs_ids->data, int64_t(stride), ggml_get_op_params_f32(dst, 2)};
+#define IK_EXPERT_TAIL(r, g, p) ik_expert_tail<r, g, p><<<2304/(r*g), 256*g, 0, ctx.stream()>>>( \
+        (const block_q2_0 *)(p ? down->src[3]->data : w->data), (const block_q8_1 *)x->data, (const int *)ids->data, (const float *)weights->data, weights->nb[1]/sizeof(float), (float *)dst->data, conv)
+    if (mode > 6 && !down->src[3]) { return false; }
+    switch (mode) {
+        case 1: IK_EXPERT_TAIL(2, 1, false); break;
+        case 7: IK_EXPERT_TAIL(2, 1, true); break;
+        case 2: IK_EXPERT_TAIL(4, 1, false); break;
+        case 8: IK_EXPERT_TAIL(4, 1, true); break;
+        case 3: IK_EXPERT_TAIL(8, 1, false); break;
+        case 9: IK_EXPERT_TAIL(8, 1, true); break;
+        case 4: IK_EXPERT_TAIL(2, 2, false); break;
+        case 10: IK_EXPERT_TAIL(2, 2, true); break;
+        case 5: IK_EXPERT_TAIL(4, 2, false); break;
+        case 11: IK_EXPERT_TAIL(4, 2, true); break;
+        case 6: IK_EXPERT_TAIL(8, 2, false); break;
+        case 12: IK_EXPERT_TAIL(8, 2, true); break;
+        default: return false;
+    }
+#undef IK_EXPERT_TAIL
+    return true;
+}
+
+template<int rows>
+static __global__ void ik_down_packed_rows(const char * w, const block_q8_1 * x, const int * ids, float * out) {
+    const int slot = blockIdx.y, lane = threadIdx.x%32;
+    const int start = (blockIdx.x*(blockDim.x/32) + threadIdx.x/32)*rows;
+    float sum[rows]{};
+#pragma unroll
+    for (int b = lane; b < 36; b += 32) {
+#pragma unroll
+        for (int r = 0; r < rows; ++r) {
+            const float y = ik_down_packed_dot(w, x + slot*36 + b, ids[slot], (start + r)*18 + b/2, b%2);
+            sum[r] = __fadd_rn(sum[r], y);
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < rows; ++r) {
+        const float y = warp_reduce_sum(sum[r]);
+        if (lane == (start+r)%4) { out[slot*2304 + start + r] = y; }
+    }
+}
+
 bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     static const bool enabled = !getenv("IK_Q2_DOWN_ROWS") || atoi(getenv("IK_Q2_DOWN_ROWS")) == 2;
     const ggml_tensor * w = dst->src[0];
@@ -944,6 +1059,17 @@ bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             !ggml_is_contiguous(w) || !ggml_is_contiguous(x) || !ggml_is_contiguous(ids) || !ggml_is_contiguous(dst) ||
             !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device)) {
         return false;
+    }
+    if (dst->src[3] && dst->src[3]->type == GGML_TYPE_I8 && ggml_nbytes(dst->src[3]) == ggml_nbytes(w)) {
+        static const int rows = getenv("IK_Q2_PACK_ROWS") ? atoi(getenv("IK_Q2_PACK_ROWS")) : 2;
+#define IK_PACKED_ROWS(r) ik_down_packed_rows<r><<<dim3(2304/(4*r),8),128,0,ctx.stream()>>>((const char *)dst->src[3]->data, (const block_q8_1 *)x->data, (const int *)ids->data, (float *)dst->data)
+        switch (rows) {
+            case 1: IK_PACKED_ROWS(1); return true;
+            case 2: IK_PACKED_ROWS(2); return true;
+            case 4: IK_PACKED_ROWS(4); return true;
+            case 8: IK_PACKED_ROWS(8); return true;
+        }
+#undef IK_PACKED_ROWS
     }
     ik_q2_down_rows<<<dim3(2304/8, 8), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
             (const block_q2_0 *) w->data, (const block_q8_1 *) x->data, (const int32_t *) ids->data, (float *) dst->data);
