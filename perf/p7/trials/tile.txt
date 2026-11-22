@@ -1,0 +1,18 @@
+0f4c67b prefix=1024 IK_WINDOW_TILE_ROWS=0
+window of 4: 10.22 ms per step (19 steps, all logits read back)
+80 rows in 20 steps (positions 1024..1103) after a 1024-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+0f4c67b prefix=1024 IK_WINDOW_TILE_ROWS=2
+window of 4: 10.59 ms per step (19 steps, all logits read back)
+80 rows in 20 steps (positions 1024..1103) after a 1024-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+0f4c67b prefix=1024 IK_WINDOW_TILE_ROWS=4
+window of 4: 10.76 ms per step (19 steps, all logits read back)
+80 rows in 20 steps (positions 1024..1103) after a 1024-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+0f4c67b prefix=16384 IK_WINDOW_TILE_ROWS=0
+window of 4: 11.48 ms per step (19 steps, all logits read back)
+80 rows in 20 steps (positions 16384..16463) after a 16384-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+0f4c67b prefix=16384 IK_WINDOW_TILE_ROWS=2
+window of 4: 11.86 ms per step (19 steps, all logits read back)
+80 rows in 20 steps (positions 16384..16463) after a 16384-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+0f4c67b prefix=16384 IK_WINDOW_TILE_ROWS=4
+window of 4: 12.03 ms per step (19 steps, all logits read back)
+80 rows in 20 steps (positions 16384..16463) after a 16384-token prefix: 0 rows differ from single-token decode, max |logit diff| 0

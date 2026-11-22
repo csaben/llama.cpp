@@ -1,0 +1,2 @@
+n3-adapt       edit      prompt   1025  3000 tok   282.7 tok/s    9009 chars  accepted/proposed 2105/2642
+n3-adapt       edit@16K  prompt  16044  3000 tok   271.0 tok/s    4508 chars  accepted/proposed 2126/2565

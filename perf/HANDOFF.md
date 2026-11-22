@@ -1,12 +1,11 @@
 # Phase 7 (levers 1-2)
 
-Active on GPU1. Starting tree `c8eefdf`, inference baseline `399b61a`. First measurements compare shared attention and device feature handoff against the same-flags plain reference. Round 4 deployment information below is historical.
+GPU1 only. Starting tree `c8eefdf`, Round 4 inference baseline `399b61a`. The live deployment remains with the orchestrator.
 
-- `10c8f8c` shared scan (`IK_WINDOW_SCAN_MIN=1`), four rows, prefixes 1/4096/16384/32768: zero of 320 rows differed. Window ms off/on: 8.96/9.26, 11.08/11.37, 11.47/11.69, 12.49/12.72. Trying fused staging for small splits.
-- `99f3500` device target features and projected anchor (`LLAMA_DSPARK_DEV=1`): 313.1 fixed n3 and 313.3 adaptive n3 on the 384-token edit, median of three. Both matched the plain message and IDs. Long matrix in progress. Device picks still synchronize before target verification.
-
-- Packed MMA columns (`4b8cb7b`) produced zero logit error through 32K. Allocated graph reuse (`13f232b`) with queued IDs gave fixed n3 317.8 short, 284.5 long edit and 271.6 long edit@16K. Separate shared-memory kernels were slower.
-- Pinned input copies (`61a1127`) and an unchunked CUDA graph reached 320.4 median short edit. CUDA events measured 11.28 ms of graph execution in a steady 4-row round. Investigating the remaining mid-round wait and tuning the cached-width policy before full validation.
+- Three scan layouts tested. Standalone staging (`10c8f8c`) and staging an entire split (`0f4c67b`) cost more time. Four query rows in the MMA columns (`4b8cb7b`) matched all 480 reference logit rows through 32K. At 32K the window fell from 12.49 to 12.09 ms. Raw depth sweeps are in `perf/p7/trials/`.
+- Device features (`99f3500`), queued candidate IDs (`7b57a6a`), separate allocated graphs (`13f232b`), stream-ordered host inputs (`61a1127`, `2adfe25`) and device embedding lookup reduced the draft host read to zero calls. At `2adfe25`, a CUDA event probe on 67 short-edit rounds found one wait above 1 ms per round and a median 11.22 ms of GPU graph work.
+- `2adfe25`: fixed n3 at 3000 tokens gave 256.3 / 281.6 / 233.4 / 270.9 / 270.6 tok/s for code / edit / prose / edit@16K / edit@32K. All 15 fixed-policy-off messages and token streams across widths 2/3/4 matched plain, and the four historical plain answers still matched Round 4. `perf/p7/pre3000/`.
+- Candidate `8899fa9`: stricter device-path limits, sampled-output fences and a five-row packing trial. Final matrix, deployment choice and regression checks in progress. `perf/p7/round_times.py` reads the timestamped CUDA-event probe.
 
 # Phase 6 hand-off (keep current; newest status first)
 

@@ -1,0 +1,15 @@
+4b8cb7b prefix=1 IK_WINDOW_COLS=1
+window of 4: 9.32 ms per step (23 steps, all logits read back)
+96 rows in 24 steps (positions 1..96) after a 1-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+4b8cb7b prefix=1024 IK_WINDOW_COLS=1
+window of 4: 10.33 ms per step (23 steps, all logits read back)
+96 rows in 24 steps (positions 1024..1119) after a 1024-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+4b8cb7b prefix=4096 IK_WINDOW_COLS=1
+window of 4: 10.96 ms per step (23 steps, all logits read back)
+96 rows in 24 steps (positions 4096..4191) after a 4096-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+4b8cb7b prefix=16384 IK_WINDOW_COLS=1
+window of 4: 11.40 ms per step (23 steps, all logits read back)
+96 rows in 24 steps (positions 16384..16479) after a 16384-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+4b8cb7b prefix=32768 IK_WINDOW_COLS=1
+window of 4: 12.09 ms per step (23 steps, all logits read back)
+96 rows in 24 steps (positions 32768..32863) after a 32768-token prefix: 0 rows differ from single-token decode, max |logit diff| 0

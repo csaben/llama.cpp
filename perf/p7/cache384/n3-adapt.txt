@@ -1,0 +1,1 @@
+n3-adapt       edit      prompt   1025   384 tok   315.9 tok/s    1115 chars  accepted/proposed 280/303  runs 302/316/319
