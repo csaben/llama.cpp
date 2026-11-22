@@ -1,0 +1,14 @@
+0000:01:00.0 NVIDIA GeForce RTX 3090 SMs=82; CUDA event median of 7 batches x 16 replays
+graph          blocks  1 us at 32/128/512/1024:     21.76     82.87    327.42    653.50 slope(1024-128) 0.6369 us/edge
+graph          blocks  2 us at 32/128/512/1024:     21.75     82.75    326.71    652.47 slope(1024-128) 0.6359 us/edge
+grid           blocks  2 us at 32/128/512/1024:     26.30     93.63    362.10    687.42 slope(1024-128) 0.6627 us/edge
+ring           blocks  2 us at 32/128/512/1024:     15.86     52.86    200.83    397.76 slope(1024-128) 0.3849 us/edge
+broadcast_ack  blocks  2 us at 32/128/512/1024:     28.03    101.24    394.82    763.72 slope(1024-128) 0.7394 us/edge
+graph          blocks 16 us at 32/128/512/1024:     20.42     77.63    307.00    612.93 slope(1024-128) 0.5974 us/edge
+grid           blocks 16 us at 32/128/512/1024:     25.02     88.13    338.69    672.38 slope(1024-128) 0.6521 us/edge
+ring           blocks 16 us at 32/128/512/1024:     15.17     49.54    186.69    370.68 slope(1024-128) 0.3584 us/edge
+broadcast_ack  blocks 16 us at 32/128/512/1024:     29.55    106.15    412.60    821.18 slope(1024-128) 0.7980 us/edge
+graph          blocks 82 us at 32/128/512/1024:     22.91     86.91    343.40    685.49 slope(1024-128) 0.6681 us/edge
+grid           blocks 82 us at 32/128/512/1024:     25.22     87.74    338.18    671.23 slope(1024-128) 0.6512 us/edge
+ring           blocks 82 us at 32/128/512/1024:     15.62     49.47    184.70    364.80 slope(1024-128) 0.3519 us/edge
+broadcast_ack  blocks 82 us at 32/128/512/1024:     30.71    109.36    424.13    841.54 slope(1024-128) 0.8172 us/edge
