@@ -37,6 +37,12 @@ case "$1" in
             bash perf/p7l3r4/run.sh trace "final/on-$depth" "$depth"
         done
         python3 perf/p7l3r4/summarize.py "$work"/{off,on}-{0,16384}.sqlite >"$out/coverage.txt"
+        for depth in 0 16384; do
+            python3 perf/p7l3r4/compare.py "$work/off-$depth.sqlite" "$work/on-$depth.sqlite" "$depth"
+        done >"$out/kernel-deltas.md"
+        for depth in 0 16384; do
+            python3 perf/p7l3r4/latency.py "$work/on-$depth.sqlite" "$depth" --mean
+        done >"$out/latency-mean.md"
         ;;
     *) exit 2 ;;
 esac
