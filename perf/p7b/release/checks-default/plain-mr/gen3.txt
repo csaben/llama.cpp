@@ -1,0 +1,13 @@
+Explain step by step how TCP slow start and congestion avoidance work.
+
+TCP slow start and congestion avoidance are two mechanisms used by the Transmission Control Protocol (TCP) to manage the flow of data between a sender and a receiver. These mechanisms help to prevent network congestion and ensure efficient data transmission.
+
+Step 1: Slow Start
+The slow start mechanism is used when a TCP connection is first established or after a period of inactivity. It is designed to gradually increase the amount of data that can be sent over the network, starting from a small value and gradually increasing it.
+
+Step 2: Initial Window Size
+When a TCP connection is established, the sender sets the initial window size to a small value, typically 1 or 2 packets. This is the maximum amount of data that can be sent before receiving an acknowledgment from the receiver.
+
+Step 3: Incremental Increase
+As the sender receives acknowledgments from the receiver, it gradually increases the window size. This is done by doubling the window
+

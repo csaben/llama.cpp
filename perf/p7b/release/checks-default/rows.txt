@@ -1,0 +1,55 @@
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+greedy check: 2 of the server's tokens are not the argmax of the single-token logits (first: the token at position 2713, generated token 1688, its logit is 0.03136 below the best)
+replay of /tmp/tmp.2LZNZd1Y9z/n3.trace: prompt 1025 tokens, 1699 output rows up to position 2723 (rows by step size: 1:1 2:0 3:0 4:1698 5+:0): 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 4.99 ms per step
+73 rows in 24 steps (positions 1533..1605) after a 1533-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.05 ms per step
+73 rows in 24 steps (positions 3069..3141) after a 3069-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.06 ms per step
+73 rows in 24 steps (positions 4500..4572) after a 4500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.23 ms per step
+40 rows in 24 steps (positions 3069..3108) after a 3069-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.02 ms per step
+126 rows in 64 steps (positions 2000..2125) after a 2000-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.00 ms per step
+126 rows in 64 steps (positions 2046..2171) after a 2046-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.06 ms per step
+126 rows in 64 steps (positions 2558..2683) after a 2558-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.03 ms per step
+126 rows in 64 steps (positions 3069..3194) after a 3069-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.11 ms per step
+126 rows in 64 steps (positions 4094..4219) after a 4094-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24124 MiB):
+  Device 0: NVIDIA GeForce RTX 3090, compute capability 8.6, VMM: yes, VRAM: 24124 MiB
+....................................................
+single token: 5.08 ms per step
+126 rows in 64 steps (positions 4500..4625) after a 4500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
