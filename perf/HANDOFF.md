@@ -4,7 +4,7 @@ Local source `f7f505c` (`p8m-merged`) includes A and `p8c-final`. The nine-file 
 
 All six GPU1 matrices passed. All 360 drafted replies and 347,520 emitted IDs matched same-flags plain and frozen stream B. The archived stream A controls also matched on every shared prompt. Adaptive cap 6 reached 303.1 / 330.5 tok/s on the short / long agent replay. At 16K, cap-6 uncached TTFT was 5.877 s at microbatches 512/512 and 5.673 s at 2,048/512. The split trial left 2,084 MiB free through 32K. [Release table](RESULTS.md#merged-served-decode), [matrix audit](p8m/matrix/audit.txt), [all cells](p8m/matrix/cells.tsv).
 
-The rollback, depth, FP32, PPL and CUDA checks are in progress. The live endpoint is stopped.
+Both flag batteries passed 2,714 rollback/boundary rows, six frozen greedy completions and 1,110 CUDA cases each. PPL reproduced 3.0530 prefill and 4.1979 / 4.2038 decode. Depth, full-logit and extended operator checks are in progress. The live endpoint is stopped.
 
 # Phase 8
 

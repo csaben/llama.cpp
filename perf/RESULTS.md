@@ -1652,3 +1652,9 @@ Decode tok/s. The 384-token columns are three-request medians. Long columns are 
 Cap 6 exceeded cap 3 on five of the six long prompts, and cap 3 was 2.2 tok/s faster on long code. Short cap 3 was 3.5 / 2.7 tok/s faster than cap 6 on edit at 16K / 32K. [384-token captures](p8m/matrix/main/384/), [3,000-token captures](p8m/matrix/main/3000/).
 
 Across the main, extra prose and forced-width suites, all 360 drafted replies and 347,520 generated token IDs matched same-flags merged plain and frozen stream B. Every common prompt also matched stream A. The audit covers 194 cells, three short repeats (five on additional prose) and one long request per cell. Every long cap-6 prompt beat plain by 22.3-74.8%. Four of eleven short cap-6 prompts trailed plain by 0.04-1.12%. [Rates and digests](p8m/matrix/cells.tsv), [audit](p8m/matrix/audit.txt), [runner](p8bc/matrix.sh).
+
+### Merged numerical checks
+
+Each of the default and serving-flag runs passed all 2,714 trace/rollback/boundary rows with maximum logit difference zero, six frozen greedy completions, and 1,110/1,110 CUDA operator tests. Both prefill estimates on eight WikiText chunks were 3.0530 +/- 0.06532. Single-token decode on two chunks reproduced 4.1979 +/- 0.28221 plain and 4.2038 +/- 0.28288 under MR/MMA. As in the frozen replay, two historical tokens in the original failing trace differ from the current scalar argmax. All 1,699 kept rows of that trace matched the scalar reference. [Serving checks](p8m/checks/checks/), [default checks](p8m/checks/checks-default/), [driver](p8m/checks.sh).
+
+The staged server identifies as `f7f505c`. The separately linked benchmark prints `9d5fa4d`, a subsequent commit containing only verification scripts and performance notes. Production source is identical at the two commits. The nine measured runtime binaries also matched the snapshot SHA-256 manifest in the build directory. [Server version](p8m/snapshot-version.txt), [manifest](p8m/snapshot.sha256).
