@@ -1,0 +1,12 @@
+greedy check: 2 of the server's tokens are not the argmax of the single-token logits (first: the token at position 2713, generated token 1688, its logit is 0.03136 below the best)
+replay of p6/r4_repro/n3.trace.gz (expanded): prompt 1025 tokens, 1699 output rows up to position 2723 (rows by step size: 1:1 2:0 3:0 4:1698 5+:0): 0 rows differ from single-token decode, max |logit diff| 0
+73 rows in 24 steps (positions 1533..1605) after a 1533-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+73 rows in 24 steps (positions 3069..3141) after a 3069-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+73 rows in 24 steps (positions 4500..4572) after a 4500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+40 rows in 24 steps (positions 3069..3108) after a 3069-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+126 rows in 64 steps (positions 2000..2125) after a 2000-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+126 rows in 64 steps (positions 2046..2171) after a 2046-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+126 rows in 64 steps (positions 2558..2683) after a 2558-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+126 rows in 64 steps (positions 3069..3194) after a 3069-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+126 rows in 64 steps (positions 4094..4219) after a 4094-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+126 rows in 64 steps (positions 4500..4625) after a 4500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0

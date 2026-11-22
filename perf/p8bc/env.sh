@@ -9,4 +9,4 @@ export LLAMA_ARG_SPEC_DRAFT_OVERRIDE_TENSOR='mask_embd.weight=CUDA0'
 export SPEC_CTX=65536 SPEC_REQUIRE_IDS=1 SPEC_FIXED_LENGTH=1 SPEC_PORT=18431
 export SPEC_KINDS=code,edit,prose,edit@16K,edit@32K,agent
 export SPEC_PROMPTS_FILE=perf/p7b/prose-prompts.json
-draft="$HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf"
+export P8_DRAFT="$HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf"

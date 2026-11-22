@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source perf/p5env.sh
+export GPU=${CHECKS_GPU:-$GPU} CUDA_VISIBLE_DEVICES=${CHECKS_GPU:-$CUDA_VISIBLE_DEVICES}
 export LD_LIBRARY_PATH=$PWD/build/bin
 out=${CHECKS_OUT:-perf/p6/r4_checks}
 mkdir -p "$out"

@@ -9,7 +9,7 @@ width=$3
 shift 3
 args=(--backend-sampling)
 if (( width )); then
-    args+=(--spec-type draft-dspark --spec-draft-model "$HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf"
+    args+=(--spec-type draft-dspark --spec-draft-model "${P8_DRAFT:?source perf/p8bc/env.sh first}"
            --spec-draft-n-max "$width" --spec-draft-p-min 0)
 fi
 mkdir -p "$out"
