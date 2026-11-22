@@ -15,6 +15,7 @@ for line in open(sys.argv[1]):
 
 # A >5 ms stream fence ends the verify. Keep consecutive generation fences and all expected graphs.
 fences = sorted(start + ns for start, ns, name in calls if ns > 5e6 and name == "cudaStreamSynchronize")
+graphs.sort()
 rounds = []
 for left, right in zip(fences, fences[1:]):
     if not 8e6 < right - left < 25e6:
@@ -28,8 +29,13 @@ if len(rounds) < 10:
     sys.exit("fewer than ten complete rounds")
 
 print("Complete rounds", len(rounds))
-# The target reads the GPU draft. These two graphs cannot overlap.
-print("Sum of target and draft GPU ms", round(sum(sum(sorted(gpu)[-2:]) for gpu, _, _ in rounds), 3))
+# The three-graph server launches injection, draft, then target on the queued round path.
+if graph_count == 3:
+    for index, label in enumerate(["injection", "draft", "target"]):
+        print(f"{label} graph median ms: {median(gpu[index] for gpu, _, _ in rounds):.4f}")
+    print("Sum of target and draft GPU ms", round(sum(gpu[1] + gpu[2] for gpu, _, _ in rounds), 3))
+else:
+    print("Sum of two longest graphs, GPU ms", round(sum(sum(sorted(gpu)[-2:]) for gpu, _, _ in rounds), 3))
 for label, values in [
     ("round ms", [ms for _, _, ms in rounds]),
     ("GPU graphs total ms", [sum(gpu) for gpu, _, _ in rounds]),

@@ -1,4 +1,7 @@
 Complete rounds 862
+injection graph median ms: 0.1137
+draft graph median ms: 0.8417
+target graph median ms: 10.3250
 Sum of target and draft GPU ms 9626.897
 round ms: median 11.4680, min 10.7632, max 14.8394
 GPU graphs total ms: median 11.2819, min 10.5524, max 11.9675
