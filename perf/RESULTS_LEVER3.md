@@ -327,7 +327,7 @@ Each modeled floor is 2.5 us plus the distinct required tensor bytes divided by 
 
 On the first depth-zero token, the excess was 150.54 us for routing, 140.91 for controller mix/down and 129.14 for gate/attention. After the KV history grew, gate/attention ranked first at 243.70 us on average. At depth 16K it ranked first immediately at 560.64 us and averaged 524.74 us. Of the latter, 405.71 us came from 40 sliding-window visits and 119.03 us from eight full-attention visits. Controller apply/pack and standalone residual mixes were the next two steady-state targets. SITU and the expert sum both ran below the launch-plus-streaming model at both depths. [First-token ranking](p7l3r4/latency-first.md), [steady-state ranking](p7l3r4/latency-mean.md)
 
-The original 16264c6 executable measured 215.80/198.06/186.20/171.02 tok/s; the starting Round 3 source measured 225.06/206.84/194.27/178.57 at prefixes 0/4096/16384/32768. Measurements used the local 82-SM RTX 3090, IQ4_NL/Q2 model, flash attention and Q8_0 K/V. [Fresh 16264c6 control](p7l3r4/baseline-16264c6.txt), [fresh Round 3 control](p7l3r4/round3.txt), [commands](p7l3r4/run.sh)
+The original 16264c6 executable measured 215.80/198.06/186.20/171.02 tok/s. The starting Round 3 source measured 225.06/206.84/194.27/178.57 at prefixes 0/4096/16384/32768. Measurements used the local 82-SM RTX 3090, IQ4_NL/Q2 model, flash attention and Q8_0 K/V. [Fresh 16264c6 control](p7l3r4/baseline-16264c6.txt), [fresh Round 3 control](p7l3r4/round3.txt), [commands](p7l3r4/run.sh)
 
 ### Experiments on the ranked kernels
 

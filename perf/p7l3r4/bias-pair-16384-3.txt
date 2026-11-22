@@ -1,0 +1,12 @@
+IK_ATTENTION_BIAS=0 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        195.62 ± 2.00 |
+build: 812b439 (231)
+IK_ATTENTION_BIAS=3 start_C=85
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        196.82 ± 1.78 |
+build: 812b439 (231)
+IK_ATTENTION_BIAS=3 start_C=81
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        198.00 ± 1.37 |
+build: 812b439 (231)
+IK_ATTENTION_BIAS=0 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        196.38 ± 2.38 |
+build: 812b439 (231)

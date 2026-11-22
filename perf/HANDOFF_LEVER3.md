@@ -8,6 +8,8 @@ The first combined build measured 230.61 / 210.16 / 196.79 / 178.28 tok/s and ma
 
 The smaller candidate at `p7l3r4-compact-candidate` changes four CUDA source files. It matched 88 full-vocabulary rows at prefixes 200/4096/16384/32768. Its warm same-binary crossovers gained 3.76% at zero, 2.86% at 4K 2.15% at 16K and 2.70% at 32K. At zero its trace saved 74 us/token in gate/attention and 47 in controller down. Temperature-matched release benchmarks, PPL, DSpark and backend tests are pending. [Exact hashes](p7l3r4/slim-hashes.txt), [kernel timings](p7l3r4/slim-kernels.txt), [depth-zero crossover](p7l3r4/slim-pair-0.txt)
 
+The aligned relative-position bias path gained a further 0.72% at 16K and tied at depth zero. It is enabled with the other measured improvements by default on the eligible 82-SM GA10x plain decoder. `IK_GLUE_FAST=0` restores the Round 3 schedule in this binary. The release build and its validation run use the default setting. [Depth zero](p7l3r4/bias-pair-0-3.txt), [16K](p7l3r4/bias-pair-16384-3.txt)
+
 ## Round 3
 
 Round 3 selected source is **812b439**, tagged **p7l3r3-selected-grid-225tok**. It uses two-rank mixed-state down dots, a cooperative controller RMS/pack barrier, and four-row register routing for queried states. Set `IK_DEPENDENCY_FUSION=0` for the Round 2 control. Final local tag **p7l3r3-final-225tok**. Validation finished at 04:53 EST on November 22, 2026. [Round 3 results](RESULTS_LEVER3.md#round-3-on-gpu0), [crossover](p7l3r3/sync-pairs.txt)
