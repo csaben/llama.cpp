@@ -246,6 +246,22 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
         return;
     }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+    static const int local = getenv("IK_LOCAL_SCAN") ? atoi(getenv("IK_LOCAL_SCAN")) : 0;
+    if (local && short_scan) {
+        static const int gates = getenv("IK_LOCAL_GATES") ? std::min(48,std::max(1,atoi(getenv("IK_LOCAL_GATES")))) : 12;
+        ggml_cuda_pool_alloc<float> values(ctx.pool(),3072);
+        auto run = [&](auto width, auto late) {
+            constexpr int n = decltype(width)::value;
+            ik_local_gate_scan<taps,n,decltype(late)::value><<<8*(1+gates),n,0,ctx.stream()>>>(a,w,x,values.get(),counters,gates);
+        };
+        if (local == 1) { run(std::integral_constant<int,256>{},std::false_type{}); }
+        else if (local == 2) { run(std::integral_constant<int,288>{},std::false_type{}); }
+        else if (local == 3) { run(std::integral_constant<int,384>{},std::false_type{}); }
+        else if (local == 4) { run(std::integral_constant<int,256>{},std::true_type{}); }
+        else if (local == 5) { run(std::integral_constant<int,288>{},std::true_type{}); }
+        else { run(std::integral_constant<int,384>{},std::true_type{}); }
+        return;
+    }
     static const int mma = getenv("IK_MMA_ORDER") ? atoi(getenv("IK_MMA_ORDER")) : 0;
     if (mma) {
         auto run = [&](auto schedule) {
