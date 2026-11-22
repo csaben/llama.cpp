@@ -145,12 +145,28 @@ static __global__ void __launch_bounds__(256, 2) ik_coop_gate_scan(ik_attn_args 
     }
 }
 
+#include "inkling-short.cuh"
+
 template<int taps>
 static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
     const auto * x = (const block_q8_1 *) proj->src[1]->data;
     int * counters = ik_counters(ctx, 192, 8);
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+    static const int stripes = getenv("IK_SHORT_STRIPES") ? atoi(getenv("IK_SHORT_STRIPES")) : 0;
+    if (short_scan && stripes > 0) {
+        static const int gate_blocks = getenv("IK_STRIPE_GATES") ? std::max(1,std::min(48,atoi(getenv("IK_STRIPE_GATES")))) : 12;
+        ggml_cuda_pool_alloc<ik_short_head> parts(ctx.pool(), 8);
+        auto launch = [&](auto width) {
+            constexpr int n = decltype(width)::value;
+            ik_short_stripes<taps,n><<<8*(1+n+gate_blocks),256,0,ctx.stream()>>>(a,w,x,parts.get(),counters,gate_blocks);
+        };
+        if (stripes == 8) { launch(std::integral_constant<int,8>{}); }
+        else if (stripes == 4) { launch(std::integral_constant<int,4>{}); }
+        else if (stripes == 2) { launch(std::integral_constant<int,2>{}); }
+        else { launch(std::integral_constant<int,1>{}); }
+        return;
+    }
     static const int mode = getenv("IK_SCAN_SCHEDULE") ? atoi(getenv("IK_SCAN_SCHEDULE")) : 0;
     static const int gate_rows = getenv("IK_GATE_ROWS") ? atoi(getenv("IK_GATE_ROWS")) : 0;
     if (gate_rows || a.gate_tiles) {
