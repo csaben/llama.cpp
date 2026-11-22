@@ -1,0 +1,11 @@
+Complete rounds 88
+Sum of target and draft GPU ms 977.835
+round ms: median 11.4368, min 10.8520, max 13.5956
+GPU graphs total ms: median 11.2665, min 10.7018, max 11.7729
+longest GPU graph ms: median 10.3132, min 9.7587, max 10.8042
+auxiliary sync ms: median 0.0000, min 0.0000, max 0.0000
+longest sync ms: median 11.1865, min 9.8421, max 11.6253
+API waits > 0 ms: median 1, range 1..1
+API waits > 0.05 ms: median 1, range 1..1
+API waits > 0.1 ms: median 1, range 1..1
+API waits > 1 ms: median 1, range 1..1

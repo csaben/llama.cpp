@@ -10,6 +10,8 @@ GPU1 only. Starting tree `c8eefdf`, Round 4 inference baseline `399b61a`. The li
 - Release candidate `8899fa9` passed 2,714 full logit-row comparisons (replay, mixed widths, pad boundaries and SWA rollback), all six greedy probes and 1,108 backend tests. PPL matched Round 4. The five-row variant improved the isolated 32K window by 0.24 ms but lost on the 3,000-token served edit (263.4 vs 271.0), so the matrix uses `IK_WINDOW_COLS=1`.
 - In 854 measured long edit rounds, the serialized draft and target graphs alone took 9.666 s. At 16K, 831 such rounds took 9.980 s. The 320 tok/s budget for the entire 3,000-token response is 9.375 s. These observed sums exclude unmeasured rounds, device injection and host bookkeeping. See `perf/p7/profile-edit{,@16K}/rounds.txt`.
 
+- The follow-up moved the mask embedding to the GPU and shared the target fence with draft readback. CUDA API tracing recorded exactly one synchronization call in all 88 complete short-edit rounds on trial `24b9447` (`perf/p7/fence/gpu.rounds.txt`). The release integration is `c71f680`; validation runs on a private test port.
+
 # Phase 6 hand-off (keep current; newest status first)
 
 ## Round 4 status (2026-11-22, complete)

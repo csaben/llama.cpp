@@ -2,6 +2,7 @@
 import sys
 from statistics import median
 
+graph_count = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 calls = []
 graphs = []
 for line in open(sys.argv[1]):
@@ -12,19 +13,19 @@ for line in open(sys.argv[1]):
         _, start, ms = line.split()
         graphs.append((int(start), float(ms)))
 
-# A >5 ms stream fence ends the verify. Keep consecutive generation fences and all four graphs.
+# A >5 ms stream fence ends the verify. Keep consecutive generation fences and all expected graphs.
 fences = sorted(start + ns for start, ns, name in calls if ns > 5e6 and name == "cudaStreamSynchronize")
 rounds = []
 for left, right in zip(fences, fences[1:]):
     if not 8e6 < right - left < 25e6:
         continue
     gpu = [ms for start, ms in graphs if left <= start < right]
-    if len(gpu) != 4 or max(gpu) < 5:
+    if len(gpu) != graph_count or max(gpu) < 5:
         continue
     waits = [ns / 1e6 for start, ns, _ in calls if left <= start < right]
     rounds.append((gpu, waits, (right - left) / 1e6))
 if len(rounds) < 10:
-    sys.exit("fewer than ten complete four-graph rounds")
+    sys.exit("fewer than ten complete rounds")
 
 print("Complete rounds", len(rounds))
 # The target reads the GPU draft. These two graphs cannot overlap.

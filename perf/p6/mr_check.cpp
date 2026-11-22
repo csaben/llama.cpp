@@ -27,6 +27,7 @@ static llama_context * make_ctx(llama_model * model, const char * rs_env = "MR_R
 }
 
 static void decode(llama_context * ctx, const llama_token * toks, int n, int pos0, bool all_logits) {
+    if (n == 0) return;
     if (n > 2048) { // a long prefix goes in batches, as a server does
         for (int i = 0; i < n; i += 2048) decode(ctx, toks + i, n - i < 2048 ? n - i : 2048, pos0 + i, all_logits);
         return;
@@ -217,7 +218,7 @@ int main(int argc, char ** argv) {
         for (const char * q = e; *q; ) { sizes.push_back(atoi(q)); while (*q && *q != ',') ++q; if (*q) ++q; }
     }
     for (int n : sizes) if (n < 1 || n > 8) return 1;
-    if (sizes.empty() || n_windows < 1 || n_prefix < 1) return 1;
+    if (sizes.empty() || n_windows < 1 || n_prefix < 0) return 1;
     const bool rollbacks = !getenv("MR_ROLLBACK") || atoi(getenv("MR_ROLLBACK")) != 0;
     // MR_RAND=<seed>: a schedule like the server's policy: runs of single-token (plain) steps between windows of the
     // sizes in MR_SIZES (default 2,3,4), each window keeping 1..n rows (uniform); the rejected rows hold WRONG tokens
