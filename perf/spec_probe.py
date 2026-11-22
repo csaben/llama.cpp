@@ -8,6 +8,7 @@
 # Compare with perf/p6/r4_cmp.py, which refuses empty messages. SPEC_KINDS=code,edit limits the prompts,
 # SPEC_REPS=n repeats each request (median rate; all n messages must be equal), SPEC_PROBS=1 also saves the tokens with
 # their top-3 log-probabilities as <label>.<kind>.probs.json, SPEC_CTX sets -c (default 32768).
+# SPEC_TOKEN_IDS=1 saves the emitted IDs even for requests that stop naturally (tool grammars require EOS).
 import glob, json, os, struct, subprocess, sys, time, urllib.request
 args = sys.argv[1:]
 label = args[0]
@@ -22,7 +23,12 @@ PROMPTS = [
     ("prose", "Write a 300-word story about a lighthouse keeper who finds a message in a bottle."),
 ]
 def post(path, body):
-    return json.load(urllib.request.urlopen(urllib.request.Request(URL + path, json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=1800))
+    request = urllib.request.Request(URL + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=1800) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"{path}: HTTP {error.code}: {error.read().decode(errors='replace')}") from error
 M = os.path.expanduser(os.environ["MODEL"])
 cmd = [os.path.join(ROOT, "build/bin/llama-server"), "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", os.environ.get("SPEC_CTX", "32768"),
        "-np", "1", "--port", "8041", "--host", "127.0.0.1"] + extra
@@ -61,7 +67,9 @@ try:
                 {"role": "tool", "tool_call_id": "call_read", "content": lines},
             ])
         if os.environ.get("SPEC_FIXED_LENGTH") == "1":
-            body.update(ignore_eos=True, return_tokens=True, verbose=True)
+            body["ignore_eos"] = True
+        if body.get("ignore_eos") or os.environ.get("SPEC_TOKEN_IDS") == "1":
+            body.update(return_tokens=True, verbose=True)
         if os.environ.get("SPEC_PROBS"):
             body.update({"logprobs": True, "top_logprobs": 3})
         # SPEC_REPS=n: the request n times; the median run is reported, all rates are listed
@@ -73,7 +81,7 @@ try:
         t = r["timings"]
         if body.get("return_tokens"):
             ids = r["__verbose"]["tokens"]
-            if len(ids) != body["max_tokens"] or any(x["__verbose"]["tokens"] != ids for x in runs):
+            if not ids or len(ids) != t["predicted_n"] or any(x["__verbose"]["tokens"] != ids for x in runs):
                 raise ValueError(f"{label} {kind}: missing or differing output token IDs")
             if os.environ.get("SPEC_OUT"):
                 os.makedirs(os.environ["SPEC_OUT"], exist_ok=True)
