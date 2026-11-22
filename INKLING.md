@@ -6,7 +6,19 @@ in 700-token server generations at temperature zero. An experimental IQ4_NL dens
 **174.2 tok/s** on tg128 and **167.6 tok/s** served, with a measurable change in greedy output.
 Both use all three core passes, Q8_0 KV and F16 controllers.
 
-Write-up: *Looping on a 3090* (link in the repo description).
+Write-up: [*Looping on a 3090*](https://clark.saben.org/looping-on-a-3090).
+
+**Just run it** (Linux, glibc ≥ 2.38, NVIDIA driver ≥ 570, an RTX 3090-class GPU; no CUDA toolkit or build):
+
+```bash
+uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090-v2#subdirectory=tools/inkling-3090" inkling-3090             # 2-bit, ~206 tok/s
+uvx --from "git+https://github.com/csaben/llama.cpp@inkling-3090-v2#subdirectory=tools/inkling-3090" inkling-3090 --quality   # Q6_K, ~159 tok/s, near-exact
+```
+
+Models: [2-bit](https://huggingface.co/arelius/Inkling-2-Mini-Q2-3090-GGUF) ·
+[Q6_K near-exact](https://huggingface.co/arelius/Inkling-2-Mini-Q6K-3090-GGUF) ·
+[uncensored 2-bit](https://huggingface.co/arelius/Inkling-2-Mini-Uncensored-Q2-3090-GGUF). Prebuilt server:
+[release inkling-3090-v2](https://github.com/csaben/llama.cpp/releases/tag/inkling-3090-v2).
 Lab notebook with every step, number and profile: [`perf/RESULTS.md`](perf/RESULTS.md).
 
 > **Agents:** start here. This file tells you how to build it, reproduce each number, find the core code and
