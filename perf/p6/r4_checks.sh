@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 source perf/p5env.sh
 export LD_LIBRARY_PATH=$PWD/build/bin
-out=perf/p6/r4_checks
+out=${CHECKS_OUT:-perf/p6/r4_checks}
 mkdir -p "$out"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

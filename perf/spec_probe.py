@@ -42,13 +42,14 @@ try:
         except Exception:
             time.sleep(0.5)
     kinds = os.environ.get("SPEC_KINDS", "code,edit,prose,edit@16K").split(",")
-    no_long = no_long or "edit@16K" not in kinds
-    if not no_long:
+    depths = [n for n in (16, 32) if f"edit@{n}K" in kinds]
+    if depths and not no_long:
         files = sorted(glob.glob(os.path.join(ROOT, "src", "llama-*.cpp")))
         text = "".join(f"\n// ===== {os.path.basename(f)} =====\n" + open(f, errors="ignore").read() for f in files)
         toks = post("/tokenize", {"content": text})["tokens"]
-        doc = post("/detokenize", {"tokens": toks[:16000]})["content"]
-        PROMPTS.append(("edit@16K", doc + "\n\nCopy the first function defined in the source above exactly, then add a one-line comment above each of its statements. Output only the code."))
+        for depth in depths:
+            doc = post("/detokenize", {"tokens": toks[:depth*1000]})["content"]
+            PROMPTS.append((f"edit@{depth}K", doc + "\n\nCopy the first function defined in the source above exactly, then add a one-line comment above each of its statements. Output only the code."))
     if "read-tool" in kinds:
         PROMPTS.append(("read-tool", "Read perf/longctx.py and explain how it measures time to first token. Identify the statement that stops the timer."))
     for kind, p in PROMPTS:
