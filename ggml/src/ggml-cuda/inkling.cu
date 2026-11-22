@@ -4549,6 +4549,8 @@ struct ik_router_args {
     int32_t     * route;              // [2*n_used]: ids, then the weights as float bits
     float       * dst;                // [n_embd]
     block_q8_1  * xq;                 // nullptr or the quantized result
+    float2 * published;
+    int key_mode;
     float       * logits;             // [n_expert] scratch
     int         * counter;
     int n_embd, n_expert, n_used;
@@ -4850,11 +4852,82 @@ static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long 
     return key;
 }
 
+static __device__ __forceinline__ bool ik_select_keys(const ik_router_args & a) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    const int t=threadIdx.x, lane=t%32;
+    float p[4];
+    unsigned keys[4], highest=0;
+    bool bad=false;
+    if (t<32) {
+#pragma unroll
+        for (int i=0;i<4;++i) {
+            const int e=i*32+lane;
+            float score;
+            if (a.published) {
+                const float2 pair=a.published[e];
+                score=pair.x; p[i]=pair.y;
+            } else {
+                p[i]=1.0f/(1.0f+expf(-a.logits[e]));
+                score=p[i]+a.probs_b[e];
+            }
+            bad |= isnan(score);
+            const unsigned bits=__float_as_uint(score==0.0f ? 0.0f : score);
+            keys[i]=bits^(bits&0x80000000u ? 0xffffffffu : 0x80000000u);
+            highest=max(highest,keys[i]);
+        }
+    }
+    if (__syncthreads_or(bad)) { return false; }
+    if (t<32) {
+        highest=__reduce_max_sync(0xffffffffu,highest);
+        const unsigned low=highest>0x01fffffeu ? highest-0x01fffffeu : 0u;
+        int eligible=0;
+#pragma unroll
+        for (int i=0;i<4;++i) { eligible+=keys[i]>=low; }
+        const bool compact=(a.key_mode&4)==0 && __reduce_add_sync(0xffffffffu,eligible)>=8;
+        if (compact) {
+#pragma unroll
+            for (int i=0;i<4;++i) {
+                keys[i]=keys[i]>=low ? ((keys[i]-low+1)<<7)|(127-(i*32+lane)) : 0;
+            }
+        }
+        int id=0;
+        float mine=0,sum=0;
+#pragma unroll
+        for (int k=0;k<8;++k) {
+            const unsigned best=__reduce_max_sync(0xffffffffu,max(max(keys[0],keys[1]),max(keys[2],keys[3])));
+            unsigned winner=127u-(best&127u);
+            if (!compact) {
+                const unsigned first=keys[0]==best ? lane : keys[1]==best ? 32+lane : keys[2]==best ? 64+lane : keys[3]==best ? 96+lane : 128;
+                winner=__reduce_min_sync(0xffffffffu,first);
+            }
+            float z=p[0];
+#pragma unroll
+            for (int i=0;i<4;++i) {
+                if (winner/32==i) { z=p[i]; }
+                if (winner==i*32+lane) { keys[i]=0; }
+            }
+            const float v=__shfl_sync(0xffffffffu,z,winner%32);
+            sum+=v;
+            if (lane==k) { id=winner; mine=v; }
+        }
+        if (lane<8) {
+            a.route[lane]=id;
+            a.route[8+lane]=__float_as_int(mine/(sum+a.w_eps)*a.w_scale);
+        }
+        if (!lane) { *a.counter=0; }
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
 template<bool MR>
 static __device__ __forceinline__ void ik_finish_route(const ik_router_args & args) {
     const int tid = threadIdx.x, lane = tid%32, warp = tid/32;
     __shared__ float s_sel[IK_R2_MAX_EXPERT], s_prob[IK_R2_MAX_EXPERT], s_selected[8];
     // ===== the selection by the last block: the rank of every expert (ties: the smaller id first) =====
+    if (!MR && args.key_mode && ik_select_keys(args)) { return; }
     const int n_expert = args.n_expert;
     if (tid < n_expert) {
         const float p = 1.0f/(1.0f + expf(-args.logits[tid]));
@@ -5240,7 +5313,12 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         }
         dot = warp_reduce_sum(dot);
         if (lane == 0) {
-            args.logits[e0 + warp] = dot;
+            const int e=e0+warp;
+            args.logits[e]=dot;
+            if (args.published) {
+                const float p=1.0f/(1.0f+expf(-dot));
+                args.published[e]=make_float2(p+args.probs_b[e],p);
+            }
         }
     }
     IK_RDBG_T(3);
@@ -5459,6 +5537,12 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     static const int select_mode = getenv("IK_ROUTER_SELECT") ? atoi(getenv("IK_ROUTER_SELECT")) : 0;
     a.select_mode = n_rows == 1 && !a.wo_out && ik_dependency_fusion(ctx) && a.warp_topk && a.n_embd == 2304 ? select_mode : 0;
+    static const int key_mode=getenv("IK_ROUTE_KEYS") ? atoi(getenv("IK_ROUTE_KEYS")) : 0;
+    a.key_mode=n_rows==1 && ik_dependency_fusion(ctx) && a.warp_topk && a.n_embd==2304 && !a.wo_out && !a.select_mode ? key_mode : 0;
+    ggml_cuda_pool_alloc<float2> published(ctx.pool());
+    a.published=nullptr;
+    if (a.key_mode&2) { published.alloc(a.n_expert); a.published=published.get(); }
+
     static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
     if (n_rows > 1) {
