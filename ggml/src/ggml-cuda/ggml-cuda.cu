@@ -4648,6 +4648,9 @@ static int ik_ctrl_branch(ggml_backend_cuda_context & ctx, ggml_cgraph * graph, 
             down->src[0]->type != GGML_TYPE_F16 || down->src[0]->ne[0] != 4608 ||
             down->src[1]->data != graph->nodes[m]->data ||
             !(down->flags & GGML_TENSOR_FLAG_COMPUTE) || !(graph->nodes[m]->flags & GGML_TENSOR_FLAG_COMPUTE)) { return 0; }
+    if (mode < 0) {
+        return ggml_cuda_mix_down(ctx, graph->nodes[m], down, -mode) ? j - i : 0;
+    }
     const ggml_tensor * message = down->src[2]->view_src;
     if (!message || message->op != GGML_OP_RES_MIX) { return 0; }
     for (int h = i; h <= m; ++h) {

@@ -264,14 +264,12 @@ static __global__ void res_mix_f32(const float * __restrict__ query, const ik_st
 
 // n_embd % 4 == 0 and n_embd/4 <= block_size: one float4 of every state per thread, a single pass of loads
 template <int block_size, bool q8, int NS = 0>
-static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
+static __device__ __forceinline__ void ik_mix_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
         const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
-        const ik_res_mix_norm norm) {
+        const ik_res_mix_norm norm, int t, int iq) {
     const int n_states = NS ? NS : state_count;
     constexpr int n_warps = block_size/WARP_SIZE;
 
-    const int t  = blockIdx.x;
-    const int iq = blockIdx.y;
 
     const int lane = threadIdx.x % WARP_SIZE;
     const int wid  = threadIdx.x / WARP_SIZE;
@@ -394,6 +392,13 @@ static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const
     } else if (k < n_embd4) {
         ((float4 *) dst_v)[row*n_embd4 + k] = y;
     }
+}
+
+template <int block_size, bool q8, int NS = 0>
+static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
+        const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
+        const ik_res_mix_norm norm) {
+    ik_mix_vec4<block_size, q8, NS>(query, st, dst_v, n_embd4, n_tok, state_count, q_nb1, eps, scale, norm, blockIdx.x, blockIdx.y);
 }
 
 // The trailing normalization weight is a source but never a mixed state.
@@ -987,6 +992,114 @@ void ggml_cuda_ctrl_half(cudaStream_t stream, ggml_tensor * down, float2 * terms
     auto kernel = message ? ik_ctrl_half<true> : ik_ctrl_half<false>;
     kernel<<<dim3(64, down->ne[2]), 256, 0, stream>>>((const half *)down->src[0]->data, (const float *)x->data,
             x->ne[2] > 1 ? x->nb[2]/sizeof(float) : 0, ggml_get_op_params_f32(down, 0), terms, (float *)down->data);
+}
+
+struct ik_mix_ctrl_args {
+    ik_state_ptrs st;
+    const float4 * query;
+    const half * weights;
+    const float * msg;
+    float * mixed;
+    float * down;
+    int cols, q_stride, msg_stride;
+    float eps, scale, ctrl_eps;
+};
+
+template<int ns, bool prefetch>
+static __global__ void __launch_bounds__(640) ik_mix_down(ik_mix_ctrl_args a) {
+    const int b = blockIdx.y, t = threadIdx.x, k = t%256;
+    const int col = a.cols == 1 ? 0 : b;
+    const int rank = 2*blockIdx.x + t/256;
+    const half * w = a.weights + (b*64 + rank)*4608;
+    float wa[9], sb = 0, db = 0;
+    if constexpr (prefetch) {
+        if (t < 512) {
+#pragma unroll
+            for (int j = 0; j < 9; ++j) {
+                const int i = j*256 + k;
+                const float v = a.msg[b*a.msg_stride + i];
+                sb += v*v;
+                db += v*__half2float(w[2304+i]);
+                wa[j] = __half2float(w[i]);
+            }
+        }
+    }
+    __shared__ float mixed[2304];
+    ik_mix_vec4<640, false, ns>(a.query + col*a.q_stride, a.st, mixed, 576, 1, ns, 0, a.eps, a.scale, {}, 0, 0);
+    __syncthreads();
+    if (blockIdx.x == 0 && b == col && t < 576) {
+        ((float4 *) a.mixed)[col*576 + t] = ((float4 *) mixed)[t];
+    }
+    float sa = 0, da = 0;
+    __shared__ float4 partial[16];
+    if (t < 512) {
+#pragma unroll
+        for (int j = 0; j < 9; ++j) {
+            const int i = j*256 + k;
+            const float x = mixed[i];
+            sa += x*x;
+            if constexpr (!prefetch) {
+                const float v = a.msg[b*a.msg_stride + i];
+                sb += v*v;
+                db += v*__half2float(w[2304+i]);
+                wa[j] = __half2float(w[i]);
+            }
+            da += x*wa[j];
+        }
+        sa = warp_reduce_sum(sa); da = warp_reduce_sum(da);
+        sb = warp_reduce_sum(sb); db = warp_reduce_sum(db);
+        if (t%32 == 0) { partial[t/32] = make_float4(sa, da, sb, db); }
+    }
+    __syncthreads();
+    if (t < 2) {
+        sa = da = sb = db = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            float4 p = partial[t*8+j];
+            sa += p.x; da += p.y; sb += p.z; db += p.w;
+        }
+        a.down[b*64+2*blockIdx.x+t] = da*rsqrtf(sa/2304 + a.ctrl_eps) + db*rsqrtf(sb/2304 + a.ctrl_eps);
+    }
+}
+
+bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml_tensor * down, int mode) {
+    const int states = ik_res_mix_state_count(mix);
+    if (!mix->src[0] || states < 1 || states > 5 || ggml_get_op_params_i32(mix, 3) || mix->type != GGML_TYPE_F32 ||
+            mix->ne[0] != 2304 || mix->ne[1] != 1 || !ggml_is_contiguous(mix) || !ggml_is_contiguous(mix->src[0]) ||
+            (mix->ne[2] != 1 && mix->ne[2] != down->ne[2])) { return false; }
+    auto overlaps = [](const ggml_tensor * a, const ggml_tensor * b) {
+        const uintptr_t x = (uintptr_t)a->data, y = (uintptr_t)b->data;
+        return x < y + ggml_nbytes(b) && y < x + ggml_nbytes(a);
+    };
+    ik_mix_ctrl_args a{};
+    for (int j = 0; j <= states; ++j) {
+        if (overlaps(mix->src[j], mix) || overlaps(mix->src[j], down) || (uintptr_t)mix->src[j]->data%16) { return false; }
+        if (j) { a.st.p[j-1] = (const float *)mix->src[j]->data; }
+    }
+    a.query = (const float4 *)mix->src[0]->data;
+    a.weights = (const half *)down->src[0]->data;
+    a.msg = (const float *)down->src[2]->data;
+    a.mixed = (float *)mix->data;
+    a.down = (float *)down->data;
+    a.cols = mix->ne[2];
+    a.q_stride = mix->src[0]->nb[1]/sizeof(float4);
+    a.msg_stride = down->src[2]->nb[2]/sizeof(float);
+    a.eps = ggml_get_op_params_f32(mix, 0);
+    a.scale = ggml_get_op_params_f32(mix, 1);
+    a.ctrl_eps = ggml_get_op_params_f32(down, 0);
+    auto launch = [&](auto count) {
+        constexpr int n = decltype(count)::value;
+        auto kernel = mode == 2 ? ik_mix_down<n, true> : ik_mix_down<n, false>;
+        kernel<<<dim3(32, down->ne[2]), 640, 0, ctx.stream()>>>(a);
+    };
+    switch (states) {
+        case 1: launch(std::integral_constant<int,1>{}); break;
+        case 2: launch(std::integral_constant<int,2>{}); break;
+        case 3: launch(std::integral_constant<int,3>{}); break;
+        case 4: launch(std::integral_constant<int,4>{}); break;
+        case 5: launch(std::integral_constant<int,5>{}); break;
+    }
+    return true;
 }
 
 // The controllers of a batch (prefill): the per-token kernels above launch a block per (rank, token) and a warp per
