@@ -13,7 +13,7 @@ HEAD = 201024
 IQ4 = 18 * (E // 32)
 
 
-def footprint(name, params, grid, depth, pos, full):
+def footprint(name, params, grid, pos, full):
     """Logical input and output bytes. Count a shared input once per launch."""
     gx, gy, _ = grid
     if name.startswith(('ik_dense_gate_scan', 'ik_dense_warp_roles')):
@@ -27,6 +27,9 @@ def footprint(name, params, grid, depth, pos, full):
         kv = (cells + 1) * 2 * 8 * 4 * 34
         mask_pos = (cells + 1) * 6
         return 3072 * IQ4 + Q + proj + clip_conv + table + history + kv + mask_pos + 96 * 36 + 12 + 4 * taps
+    if name == 'fill_kernel':
+        # The initial state row has 19,968 F32 entries.
+        return 3 * (2*1024 + 2*E) * 4
     if name == 'ik_dense_scan_inputs':
         return gx * 4 * (IQ4 + 4) + Q * (3 if full else 1)
     if name == 'ik_projection_conv_kernel':
@@ -36,8 +39,8 @@ def footprint(name, params, grid, depth, pos, full):
         cols = 3 if full and gy == 3 else 1
         return F * (params[0] + 2 * cols + gy) + gy * 64 * (2 * E * 2 + 4)
     if name == 'loop_ctrl_down_f32':
-        cols = 3 if full and gy == 3 else 1
         batches = grid[2]
+        cols = 3 if full and batches == 3 else 1
         return F * (cols + batches) + batches * 64 * (2 * E * 2 + 4)
     if name in ('ik_ctrl_apply_pack', 'ik_ctrl_apply8'):
         cols = 3 if full and gy == 3 else 1
@@ -85,7 +88,7 @@ def measurements(path, depth, steps):
             JOIN StringIds d ON d.id=k.demangledName ORDER BY k.start
         """).fetchall()
     ends = [i for i, r in enumerate(rows) if r[0] == 'softcap_f32'][-129:]
-    assert len(ends) >= 128
+    assert len(ends) == 129
     groups = defaultdict(list)
     for step in steps:
         # The last 128 softcaps are the 128 timed generation tokens.
@@ -99,7 +102,7 @@ def measurements(path, depth, steps):
             grid, block = tuple(shape[:3]), tuple(shape[3:])
             nxt = next((j for j in dense if j >= i), dense[0])
             full = token[nxt][3] == 1398
-            b = footprint(name, p, grid, depth, depth + step, full)
+            b = footprint(name, p, grid, depth + step, full)
             key = name, p, grid, block
             groups[key].append((ns / 1000, b))
     return groups
@@ -137,5 +140,6 @@ if __name__ == '__main__':
     cli.add_argument('trace', type=Path)
     cli.add_argument('depth', type=int)
     cli.add_argument('--mean', action='store_true')
+    cli.add_argument('--step', type=int, default=64, choices=range(128), metavar='0..127')
     args = cli.parse_args()
-    report(args.trace, args.depth, range(8, 128) if args.mean else [64])
+    report(args.trace, args.depth, range(8, 128) if args.mean else [args.step])
