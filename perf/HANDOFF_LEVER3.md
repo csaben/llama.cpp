@@ -4,7 +4,7 @@
 
 The built default is `5d1f9e0` (`p7l3r4-default-vector`). The same four CUDA files form a single local code commit `ab2ad69` directly on the Round 3 final commit. Select that commit with tag `p7l3r4-release-source`. The default targets the 82-SM GA10x plain decoder. Set `IK_GLUE_FAST=0` to restore the Round 3 schedule. [Build and model identity](p7l3r4/final/environment.txt), [ranked latency tables](RESULTS_LEVER3.md#kernel-latency-and-logical-traffic), [screening results](p7l3r4/screenings.md)
 
-At 06:46 EST, the release had matched all 88 reference logit rows and 128 additional rows from interleaved sequences. PPL matched at 3.0530/4.1979, all 2,834 DSpark rows agreed, and all 3,988 backend cases passed. The four-depth temperature-matched benchmark is pending. [Exactness and backend evidence](RESULTS_LEVER3.md#exactness-and-backend-checks)
+At 06:46 EST, the release had matched all 88 reference logit rows and 128 additional rows from interleaved sequences. PPL matched at 3.0530/4.1979, all 2,834 DSpark rows agreed, and all 3,988 backend cases passed. The default four-depth run reached 233.36/213.68/200.00/183.89 tok/s, against 215.92/198.04/186.24/171.00 for the fresh 16264c6 control. Per-depth temperature-matched crossovers are running. [Default throughput](p7l3r4/final/official-on.txt), [reference](p7l3r4/final/official-base.txt). [Exactness and backend evidence](RESULTS_LEVER3.md#exactness-and-backend-checks)
 
 ## Round 3
 

@@ -375,7 +375,7 @@ All 12 DSpark comparisons passed under `IK_MR=1`, including the captured 1,699-r
 
 ### Reproducing the release measurements
 
-The release binary was built from `5d1f9e0`, tagged `p7l3r4-default-vector`. The four production CUDA files also form commit `ab2ad69` on the Round 3 final commit `549883d`. Their source bytes match the measured revision. The `p7l3r4-release-source` tag identifies that standalone commit. The measurement scripts and detailed evidence are on `inkling-3090-lever3`. [Release environment](p7l3r4/final/environment.txt), [kernel dispatch](../ggml/src/ggml-cuda/inkling.cu), [gate/scan geometry](../ggml/src/ggml-cuda/inkling-visit.cuh)
+The release binary was built from `5d1f9e0`, tagged `p7l3r4-default-vector`. The four production CUDA files also form commit `ab2ad69` on the Round 3 final commit `549883d`. Their source bytes match the measured revision. The `p7l3r4-release-233tok` tag identifies that standalone commit. The measurement scripts and detailed evidence are on `inkling-3090-lever3`. [Release environment](p7l3r4/final/environment.txt), [kernel dispatch](../ggml/src/ggml-cuda/inkling.cu), [gate/scan geometry](../ggml/src/ggml-cuda/inkling-visit.cuh)
 
 The default selects the matching single-token path on an 82-SM GA10x device. `IK_GLUE_FAST=0` selects the Round 3 schedule. Both settings use the same calibrated GGUF. The validation driver selects GPU0 before starting each CUDA process. It uses the archived `16264c6` executable built under this worktree as described in the Round 2 reproduction instructions. [Validation driver](p7l3r4/validate.sh), [archive build instructions](#round-2-on-gpu0), [synchronization checker](p7l3r4/synccheck.sh)
 
