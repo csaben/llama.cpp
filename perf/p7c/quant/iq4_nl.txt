@@ -1,0 +1,3 @@
+iq4_nl         code      prompt     47   384 tok   248.6 tok/s    1320 chars  accepted/proposed 193/251  runs 245/249/251
+iq4_nl         edit      prompt   1025   384 tok   339.0 tok/s    1115 chars  accepted/proposed 274/281  runs 336/339/340
+iq4_nl         prose     prompt     36   384 tok   217.5 tok/s    1474 chars  accepted/proposed 131/196  runs 216/217/219

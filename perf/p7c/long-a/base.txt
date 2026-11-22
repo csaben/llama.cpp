@@ -1,0 +1,3 @@
+base           code      prompt     47  3000 tok   270.9 tok/s    9296 chars  accepted/proposed 1803/2085
+base           edit      prompt   1025  3000 tok   300.3 tok/s    9009 chars  accepted/proposed 1996/2158
+base           prose     prompt     36  3000 tok   285.4 tok/s   10905 chars  accepted/proposed 1820/2006

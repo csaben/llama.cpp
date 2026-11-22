@@ -1,0 +1,3 @@
+cap0           code      prompt     47   384 tok   213.4 tok/s    1320 chars  runs 211/213/214
+cap0           edit      prompt   1025   384 tok   202.5 tok/s    1115 chars  runs 202/202/204
+cap0           prose     prompt     36   384 tok   211.8 tok/s    1474 chars  runs 212/212/212

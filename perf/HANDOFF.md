@@ -1,6 +1,6 @@
 # Phase 7c hand-off
 
-06:26 EST, in progress on physical GPU1. The first confidence, history and expert-kernel trials were exact but did not improve both code and prose. Testing draft reuse and verifier scheduling. Starting release is `p7b-release`; its verified snapshot remains staged. Lever 3 is active. Part A is testing history acceptance, confidence thresholds and the cost of paid drafts and verification. The merge gate is the inactive lever 3 unit. The release decision is due at 08:50 and the report at 09:00.
+06:44 EST, physical GPU1. Lever 3 is active. Phase 7b is the staged release. An IQ4_NL verifier specialization improved all three short prompts in both halves of a five-repeat crossover. A clean build is now repeating that comparison against the frozen snapshot at 384 and 3,000 tokens, including edits at 16K and 32K. The alternative confidence, draft reuse and FFN quantization trials did not yield a consistent win. The merge gate is the inactive lever 3 unit. The release decision is due at 08:50 and the report at 09:00. [Part A measurements](RESULTS.md#phase-7c).
 
 # Phase 7b hand-off
 

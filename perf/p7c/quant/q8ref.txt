@@ -1,0 +1,3 @@
+q8ref          code      prompt     47   384 tok   246.5 tok/s    1320 chars  accepted/proposed 190/242  runs 242/246/249
+q8ref          edit      prompt   1025   384 tok   334.6 tok/s    1115 chars  accepted/proposed 274/281  runs 324/335/338
+q8ref          prose     prompt     36   384 tok   216.9 tok/s    1474 chars  accepted/proposed 130/189  runs 214/217/217

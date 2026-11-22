@@ -1,0 +1,6 @@
+window of 2: 6.36 ms per step (95 steps, all logits read back)
+192 rows in 96 steps (positions 300..491) after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+window of 3: 8.16 ms per step (95 steps, all logits read back)
+288 rows in 96 steps (positions 300..587) after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+window of 4: 9.61 ms per step (95 steps, all logits read back)
+384 rows in 96 steps (positions 300..683) after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
