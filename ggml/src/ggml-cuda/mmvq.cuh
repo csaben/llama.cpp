@@ -20,3 +20,4 @@ void ggml_cuda_op_mul_mat_vec_q(
 // Inkling multi-row windows: the per-column result of mul_mat_vec_q<type, 1> for up to 8 columns; with ids each
 // distinct expert of the window is read once. Returns false when the device or the types are not supported.
 bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst);
+bool ggml_cuda_ik_mma_moe_ok(const ggml_tensor * src0, const ggml_tensor * dst);

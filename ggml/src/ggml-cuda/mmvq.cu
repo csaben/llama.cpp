@@ -1993,6 +1993,405 @@ static void ik_mmvq_mr_launch(
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Tensor-core window matvecs (IK_MMA=1): integer mma.sync m16n8k32 (s8 x s8 -> s32, sm_80+) with the tokens of the
+// window as the 8 columns, so 1..8 tokens cost the same weight bytes and nearly the same instructions.
+//
+// The layout follows ingine's moe_up_kernel / gemv_mma_kernel (https://github.com/satellitedown/inkling-2-mini-abliterated-ingine,
+// native/src/kernels/moe/moe.cu and dense/gemv.cu, Apache-2.0; see NOTICE.inkling): a block owns a tile of 16 weight
+// rows, each warp a slice of the columns; lane (g = lane/4, t = lane%4) feeds rows g and g+8 of the A fragment and
+// token g of the B fragment from its own loads (any k order that A and B share gives the same dot product), the
+// partial tiles of the warps are summed in a fixed order through shared memory, and the (token, slot) pairs of a
+// window that selected the same expert share one pass over it (ballot over the ids, the first pair owns the expert).
+// Changes against ingine: the operands are int8 (our weights are 2-bit / 4-bit integer codes with block scales and the
+// activations Q8_1), unpacked from Q2_K / Q2_0 / IQ4_NL blocks in registers; the integer sums of an mma are exact and
+// the block scales are applied in fp32 per (row, token, Q8_1 block), as vec_dot_*_q8_1 does. Only the order of the
+// fp32 partial sums differs from mul_mat_vec_q<type, 1>.
+
+static __device__ __forceinline__ void ik_mma_s8(int (&c)[4], const uint32_t a0, const uint32_t a1, const uint32_t a2, const uint32_t a3,
+        const uint32_t b0, const uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%10,%10,%10};"
+        : "=r"(c[0]), "=r"(c[1]), "=r"(c[2]), "=r"(c[3])
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0));
+}
+
+static __device__ __forceinline__ void ik_mma_f16(float (&c)[4], const uint32_t a0, const uint32_t a1, const uint32_t a2, const uint32_t a3,
+        const uint32_t b0, const uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+static __device__ __forceinline__ uint32_t ik_pack_h2(const half a, const half b) {
+    const half2 h = __halves2half2(a, b);
+    return *(const uint32_t *) &h;
+}
+
+// 4 crumbs of a byte -> 4 bytes
+static __device__ __forceinline__ uint32_t ik_crumbs(uint32_t b) {
+    b = (b | (b << 12)) & 0x000F000Fu;
+    return (b | (b << 6)) & 0x03030303u;
+}
+// 4 Q2_0 crumbs -> 4 int8 (crumb - 1)
+static __device__ __forceinline__ uint32_t ik_q2_0_bytes(const uint32_t b) {
+    return ((ik_crumbs(b) | 0x80808080u) - 0x01010101u) ^ 0x80808080u;
+}
+
+#define IK_MMA_MAXW 9 // warps of a block (5 blocks of 9 warps fit an SM with 45 registers per thread)
+// a weight load that stays where it is written (ptxas sinks an ordinary load next to its use, behind the barriers and
+// the activation work, so the weights of a block would not be in flight early; after ingine's ld_stream)
+static __device__ __forceinline__ uint32_t ik_ld_w(const uint32_t * p) {
+    uint32_t v;
+    asm volatile("ld.global.nc.u32 %0, [%1];" : "=r"(v) : "l"(p));
+    return v;
+}
+template <ggml_type type> struct ik_mma_traits;
+template <> struct ik_mma_traits<GGML_TYPE_Q2_K>   { static constexpr int cpw = 256, wbytes = sizeof(block_q2_K); }; // columns and weight bytes of a row per warp
+template <> struct ik_mma_traits<GGML_TYPE_Q2_0>   { static constexpr int cpw = 128, wbytes = 2*sizeof(block_q2_0); };
+template <> struct ik_mma_traits<GGML_TYPE_IQ4_NL> { static constexpr int cpw = 256, wbytes = 8*sizeof(block_iq4_nl); };
+
+// the weights of rows g (wa) and g+8 (wb) for one warp slice, all loads issued up front
+template <ggml_type type> struct ik_mma_w;
+template <> struct ik_mma_w<GGML_TYPE_Q2_K> {
+    uint32_t q[2][4], sc[2][4], dm[2], sct[2];
+    __device__ __forceinline__ void load(const uint8_t * wa, const uint8_t * wb, const int t) {
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const uint32_t * p = (const uint32_t *) (r ? wb : wa);
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                sc[r][i] = __ldg(p + i);
+                q[r][i]  = __ldg(p + 4 + 4*i + t); // qs[16*i + 4*t ..]: half i/2, sub-block parity i%2
+            }
+            dm[r]  = __ldg(p + 20);
+            sct[r] = __ldg(p + t); // scales[4t .. 4t+3]
+        }
+    }
+};
+template <> struct ik_mma_w<GGML_TYPE_Q2_0> {
+    uint32_t q[2][2][2]; // [row][block][step]: 2 bytes = 8 elements
+    uint32_t d[2][2];
+    __device__ __forceinline__ void load(const uint8_t * wa, const uint8_t * wb, const int t) {
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const uint16_t * p = (const uint16_t *) (r ? wb : wa);
+#pragma unroll
+            for (int b = 0; b < 2; ++b) {
+                d[r][b]    = __ldg(p + 9*b);
+                q[r][b][0] = __ldg(p + 9*b + 1 + t);
+                q[r][b][1] = __ldg(p + 9*b + 5 + t);
+            }
+        }
+    }
+};
+
+// Expert matvecs of a window (MUL_MAT_ID): grid (16-row tiles, (token, slot) pairs), a warp per column slice.
+// NC = 1: one token, only the output column 0 of the tile is finished (the same operations per value as NC = 8).
+template <ggml_type type, int NC>
+static __global__ void ik_mma_moe(
+        const uint8_t * GGML_CUDA_RESTRICT vx, const block_q8_1 * GGML_CUDA_RESTRICT vy, const int32_t * GGML_CUDA_RESTRICT ids,
+        float * GGML_CUDA_RESTRICT dst, const uint32_t row_bytes, const size_t expert_bytes, const uint32_t n_tok, const uint32_t ids_stride,
+        const uint32_t y_stride_tok, const uint32_t y_stride_slot, const uint32_t dst_stride_tok, const uint32_t dst_stride_slot) {
+    constexpr int cpw = ik_mma_traits<type>::cpw;
+    __shared__ float red[IK_MMA_MAXW][32][4];
+
+    const int lane = threadIdx.x, warp = threadIdx.y;
+    const int g = lane >> 2, t = lane & 3;
+    const uint32_t slot = blockIdx.y, nslots = n_tok*8;
+
+    // the pairs of the window with this block's expert (after ingine's slot_mask)
+    const int lo = (uint32_t) lane      < nslots ? ids[(lane & 7) + (lane >> 3)*ids_stride]        : -1;
+    const int hi = (uint32_t) lane + 32 < nslots ? ids[(lane & 7) + ((lane + 32) >> 3)*ids_stride] : -2;
+    const int e  = ids[(slot & 7) + (slot >> 3)*ids_stride];
+    const uint64_t mask = (uint64_t) __ballot_sync(0xffffffffu, lo == e) | ((uint64_t) __ballot_sync(0xffffffffu, hi == e) << 32);
+    if (__ffsll((long long) mask) - 1 != (int) slot) {
+        return; // an earlier pair owns the expert
+    }
+
+    const uint8_t * wa = vx + (size_t) e*expert_bytes + (size_t) (blockIdx.x*16 + g)*row_bytes + (size_t) warp*ik_mma_traits<type>::wbytes;
+    ik_mma_w<type> w;
+    w.load(wa, wa + 8*(size_t) row_bytes, t);
+
+    // B: token g; the output columns of this lane: tokens 2t and 2t+1
+    // (a token without this expert reads token 0: its columns of the tile are never written)
+    const uint32_t kg = (uint32_t) (mask >> (8*g)) & 0xffu;
+    const block_q8_1 * yb = vy + (kg ? g*y_stride_tok + (__ffs(kg) - 1)*y_stride_slot : 0) + warp*(cpw/QK8_1);
+    const block_q8_1 * yd[2];
+    uint32_t           ks[2];
+#pragma unroll
+    for (int c = 0; c < 2; ++c) {
+        ks[c] = (uint32_t) (mask >> (8*(2*t + c))) & 0xffu;
+        yd[c] = vy + (ks[c] ? (2*t + c)*y_stride_tok + (__ffs(ks[c]) - 1)*y_stride_slot : 0) + warp*(cpw/QK8_1);
+    }
+
+    float res[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if constexpr (type == GGML_TYPE_Q2_K) {
+        // d * sum(scale * q * x): exact int8 products, one mma per Q8_1 block
+        float accd[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+#pragma unroll
+        for (int s = 0; s < 8; ++s) {
+            const int H = s >> 2, j = s & 3;
+            uint32_t a[4];
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+#pragma unroll
+                for (int b = 0; b < 2; ++b) {
+                    const uint32_t scb = (w.sc[r][2*H + (j >> 1)] >> (16*(j & 1) + 8*b)) & 0xfu; // scales[8H + 2j + b]
+                    a[r + 2*b] = ((w.q[r][2*H + b] >> (2*j)) & 0x03030303u)*scb;
+                }
+            }
+            const uint32_t b0 = *(const uint32_t *) (yb[s].qs + 4*t);
+            const uint32_t b1 = *(const uint32_t *) (yb[s].qs + 16 + 4*t);
+            int cd[4];
+            ik_mma_s8(cd, a[0], a[1], a[2], a[3], b0, b1);
+            const float d8[2] = { __low2float(yd[0][s].ds), NC > 1 ? __low2float(yd[1][s].ds) : 0.0f };
+#pragma unroll
+            for (int v = 0; v < 4; v += NC > 1 ? 1 : 2) {
+                accd[v] += d8[v & 1]*(float) cd[v];
+            }
+        }
+        // dmin * sum over the 16 sub-blocks of min * F, F = d8 * (sum of the 16 activations): the 8 mma of the exact
+        // form bound the kernel (tensor-core throughput), so this is one f16 product over the sub-blocks with F split
+        // into two halves (hi + lo, 22 bits); min (0..15) is exact. This lane: sub-blocks 4t..4t+3 = Q8_1 blocks 2t, 2t+1.
+        float accm[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        {
+            uint32_t fh[2], fl[2], a[4];
+#pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                const block_q8_1 * yq = yb + 2*t + i;
+                const float d8 = __low2float(yq->ds);
+                half hi[2], lo[2];
+#pragma unroll
+                for (int b = 0; b < 2; ++b) {
+                    int S = 0;
+#pragma unroll
+                    for (int l = 0; l < 4; ++l) {
+                        S = ggml_cuda_dp4a(0x01010101, *(const int *) (yq->qs + 16*b + 4*l), S);
+                    }
+                    const float F = d8*(float) S;
+                    hi[b] = __float2half_rn(F);
+                    lo[b] = __float2half_rn(F - __half2float(hi[b]));
+                }
+                fh[i] = ik_pack_h2(hi[0], hi[1]);
+                fl[i] = ik_pack_h2(lo[0], lo[1]);
+            }
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+#pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    a[r + 2*i] = ik_pack_h2(__uint2half_rn((w.sct[r] >> (16*i + 4)) & 0xfu), __uint2half_rn((w.sct[r] >> (16*i + 12)) & 0xfu));
+                }
+            }
+            ik_mma_f16(accm, a[0], a[1], a[2], a[3], fh[0], fh[1]);
+            ik_mma_f16(accm, a[0], a[1], a[2], a[3], fl[0], fl[1]);
+        }
+#pragma unroll
+        for (int v = 0; v < 4; v += NC > 1 ? 1 : 2) {
+            const float2 dm = __half22float2(*(const half2 *) &w.dm[v >> 1]);
+            res[v] = dm.x*accd[v] - dm.y*accm[v];
+        }
+    } else {
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            const int b = s >> 1, h = s & 1;
+            const uint32_t a0 = ik_q2_0_bytes(w.q[0][b][h] & 0xffu), a2 = ik_q2_0_bytes(w.q[0][b][h] >> 8);
+            const uint32_t a1 = ik_q2_0_bytes(w.q[1][b][h] & 0xffu), a3 = ik_q2_0_bytes(w.q[1][b][h] >> 8);
+            const uint32_t b0 = *(const uint32_t *) (yb[s].qs + 8*t);
+            const uint32_t b1 = *(const uint32_t *) (yb[s].qs + 8*t + 4);
+            int c[4];
+            ik_mma_s8(c, a0, a1, a2, a3, b0, b1);
+            const float d8[2] = { __low2float(yd[0][s].ds), NC > 1 ? __low2float(yd[1][s].ds) : 0.0f };
+#pragma unroll
+            for (int v = 0; v < 4; v += NC > 1 ? 1 : 2) {
+                const float d2 = __half2float(*(const half *) &w.d[v >> 1][b]);
+                res[v] += d2*d8[v & 1]*(float) c[v];
+            }
+        }
+    }
+
+#pragma unroll
+    for (int v = 0; v < 4; v += NC > 1 ? 1 : 2) {
+        red[warp][lane][v] = res[v];
+    }
+    __syncthreads();
+    if (warp > 0) {
+        return;
+    }
+#pragma unroll
+    for (int v = 0; v < 4; v += NC > 1 ? 1 : 2) {
+        res[v] = red[0][lane][v];
+    }
+    for (int ww = 1; ww < (int) blockDim.y; ++ww) {
+#pragma unroll
+        for (int v = 0; v < 4; v += NC > 1 ? 1 : 2) {
+            res[v] += red[ww][lane][v];
+        }
+    }
+#pragma unroll
+    for (int v = 0; v < 4; v += NC > 1 ? 1 : 2) {
+        const int c = v & 1;
+        if (ks[c]) {
+            dst[(2*t + c)*dst_stride_tok + (__ffs(ks[c]) - 1)*dst_stride_slot + blockIdx.x*16 + g + 8*(v >> 1)] = res[v];
+        }
+    }
+}
+
+// Q2_K expert matvecs with block sums (IK_MMA & 2), for 1..8 tokens: the same tiles, warps and expert sharing as
+// ik_mma_moe, but on CUDA cores. On this card the tensor-core kernel is bound by the instructions that unpack the
+// 2-bit weights and scales (about 3.5 per weight and expert whatever the number of tokens), and an expert of a
+// window has only 1.6 (4 tokens) to 2.1 (8 tokens) tokens. Here a lane owns half a super-block of one row (128
+// weights): the crumbs are extracted once for all the tokens, each token adds a dp4a per 4 weights, the sums of the
+// activations (the "min" term) come from a prologue that runs while the weights are in flight, and the fp32 work is
+// one multiply-add per Q8_1 block instead of one per 4 weights (mul_mat_vec_q). All integer sums are exact and the
+// fp32 operations per (row, token) are the same for any number of tokens: a row of a window is bit-identical to
+// single-token decode with this kernel.
+
+// (Measured alternatives, slower: two rows per lane; a block that walks the distinct experts 8 apart instead of one
+// block per pair, with or without the next expert's weights loaded ahead: 59.6 / 70 us against 56 us for 4 tokens.)
+template <int NC>
+static __global__ void ik_q2k_moe(
+        const uint8_t * GGML_CUDA_RESTRICT vx, const block_q8_1 * GGML_CUDA_RESTRICT vy, const int32_t * GGML_CUDA_RESTRICT ids,
+        float * GGML_CUDA_RESTRICT dst, const uint32_t row_bytes, const size_t expert_bytes, const uint32_t n_tok, const uint32_t ids_stride,
+        const uint32_t y_stride_tok, const uint32_t y_stride_slot, const uint32_t dst_stride_tok, const uint32_t dst_stride_slot) {
+    constexpr int MAXB = IK_MMA_MAXW*8; // Q8_1 blocks of a row
+    __shared__ float   red[IK_MMA_MAXW][32][NC];
+    __shared__ int16_t S[NC][2*MAXB];   // sums of the 16 activations of each sub-block
+
+    const int lane = threadIdx.x, warp = threadIdx.y;
+    const int H = lane & 1;
+    const uint32_t slot = blockIdx.y, nslots = n_tok*8;
+
+    unsigned long long mask;
+    int e;
+    if constexpr (NC == 1) {
+        e    = ids[slot];
+        mask = 1ull << slot;
+    } else {
+        const int lo = (uint32_t) lane      < nslots ? ids[(lane & 7) + (lane >> 3)*ids_stride]        : -1;
+        const int hi = (uint32_t) lane + 32 < nslots ? ids[(lane & 7) + ((lane + 32) >> 3)*ids_stride] : -2;
+        e    = ids[(slot & 7) + (slot >> 3)*ids_stride];
+        mask = (unsigned long long) __ballot_sync(0xffffffffu, lo == e) | ((unsigned long long) __ballot_sync(0xffffffffu, hi == e) << 32);
+        if (__ffsll((long long) mask) - 1 != (int) slot) {
+            return; // an earlier pair owns the expert
+        }
+    }
+
+    // this lane: row (lane/2) of the tile, half H of super-block `warp`
+    const uint32_t row0 = blockIdx.x*16 + (lane >> 1);
+    const uint32_t * wp = (const uint32_t *) (vx + (size_t) e*expert_bytes + (size_t) row0*row_bytes + (size_t) warp*sizeof(block_q2_K));
+    uint32_t q[2][4], sc[2];
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        sc[i] = ik_ld_w(wp + 2*H + i);
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            q[i][l] = ik_ld_w(wp + 4 + 8*H + 4*i + l);
+        }
+    }
+    const uint32_t dmw = ik_ld_w(wp + 20);
+
+    // the activation rows of the tokens with this expert, and their sub-block sums while the weights are in flight
+    uint32_t yo[NC], ks[NC];
+#pragma unroll
+    for (int n = 0; n < NC; ++n) {
+        ks[n] = NC == 1 ? 1u << slot : (uint32_t) (mask >> (8*n)) & 0xffu;
+        yo[n] = n*y_stride_tok + (ks[n] ? __ffs(ks[n]) - 1 : 0)*y_stride_slot;
+    }
+    const uint32_t nblk = blockDim.y*8;
+    for (uint32_t i = warp*32 + lane; i < nblk; i += blockDim.y*32) {
+#pragma unroll
+        for (int n = 0; n < NC; ++n) {
+            if (ks[n]) {
+                const int * x = (const int *) vy[yo[n] + i].qs;
+                int s0 = 0, s1 = 0;
+#pragma unroll
+                for (int l = 0; l < 4; ++l) {
+                    s0 = ggml_cuda_dp4a(0x01010101, x[l], s0);
+                    s1 = ggml_cuda_dp4a(0x01010101, x[4 + l], s1);
+                }
+                S[n][2*i]     = (int16_t) s0;
+                S[n][2*i + 1] = (int16_t) s1;
+            }
+        }
+    }
+    __syncthreads();
+
+    const float2 dm = __half22float2(*(const half2 *) &dmw);
+    const uint32_t b0 = warp*8 + 4*H; // first Q8_1 block of this lane
+    float accd[NC], accm[NC];
+#pragma unroll
+    for (int n = 0; n < NC; ++n) {
+        accd[n] = 0.0f;
+        accm[n] = 0.0f;
+    }
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        uint32_t v[2][4];
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+#pragma unroll
+            for (int l = 0; l < 4; ++l) {
+                v[i][l] = (q[i][l] >> (2*j)) & 0x03030303u;
+            }
+        }
+        const uint32_t scj = sc[j >> 1] >> (16*(j & 1)); // scales[8H + 2j], [8H + 2j + 1]
+        const int sc0 = scj & 0xfu,        sc1 = (scj >> 8) & 0xfu;
+        const int m0  = (scj >> 4) & 0xfu, m1  = (scj >> 12) & 0xfu;
+#pragma unroll
+        for (int n = 0; n < NC; ++n) {
+            if (ks[n]) {
+                const block_q8_1 * yq = vy + yo[n] + b0 + j;
+                const int * x = (const int *) yq->qs;
+                int s0 = 0, s1 = 0;
+#pragma unroll
+                for (int l = 0; l < 4; ++l) {
+                    s0 = ggml_cuda_dp4a(v[0][l], x[l], s0);
+                    s1 = ggml_cuda_dp4a(v[1][l], x[4 + l], s1);
+                }
+                const float d8 = __low2float(yq->ds);
+                accd[n] = __fmaf_rn(d8, (float) (s0*sc0 + s1*sc1), accd[n]);
+                accm[n] = __fmaf_rn(d8, (float) (m0*(int) S[n][2*(b0 + j)] + m1*(int) S[n][2*(b0 + j) + 1]), accm[n]);
+            }
+        }
+    }
+#pragma unroll
+    for (int n = 0; n < NC; ++n) {
+        red[warp][lane][n] = __fmaf_rn(dm.x, accd[n], -__fmul_rn(dm.y, accm[n]));
+    }
+    __syncthreads();
+    if (warp > 0) {
+        return;
+    }
+#pragma unroll
+    for (int n = 0; n < NC; ++n) {
+        if (ks[n]) {
+            float r = red[0][lane][n];
+            for (int ww = 1; ww < (int) blockDim.y; ++ww) {
+                r = __fadd_rn(r, red[ww][lane][n]);
+            }
+            r = __fadd_rn(r, __shfl_xor_sync(0xffffffffu, r, 1));
+            if (H == 0) {
+                dst[n*dst_stride_tok + (__ffs(ks[n]) - 1)*dst_stride_slot + row0] = r;
+            }
+        }
+    }
+}
+
+static int ik_mma_mode() {
+    static const int mode = getenv("IK_MMA") ? atoi(getenv("IK_MMA")) : 0;
+    return mode;
+}
+
+// the expert matvec (MUL_MAT_ID, dst [rows, 8, n_tok]) takes the tensor-core kernel: single tokens too, so that a row
+// of a window stays bit-identical to single-token decode
+bool ggml_cuda_ik_mma_moe_ok(const ggml_tensor * src0, const ggml_tensor * dst) {
+    if (!(ik_mma_mode() & 1) || dst->ne[1] != 8 || dst->ne[2] > 8 || src0->ne[1] % 16 != 0 ||
+            ggml_cuda_info().devices[ggml_cuda_get_device()].cc < GGML_CUDA_CC_AMPERE) {
+        return false;
+    }
+    const int cpw = src0->type == GGML_TYPE_Q2_K ? ik_mma_traits<GGML_TYPE_Q2_K>::cpw : src0->type == GGML_TYPE_Q2_0 ? ik_mma_traits<GGML_TYPE_Q2_0>::cpw : 0;
+    return cpw > 0 && src0->ne[0] % cpw == 0 && src0->ne[0]/cpw <= IK_MMA_MAXW;
+}
+
 // MUL_MAT (ids == nullptr: dst [rows, n_tok]) or MUL_MAT_ID (dst [rows, n_used, n_tok]) of a window; false: not handled
 bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst) {
     const int device = ggml_cuda_get_device();
@@ -2048,6 +2447,37 @@ bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * s
     const uint32_t d_slot = ids ? d1 : 0;
     GGML_ASSERT(!ids || (ids->ne[0] == n_used && ids->ne[1] == n_tok && (src1->ne[1] == 1 || src1->ne[1] == n_used) && src1->ne[2] == n_tok));
 
+    // IK_MMA_CHECK=1: run both kernels and print the largest difference (debug)
+    static const bool mma_check = getenv("IK_MMA_CHECK") != nullptr;
+    ggml_cuda_pool_alloc<float> chk(ctx.pool());
+    float * mma_dst = (float *) dst->data;
+    if (mma_check) {
+        chk.alloc(ggml_nbytes(dst)/sizeof(float));
+        mma_dst = chk.get();
+    }
+    if (ids && ggml_cuda_ik_mma_moe_ok(src0, dst)) {
+        const int cpw = src0->type == GGML_TYPE_Q2_K ? ik_mma_traits<GGML_TYPE_Q2_K>::cpw : ik_mma_traits<GGML_TYPE_Q2_0>::cpw;
+        {
+            const dim3 grid(src0->ne[1]/16, n_tok*8, 1), block(32, src0->ne[0]/cpw, 1);
+#define IK_MMA_MOE(T, NCV) ik_mma_moe<T, NCV><<<grid, block, 0, stream>>>((const uint8_t *) src0->data, y, ids_d, mma_dst, src0->nb[1], src0->nb[2], \
+        n_tok, ids_stride, y_tok, y_slot, d_tok, d_slot)
+            if (src0->type == GGML_TYPE_Q2_K && (ik_mma_mode() & 2)) {
+#define IK_Q2K_MOE(NCV) ik_q2k_moe<NCV><<<grid, block, 0, stream>>>((const uint8_t *) src0->data, y, ids_d, mma_dst, src0->nb[1], src0->nb[2], \
+        n_tok, ids_stride, y_tok, y_slot, d_tok, d_slot)
+                if (n_tok == 1) { IK_Q2K_MOE(1); } else if (n_tok == 2) { IK_Q2K_MOE(2); } else if (n_tok <= 4) { IK_Q2K_MOE(4); } else { IK_Q2K_MOE(8); }
+#undef IK_Q2K_MOE
+            } else if (src0->type == GGML_TYPE_Q2_K) {
+                if (n_tok == 1) { IK_MMA_MOE(GGML_TYPE_Q2_K, 1); } else { IK_MMA_MOE(GGML_TYPE_Q2_K, 8); }
+            } else {
+                if (n_tok == 1) { IK_MMA_MOE(GGML_TYPE_Q2_0, 1); } else { IK_MMA_MOE(GGML_TYPE_Q2_0, 8); }
+            }
+#undef IK_MMA_MOE
+            if (!mma_check) {
+                return true;
+            }
+        }
+    }
+
     ggml_cuda_pool_alloc<int32_t> plan(ctx.pool());
     static const bool plan_on = getenv("IK_MR_STATS") || (getenv("IK_MR_GROUPED") && atoi(getenv("IK_MR_GROUPED")) != 0);
     if (ids && plan_on) {
@@ -2084,5 +2514,22 @@ bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * s
         default: GGML_ABORT("ik_mmvq_mr: unsupported type");
     }
 #undef IK_MR_CASE
+    if (mma_check && ids && mma_dst != (float *) dst->data) {
+        const size_t n = ggml_nbytes(dst)/sizeof(float);
+        std::vector<float> ha(n), hb(n);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(cudaMemcpy(ha.data(), dst->data, n*sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(hb.data(), mma_dst, n*sizeof(float), cudaMemcpyDeviceToHost));
+        double md = 0, mx = 0; size_t at = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const double d = fabs((double) ha[i] - hb[i]);
+            if (d > md) { md = d; at = i; }
+            mx = fmax(mx, fabs((double) ha[i]));
+        }
+        static int printed = 0;
+        if (printed++ < 40) {
+            fprintf(stderr, "IK_MMA_CHECK %s n_tok %d: max diff %g at %zu (%g vs %g), max |ref| %g\n", ggml_type_name(src0->type), (int) n_tok, md, at, ha[at], hb[at], mx);
+        }
+    }
     return true;
 }

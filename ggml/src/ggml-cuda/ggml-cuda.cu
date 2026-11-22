@@ -2680,6 +2680,10 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     if (ggml_get_op_params_i32(dst, 15) == GGML_IK_MR_MAGIC && ggml_is_quantized(src0->type) && ggml_cuda_ik_mmvq_mr(ctx, src0, src1, ids, dst)) {
         return;
     }
+    // IK_MMA: single tokens take the window's tensor-core expert kernel (same arithmetic per token for 1..8 tokens)
+    if (src1->type == GGML_TYPE_Q8_1 && ne2 == 1 && ggml_cuda_ik_mma_moe_ok(src0, dst) && ggml_cuda_ik_mmvq_mr(ctx, src0, src1, ids, dst)) {
+        return;
+    }
 
     // a Q8_1 src1 is an activation quantized by its producer: only the quantized matvec kernel reads it
     if (src1->type == GGML_TYPE_Q8_1) {
