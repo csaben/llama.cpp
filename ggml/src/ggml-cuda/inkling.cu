@@ -4282,6 +4282,7 @@ struct ik_router_args {
     int         * counter;
     int n_embd, n_expert, n_used;
     bool warp_topk;
+    int select_mode;
     float eps, scale, norm_eps, w_scale, w_eps;
     // the optional attention-output convolution producing the last state
     const float   * wo_out;          // nullptr: no convolution
@@ -4577,7 +4578,107 @@ static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long 
     return key;
 }
 
-template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+template<bool MR>
+static __device__ __forceinline__ void ik_finish_route(const ik_router_args & args) {
+    const int tid = threadIdx.x, lane = tid%32, warp = tid/32;
+    __shared__ float s_sel[IK_R2_MAX_EXPERT], s_prob[IK_R2_MAX_EXPERT], s_selected[8];
+    // ===== the selection by the last block: the rank of every expert (ties: the smaller id first) =====
+    const int n_expert = args.n_expert;
+    if (tid < n_expert) {
+        const float p = 1.0f/(1.0f + expf(-args.logits[tid]));
+        s_prob[tid] = p;
+        s_sel[tid]  = p + args.probs_b[tid];
+    }
+    __syncthreads();
+    if (!MR && args.warp_topk && !__syncthreads_or(tid < n_expert && isnan(s_sel[tid]))) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= 800
+        if (args.select_mode & 1) {
+            if (warp == 0) {
+                unsigned keys[4];
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const float v = s_sel[32*j+lane];
+                    const unsigned bits = __float_as_uint(v == 0.0f ? 0.0f : v);
+                    keys[j] = bits ^ (bits & 0x80000000u ? 0xffffffffu : 0x80000000u);
+                }
+                int my_id = 0;
+                float sum = 0;
+#pragma unroll
+                for (int k = 0; k < 8; ++k) {
+                    const unsigned best = __reduce_max_sync(0xffffffffu, max(max(keys[0], keys[1]), max(keys[2], keys[3])));
+                    const unsigned local = keys[0] == best ? lane : keys[1] == best ? lane+32 : keys[2] == best ? lane+64 : keys[3] == best ? lane+96 : 128;
+                    const unsigned id = __reduce_min_sync(0xffffffffu, local);
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) { if (id == 32*j+lane) { keys[j] = 0; } }
+                    if (lane == k) { my_id = id; }
+                    sum += s_prob[id];
+                }
+                if (lane < 8) {
+                    args.route[lane] = my_id;
+                    args.route[lane+8] = __float_as_int(s_prob[my_id]/(sum + args.w_eps)*args.w_scale);
+                }
+                if (lane == 0) { *args.counter = 0; }
+            }
+            return;
+        }
+#endif
+        __shared__ unsigned long long winners[32];
+        if (tid < 128) {
+            const float score = s_sel[tid];
+            const unsigned bits = __float_as_uint(score == 0.0f ? 0.0f : score);
+            const unsigned ordered = bits ^ (bits & 0x80000000u ? 0xffffffffu : 0x80000000u);
+            // Descending keys break tied scores in favor of the smaller expert id.
+            const unsigned long long key = (static_cast<unsigned long long>(ordered) << 32) | (127u - tid);
+            const auto best = ik_sort_warp(key, lane);
+            if (lane < 8) { winners[warp*8 + lane] = best; }
+        }
+        __syncthreads();
+        if (warp == 0) {
+            const auto best = ik_sort_warp(winners[lane], lane);
+            const int id = 127 - (uint32_t) best;
+            const float prob = s_prob[id];
+            float sum = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) { sum += __shfl_sync(0xffffffffu, prob, i); }
+            if (lane < 8) {
+                args.route[lane] = id;
+                args.route[8 + lane] = __float_as_int(prob/(sum + args.w_eps)*args.w_scale);
+            }
+            if (lane == 0) { *args.counter = 0; }
+        }
+        return;
+    }
+    int rank = n_expert;
+    if (tid < n_expert) {
+        const float mine = s_sel[tid];
+        rank = 0;
+#pragma unroll 16
+        for (int e = 0; e < n_expert; ++e) {
+            const float o = s_sel[e];
+            rank += (o > mine || (o == mine && e < tid)) ? 1 : 0;
+        }
+        if (rank < args.n_used) {
+            args.route[rank] = tid;
+            s_selected[rank] = s_prob[tid];
+        }
+    }
+    __syncthreads();
+    if (rank < args.n_used) {
+        // Normalize in top-k order, independent of which warp won the atomic race.
+        float sum = 0.0f;
+        for (int i = 0; i < args.n_used; ++i) {
+            sum += s_selected[i];
+        }
+        const float w = s_prob[tid]/(sum + args.w_eps)*args.w_scale;
+        args.route[args.n_used + rank] = __float_as_int(w);
+    }
+    if (tid == 0) {
+        *args.counter = 0;
+    }
+    if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); }
+}
+
+template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false, bool input_only = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
     if constexpr (MR) {
@@ -4645,7 +4746,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
                 }
             }
         }
-    } else {
+    } else if constexpr (!input_only) {
         const float4 * row = (const float4 *) (args.gate_inp + (int64_t) (e0 + warp)*n_embd);
         for (int k = lane; k < n_embd4; k += WARP_SIZE) {
             cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(s_rows + warp*(IK_R2_MAX_EMBD/4) + k), row + k);
@@ -4814,7 +4915,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
                         const float4 w = weights[r][j];
                         ((float *) r2_smem)[r*576 + k] = w.x*v.x + w.y*v.y + w.z*v.z + w.w*v.w;
                     }
-                } else {
+                } else if constexpr (!input_only) {
                     s_x[k] = v;
                 }
             }
@@ -4827,6 +4928,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         }
     }
     IK_RDBG_T(10); // y stored
+    if constexpr (input_only) { return; }
     if constexpr (!register_rows) { cp_async_wait_all(); }
     __syncthreads();
     IK_RDBG_T(2);
@@ -4877,69 +4979,39 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         }
     }
 
-    // ===== the selection by the last block: the rank of every expert (ties: the smaller id first) =====
-    const int n_expert = args.n_expert;
-    if (tid < n_expert) {
-        const float p = 1.0f/(1.0f + expf(-args.logits[tid]));
-        s_prob[tid] = p;
-        s_sel[tid]  = p + args.probs_b[tid];
-    }
-    __syncthreads();
-    if (!MR && args.warp_topk && !__syncthreads_or(tid < n_expert && isnan(s_sel[tid]))) {
-        __shared__ unsigned long long winners[32];
-        if (tid < 128) {
-            const float score = s_sel[tid];
-            const unsigned bits = __float_as_uint(score == 0.0f ? 0.0f : score);
-            const unsigned ordered = bits ^ (bits & 0x80000000u ? 0xffffffffu : 0x80000000u);
-            // Descending keys break tied scores in favor of the smaller expert id.
-            const unsigned long long key = (static_cast<unsigned long long>(ordered) << 32) | (127u - tid);
-            const auto best = ik_sort_warp(key, lane);
-            if (lane < 8) { winners[warp*8 + lane] = best; }
-        }
-        __syncthreads();
-        if (warp == 0) {
-            const auto best = ik_sort_warp(winners[lane], lane);
-            const int id = 127 - (uint32_t) best;
-            const float prob = s_prob[id];
-            float sum = 0.0f;
+    ik_finish_route<MR>(args);
+}
+
+template<int rows>
+static __global__ void ik_router_weights(ik_router_args a) {
+    const int t = threadIdx.x, lane = t%32, warp = t/32;
+    const int e0 = blockIdx.x*rows;
+    __shared__ float partial[rows][576];
 #pragma unroll
-            for (int i = 0; i < 8; ++i) { sum += __shfl_sync(0xffffffffu, prob, i); }
-            if (lane < 8) {
-                args.route[lane] = id;
-                args.route[8 + lane] = __float_as_int(prob/(sum + args.w_eps)*args.w_scale);
+    for (int j = 0; j < 3; ++j) {
+        const int k = t + 256*j;
+        if (k < 576) {
+            const float4 v = ((const float4 *) a.dst)[k];
+#pragma unroll
+            for (int r = 0; r < rows; ++r) {
+                const float4 w = ((const float4 *) a.gate_inp)[(e0+r)*576+k];
+                partial[r][k] = w.x*v.x + w.y*v.y + w.z*v.z + w.w*v.w;
             }
-            if (lane == 0) { *args.counter = 0; }
-        }
-        return;
-    }
-    int rank = n_expert;
-    if (tid < n_expert) {
-        const float mine = s_sel[tid];
-        rank = 0;
-#pragma unroll 16
-        for (int e = 0; e < n_expert; ++e) {
-            const float o = s_sel[e];
-            rank += (o > mine || (o == mine && e < tid)) ? 1 : 0;
-        }
-        if (rank < args.n_used) {
-            args.route[rank] = tid;
-            s_selected[rank] = s_prob[tid];
         }
     }
     __syncthreads();
-    if (rank < args.n_used) {
-        // Normalize in top-k order, independent of which warp won the atomic race.
-        float sum = 0.0f;
-        for (int i = 0; i < args.n_used; ++i) {
-            sum += s_selected[i];
-        }
-        const float w = s_prob[tid]/(sum + args.w_eps)*args.w_scale;
-        args.route[args.n_used + rank] = __float_as_int(w);
+    if (warp < rows) {
+        float dot = 0;
+#pragma unroll
+        for (int j = 0; j < 18; ++j) { dot += partial[warp][j*32+lane]; }
+        dot = warp_reduce_sum(dot);
+        if (lane == 0) { a.logits[e0+warp] = dot; }
     }
-    if (tid == 0) {
-        *args.counter = 0;
-    }
-    if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); }
+    __shared__ int last;
+    __syncthreads();
+    if (t == 0) { last = ik_atomic_add_acq_rel(a.counter, 1) == gridDim.x-1; }
+    __syncthreads();
+    if (last) { ik_finish_route<false>(a); }
 }
 
 template <int NS, int NC>
@@ -4966,6 +5038,13 @@ static void inkling_router2_launch_rows(ggml_backend_cuda_context & ctx, const i
 
 template <int NS>
 static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
+    if (a.select_mode >= 2) {
+        inkling_router2_kernel<NS,0,false,false,true,true><<<1,256,0,ctx.stream()>>>(a);
+        if (a.select_mode >= 8) { ik_router_weights<4><<<32,256,0,ctx.stream()>>>(a); }
+        else if (a.select_mode >= 4) { ik_router_weights<2><<<64,256,0,ctx.stream()>>>(a); }
+        else { ik_router_weights<1><<<128,256,0,ctx.stream()>>>(a); }
+        return;
+    }
     if (a.wo_out) {
         GGML_ASSERT(a.cv_n_conv == 4);
         inkling_router2_launch_nc<NS, 4>(ctx, a);
@@ -5067,6 +5146,8 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     a.warp_topk = warp_topk && !a.dbg_skip && !a.dbg_times && a.n_expert == 128 && a.n_used == 8 &&
             ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X;
 
+    static const int select_mode = getenv("IK_ROUTER_SELECT") ? atoi(getenv("IK_ROUTER_SELECT")) : 0;
+    a.select_mode = n_rows == 1 && !a.wo_out && ik_dependency_fusion(ctx) && a.warp_topk && a.n_embd == 2304 ? select_mode : 0;
     static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
     if (n_rows > 1) {
