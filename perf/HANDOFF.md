@@ -1,6 +1,6 @@
 # Phase 8 merge
 
-Local merge `f7f505c` (`p8m-merged`) combines stream A with `p8c-final`. Git merged the distinct controller/attention and relative-bias hunks in `inkling.cu` cleanly. Release verification is in progress on physical GPU1. The live endpoint is stopped.
+Local merge `f7f505c` (`p8m-merged`) combines stream A with `p8c-final`. Git merged the distinct controller/attention and relative-bias hunks in `inkling.cu` cleanly. The SM86 build and nine-file snapshot at `~/inkling-live-bin-p8m-f7f505c` are complete. The staged binary reports `f7f505c` and resolves all eight local libraries. Frozen stream A controls are captured. The merged prefill, tool replay and exactness suites are running serially on physical GPU1. The live endpoint is stopped.
 
 # Phase 8
 

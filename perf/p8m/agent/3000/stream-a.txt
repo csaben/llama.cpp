@@ -1,0 +1,1 @@
+stream-a       agent     prompt   2025  3000 tok   331.9 tok/s    6154 chars  accepted/proposed 2125/2246

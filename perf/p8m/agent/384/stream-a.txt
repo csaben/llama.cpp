@@ -1,0 +1,1 @@
+stream-a       agent     prompt   2025   384 tok   294.8 tok/s    1284 chars  accepted/proposed 248/278  runs 294/294/295/296/296

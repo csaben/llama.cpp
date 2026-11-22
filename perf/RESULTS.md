@@ -1630,4 +1630,4 @@ The manual deployment script was syntax-checked and left unexecuted. It selects 
 
 ## Phase 8 merge
 
-Combined runtime source `f7f505c` (`p8m-merged`), physical GPU1 (03:00.0). Verification in progress.
+Combined runtime source `f7f505c` (`p8m-merged`), physical GPU1 (03:00.0). The frozen stream A 64K-slot control had median uncached client TTFT of 1.670 / 6.486 / 13.973 s at 4K / 16K / 32K with plain and 1.711 / 6.567 / 14.190 s with guarded cap 3. [Plain samples](p8m/ttft/stream-a-plain/samples.txt), [DSpark samples](p8m/ttft/stream-a-draft/samples.txt).
