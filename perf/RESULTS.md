@@ -1271,6 +1271,13 @@ On the release build, `r4_checks.sh` replayed 1,699 rows from the old failing tr
 
 With Phase 7 flags off, three paired runs against the frozen Round 4 build found a small shortfall in candidate `c71f680`. In order, each row used old/new, new/old, old/new, with three repetitions per depth per invocation. The largest median paired loss in plain mode was 0.90% at 16K. MR/MMA-mode paired changes ranged from -0.06% to +0.31%. On the candidate, enabling only `IK_QUEUE_INPUTS=1` gave 221.69 / 202.89 / 191.95 / 176.87 tok/s in plain mode at depths 0 / 4K / 16K / 32K. The final change at `59c71a9` selects the pinned input uploader automatically for single-token Q8 Inkling attention on the supported CUDA topology. `IK_QUEUE_INPUTS=0` selects the previous copy path. The staged DSpark setting remains explicitly enabled. [Paired runs and input-copy controls](p7/checks/).
 
+The final default-only check ran the Round 4 and `59c71a9` binaries from their respective library directories on GPU1. Each entry lists generated tok/s at 0 / 4K / 16K / 32K, using `-p 0 -n 128 -d 0,4096,16384,32768 -r 3`. Each attention mode ran release, Round 4, release, then a third release measurement in the correctness battery. No Phase 7 flags were set. The release median exceeded the paired Round 4 value at every depth in both modes. The second release plain measurement at 16K illustrates the spread. [Paired plain benchmarks](p7/release/bench/), [default-path checks](p7/release/checks-default/).
+
+| Attention | Round 4 | Release 1 | Release 2 | Release, checks |
+|---|---|---|---|---|
+| plain | 219.81 / 201.71 / 190.36 / 176.22 | 221.39 / 203.26 / 191.09 / 176.76 | 220.61 / 202.50 / 189.40 / 176.29 | 221.88 / 202.40 / 191.27 / 176.51 |
+| plain-mr | 212.05 / 197.77 / 186.26 / 173.60 | 213.69 / 198.41 / 186.98 / 173.81 | 214.16 / 199.21 / 188.08 / 174.28 | 214.71 / 199.12 / 188.47 / 174.25 |
+
 ### Reproduction and staging
 
 Run from the repository root on physical GPU1. The process sees that card as CUDA0. The final inference commit is `c71f680`. The short run sorts each set of three requests by decode rate after checking all three full messages and token streams.
