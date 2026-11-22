@@ -1636,6 +1636,8 @@ At target/draft microbatches 512/512 on the merged build, median client TTFT at 
 
 The main short suite matched all 126 drafted replies and the five additional prose prompts matched all 100. On the short agent replay, plain / adaptive cap 3 / adaptive cap 6 measured 218.3 / 300.5 / 303.1 tok/s. At 32K edit depth the same settings measured 186.1 / 257.7 / 255.0. Cap 6 was within 0.1% of plain on the lighthouse prompt and the letter, and 1.1% behind plain on dialogue. [Main medians](p8m/matrix/main/384/), [extra prose medians](p8m/matrix/prose/384/), [GPU assignment](p8m/device.txt).
 
+The first frozen controls overlapped part of the host build. After all merged snapshot probes, fresh frozen servers with an idle compiler measured 1.681 / 6.547 / 14.045 s plain and 1.713 / 6.672 / 14.384 s at release cap 3. Against these repeat controls, merged 16K TTFT improved 12.4% plain and 11.9% at the chosen release flags. [Quiet plain control](p8m/ttft/stream-a-quiet-plain/), [quiet DSpark control](p8m/ttft/stream-a-quiet-draft/).
+
 ### Merged served decode
 
 Decode tok/s. The 384-token columns are three-request medians. Long columns are single uncached 3,000-token requests. All six guarded width-2/3/4 configurations and adaptive cap 6 matched every main plain message and emitted ID.
@@ -1696,13 +1698,13 @@ Enable guarded prompt lookup and explicit adaptive DSpark, cap 6. In the off/on/
 Run from the merged worktree with the SM86 Release build and CUDA 12.8. Set `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 P8_GPU=1 CHECKS_GPU=1` in the environment. Create `build/p8m` for scratch data. Run each GPU stage serially.
 
 - `P8_GPU=1 bash perf/p8bc/matrix.sh build/p8m/repeat-matrix` repeats the six matrices. `python3 perf/p8bc/summarize.py build/p8m/repeat-matrix` validates the matched controls and prints all rates and SHA-256 digests. The frozen-reference cross-check over the saved release evidence is `python3 perf/p8m/audit.py`.
-- `for stage in checks checks-default depth wide logits ops sync extra-ops; do bash perf/p8m/checks.sh "$stage" || break; done` reproduces the saved numerical and operator checks. These scripts write to their recorded output paths.
+- `(set -e; for stage in checks checks-default depth wide logits ops sync extra-ops; do bash perf/p8m/checks.sh "$stage"; done)` reproduces the saved numerical and operator checks. These scripts write to their recorded output paths.
 - `perf/p8m/bench.sh LABEL LIBRARY_DIRECTORY` runs the two tg128 depth sweeps and prefill. Use the frozen stream A snapshot, then the merged runtime twice, then stream A again. `DRAFT_WIDTH=6 perf/p8m/ttft.sh LABEL` measures streamed TTFT and samples free VRAM. Set `TTFT_SIZES=64512` to repeat the near-full-slot replay, or `UB=2048 LLAMA_ARG_SPEC_DRAFT_N_UBATCH=512` to repeat the split.
 - `python3 perf/p8m/lookup_control.py` builds the isolated benchmark library inside `build/p8m`. `perf/p8m/lookup.sh 6 "$HOME/inkling-live-bin-p8m-f7f505c"` runs the paired lookup comparison. `perf/p8m/snapshot.sh "$HOME/inkling-live-bin-p8m-f7f505c" 6` repeats the staged-server probes on port 18433.
 
 ### Staged Phase 8 merge release
 
-The nine-file runtime snapshot is `~/inkling-live-bin-p8m-f7f505c`, source tag `p8m-merged` (`f7f505c4776088f8973a228e5e9d0ea05f36301b`). The server and all eight libraries passed SHA-256 and the runtime loader resolved every project library inside the snapshot. Manifest SHA-256 is `e6da212756f771277a7083c4985ba3b742971127b530696e93f51bc76ab8794a`. [Checksums](p8m/snapshot.sha256), [loader resolution](p8m/snapshot-libraries.txt), [hash check](p8m/snapshot-check.txt).
+Local release tag `p8m-release`. The nine-file runtime snapshot is `~/inkling-live-bin-p8m-f7f505c`, source tag `p8m-merged` (`f7f505c4776088f8973a228e5e9d0ea05f36301b`). The server and all eight libraries passed SHA-256 and the runtime loader resolved every project library inside the snapshot. Manifest SHA-256 is `e6da212756f771277a7083c4985ba3b742971127b530696e93f51bc76ab8794a`. [Checksums](p8m/snapshot.sha256), [loader resolution](p8m/snapshot-libraries.txt), [hash check](p8m/snapshot-check.txt).
 
 Four independent 64K-slot staged servers ran five repeats each on edit, prose and agent. Both drafted configurations matched all 30 replies and 11,520 IDs against plain before and after. The staged plain outputs also matched the merged matrix. Release medians were 352.0 / 225.0 / 304.4 tok/s on edit / prose / agent. The server logged accepted history windows with lookup enabled. [Snapshot probes](p8m/snapshot-probes/).
 
