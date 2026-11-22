@@ -1,0 +1,5 @@
+n3-adapt       edit      prompt   1025   384 tok   340.3 tok/s    1115 chars  accepted/proposed 274/281
+dspark history: 78 windows, 229/234 accepted
+dspark policy: gain 1.51, steps by kind: 3 6 6 4 10 0 0 0 0 0
+  cost ms: 4.96 6.23 8.15 9.67 11.28
+  chance by bin: 0.00/0 0.00/0 1.00/1 0.73/2 1.00/1 1.00/1 1.00/1 1.00/15
