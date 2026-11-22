@@ -1,0 +1,1 @@
+n3-adapt       read-tool prompt   2073   777 tok   225.9 tok/s    2558 chars  accepted/proposed 506/765

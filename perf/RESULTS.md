@@ -865,7 +865,19 @@ All six CLI greedy probes matched Round 3 byte for byte. Eight 2048-token prefil
 
 Commit `399b61a` makes the query row the fastest-varying CUDA grid coordinate in multi-row attention. Neighboring blocks read the same KV tile for different queries, improving locality without changing the order of the floating-point sums. No external kernel code was used. On fixed n3 in an old/new/new/old trial, long edit@16K improved from 241.7/241.3 to 255.0/257.4 tok/s (+6.1% on the means), and edit from 268.3/265.2 to 272.3/273.0 (+2.2%). Each run produced the same full message, token IDs and draft counts. Source and measurements are in `ggml/src/ggml-cuda/inkling.cu` and `p6/r4_checks/locality.txt`.
 
-Final throughput and deployment checks for the scheduling change are in progress.
+#### Final trace, tool replay and deployment
+
+On `399b61a`, the original trace again had **0/1699** differing rows. Each of the six mixed plain/window tests (prefixes 2000, 2046, 2558, 3069, 4094 and 4500) matched all 126 rows, including rejects and changes of width. The wrap and generic-kernel checks also passed. A fresh adaptive 3000-token edit trace from the server had **0/2999** differing verify rows, maximum absolute logit error **0**, and every checked next-token choice matched single-row argmax. Its kept rows came from 1-, 3- and 4-row calls. To replay it, build the harness with `bash perf/p6/r4_checks.sh`, then run the following from the repo root:
+
+```sh
+source perf/p5env.sh
+gzip -dc perf/p6/r4_checks/policy.trace.gz > /tmp/inkling-r4-policy.trace
+LD_LIBRARY_PATH="$PWD/build/bin" IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=3 MR_CTX=16384 MR_TRACE=/tmp/inkling-r4-policy.trace build/bin/mr_check "$Q2" perf/ppl.txt
+```
+
+The proposed single-slot 64K deployment matched the 32K plain-mr reference on all four 384-token streams. A separate OpenCode-style replay provided the numbered contents of `perf/longctx.py` in a tool result after an assistant read call. With the tool declaration present, the server's grammar requires natural stopping. Both servers produced the same complete message and all **777** output tokens after a 2073-token prompt. Plain-mr ran at **192.5** tok/s and adaptive n3 at **225.9** (+17%). This is a constructed tool-history replay using the real file. Reproduce with `SPEC_CTX=65536 SPEC_KINDS=read-tool SPEC_FIXED_LENGTH=0 SPEC_TOKEN_IDS=1 bash perf/p6/r4_spec.sh OUTPUT plain-mr n3-adapt`. Results are in `p6/r4_tool/`.
+
+The deployment candidate is adaptive n3 with backend sampling, for its long-reply gains and smaller short-prose penalty. The equality claim is for greedy output on the matched target settings in these probes. Build `399b61a` is staged separately in `~/inkling-live-bin-p6r4-399b61a`. The local milestone is `p6-r4-final-long-edit-274tok`. To deploy the verified snapshot on GPU1, run `cd ~/llama.cpp-fast && bash perf/live/deploy-r4.sh`. The script checks the server and eight libraries against their measured SHA-256 hashes before replacing the phase-5 service and restores phase 5 if startup fails.
 
 ## Round 3 (2026-11-21, `1c46feb`; flags `IK_MMA=3 IK_MR=1`, drafter file with fold + shortlist head)
 

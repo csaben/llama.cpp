@@ -1,0 +1,2 @@
+greedy check: 0 of the server's tokens are not the argmax of the single-token logits
+replay of /tmp/r4-policy.trace: prompt 1025 tokens, 2999 output rows up to position 4023 (rows by step size: 1:13 2:0 3:3 4:2983 5+:0): 0 rows differ from single-token decode, max |logit diff| 0

@@ -21,5 +21,5 @@ for label in "$@"; do
             if [[ $label == *-adapt ]]; then flags+=(LLAMA_DSPARK_ADAPTIVE=1); fi ;;
         *) echo "unknown row $label" >&2; exit 2 ;;
     esac
-    env -u IK_MR -u IK_MMA -u LLAMA_DSPARK_ADAPTIVE "${flags[@]}" SPEC_FIXED_LENGTH=1 perf/spec_probe.py "$label" -- "${args[@]}" | tee "$SPEC_OUT/$label.txt"
+    env -u IK_MR -u IK_MMA -u LLAMA_DSPARK_ADAPTIVE "${flags[@]}" SPEC_FIXED_LENGTH="${SPEC_FIXED_LENGTH:-1}" perf/spec_probe.py "$label" -- "${args[@]}" | tee "$SPEC_OUT/$label.txt"
 done
