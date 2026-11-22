@@ -1,0 +1,13 @@
+edit {'prompt_n': 1025, 'predicted_n': 384, 'predicted_per_second': 320.6826941030388, 'draft_n': 306, 'draft_n_accepted': 281}
+spec_prof: 384 tokens, 104 target steps, wall 1704.5 ms (16.389 ms/step)
+spec_prof: draft              26.6 ms     102 calls    0.256 ms/step
+spec_prof: draft.decode       21.9 ms     102 calls    0.210 ms/step
+spec_prof: draft.read          0.0 ms       0 calls    0.000 ms/step
+spec_prof: target           1252.3 ms     104 calls   12.042 ms/step
+spec_prof: inject             21.8 ms     104 calls    0.210 ms/step
+spec_prof: inject.decode      19.3 ms     104 calls    0.186 ms/step
+spec_prof: accept              1.4 ms     102 calls    0.013 ms/step
+spec_prof: target.submit     124.4 ms     104 calls    1.196 ms/step
+spec_prof: target.wait      1126.4 ms     103 calls   10.831 ms/step
+spec_prof: batch.build         0.4 ms     102 calls    0.003 ms/step
+spec_prof: other             402.3 ms                  3.869 ms/step
