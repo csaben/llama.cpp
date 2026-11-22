@@ -2367,11 +2367,103 @@ static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float 
     }
 }
 
+static __device__ __forceinline__ void ik_window_splits(ik_attn_args & a, const int64_t * kv_idxs, int row) {
+    // Masked cells still count toward the padded cache size after an SWA wrap.
+    int row_kv = a.n_kv;
+    if (a.mr_kv_before) {
+        row_kv = a.mr_kv_before[a.has_taps ? 0 : 1];
+        for (int r = 0; r <= row; ++r) {
+            row_kv = max(row_kv, ((int) kv_idxs[r] + 256) & ~255);
+        }
+    }
+    if (row_kv < a.n_kv) {
+        a.n_kv = row_kv;
+        if (a.mr_mma) {
+            a.n_split = max(1, min(a.mr_mma_split, (row_kv + a.mr_mma_step - 1)/a.mr_mma_step));
+        } else {
+            const int cps = a.mr_medium && row_kv > 512 && row_kv <= 2304 ? 128 : a.mr_cps;
+            a.n_split = row_kv <= cps ? 1 : min(64, (row_kv + cps - 1)/cps);
+        }
+        a.kv_per_split = (row_kv + a.n_split - 1)/a.n_split;
+    }
+}
+
+// Each warp computes one query row. All warps read the same 16 cache cells from shared memory.
+static __global__ void inkling_window_scan(ik_attn_args a, float * parts) {
+    constexpr int G = 3, HD = IK_ATTN_HD, R = 8;
+    const int row = threadIdx.x / WARP_SIZE, lane = threadIdx.x % WARP_SIZE;
+    const int w = blockIdx.x, g = blockIdx.y, split = blockIdx.z;
+    const int full = a.n_kv, splits = a.n_split;
+    ik_window_splits(a, a.kv_idxs, row);
+    // At a padding boundary the fused kernel scans rows with a different split geometry itself.
+    const bool active = a.n_kv == full;
+    a.n_kv = full;
+    const int stride = (full + splits - 1)/splits;
+    const int begin = split*stride, end = min(full, begin + stride);
+    const int span = (end - begin + IK_A2_WARPS - 1)/IK_A2_WARPS;
+    const int w0 = begin + w*span, w1 = min(end, w0 + span);
+    a.mask = (const char *) a.mask + (int64_t) row*full*(a.mask_f16 ? sizeof(half) : sizeof(float));
+    a.rel_pos += (int64_t) row*full;
+    const float * pr = a.proj + row*a.proj_s1;
+    const float tau = a.pos ? 1.0f + a.tau_alpha*logf(fmaxf(1.0f, (a.pos[row] + 1.0f)/a.tau_floor)) : 1.0f;
+    __shared__ float q[R][G][HD], rel[R][G][32], sink[R][G];
+    __shared__ uint2 keys[16][17], vals[16][17];
+#pragma unroll
+    for (int h = 0; h < G; ++h) {
+        const int head = G*g + h;
+        float x[4], sum = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int idx = head*HD + j*32 + lane;
+            x[j] = pr[idx]*a.consts[idx];
+            const float ss = __shfl_sync(0xffffffff, warp_reduce_sum(x[j]*x[j]), 0);
+            sum += ss;
+        }
+        const float fq = fminf(fmaxf(a.qk_clip/(sqrtf(sum) + a.clip_eps), 0.0f), 1.0f);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            q[row][h][j*32 + lane] = x[j]*fq*tau;
+        }
+        const int ri = head*16 + lane;
+        const float rv = lane < 16 ? pr[a.off_rel + ri]*a.consts[a.c_relclip + ri] : 0.0f;
+        const float ss = __shfl_sync(0xffffffff, warp_reduce_sum(rv*rv), 0);
+        const float fr = fminf(fmaxf(a.rel_clip/(sqrtf(ss) + a.clip_eps), 0.0f), 1.0f);
+        rel[row][h][lane] = rv*fr*tau;
+        if (lane == 0) {
+            sink[row][h] = pr[a.off_sink + head];
+        }
+    }
+    __syncwarp();
+    ik_mma_lane<G> st;
+    ik_mma_init(st, q[row], sink[row]);
+    for (int kt = w0; kt < w1; kt += 16) {
+        for (int i = threadIdx.x; i < 16*17; i += blockDim.x) {
+            const int cell = min(kt + i/17, full - 1);
+            const int64_t off = (int64_t) cell*a.kc_nb2 + g*a.kc_nb1 + (i%17)*sizeof(uint2);
+            keys[i/17][i%17] = *(const uint2 *) (a.k_cache + off);
+            vals[i/17][i%17] = *(const uint2 *) (a.v_cache + off);
+        }
+        __syncthreads();
+        if (active) {
+            ik_mma_step(a, st, rel[row], (const char *) keys, sizeof(keys[0]), (const char *) vals, sizeof(vals[0]), kt, 15, kt, w1, a.kv_idxs[row]);
+        }
+        __syncthreads();
+    }
+    if (active) {
+        float * out = parts + (((row*8 + g)*splits + split)*IK_A2_WARPS + w)*G*(HD + 2);
+        ik_mma_finish(st, out + min(lane & 3, G - 1)*(HD + 2));
+        if (lane < G) {
+            out[lane*(HD + 2) + HD] = st.mm;
+            out[lane*(HD + 2) + HD + 1] = st.ll;
+        }
+    }
+}
+
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
 #endif
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
-static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in) {
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false>
+static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in, const float * scan = nullptr) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
@@ -2392,24 +2484,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
             args_m.part     += (int64_t) row*args_in.mr_part_rs;
             args_m.counters += row*args_in.n_head_kv;
         }
-        // Masked cells still count toward the padded cache size after an SWA wrap.
-        int row_kv = args_in.n_kv;
-        if (args_in.mr_kv_before) {
-            row_kv = args_in.mr_kv_before[args_in.has_taps ? 0 : 1];
-            for (int r = 0; r <= row; ++r) {
-                row_kv = max(row_kv, ((int) args_in.kv_idxs[r] + 256) & ~255);
-            }
-        }
-        if (row_kv < args_in.n_kv) {
-            args_m.n_kv = row_kv;
-            if (args_in.mr_mma) {
-                args_m.n_split = max(1, min(args_in.mr_mma_split, (row_kv + args_in.mr_mma_step - 1)/args_in.mr_mma_step));
-            } else {
-                const int cps = args_in.mr_medium && row_kv > 512 && row_kv <= 2304 ? 128 : args_in.mr_cps;
-                args_m.n_split = row_kv <= cps ? 1 : min(64, (row_kv + cps - 1)/cps);
-            }
-            args_m.kv_per_split = (row_kv + args_m.n_split - 1)/args_m.n_split;
-        }
+        ik_window_splits(args_m, args_in.kv_idxs, row);
         if ((int) blockIdx.z >= args_m.n_split) {
             return;
         }
@@ -2696,30 +2771,45 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     if constexpr (MMA) {
         // ===== the tensor-core scan of the warp's cells =====
         const int ht = min(lane & 3, G - 1);
-        ik_mma_lane<G> st;
-        ik_mma_init<G>(st, s_q, s_sink);
-        if (has_cells && !(args.dbg_skip & 2)) {
-            const char * kb = args.k_cache + g*args.kc_nb1;
-            const char * vb = args.v_cache + g*args.vc_nb1;
-            if constexpr (SHORT_SCAN) {
-                // Each warp takes two tiles. Skip tiles that only contain masked cells or the current token.
+        if (SHARED_SCAN && args.n_kv == args_in.n_kv) {
+            const float * in = scan + (((blockIdx.x*8 + g)*args_in.n_split + split)*IK_A2_WARPS + warp)*G*(HD + 2);
 #pragma unroll
-                for (int tile = warp; tile < 16; tile += IK_A2_WARPS) {
-                    if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
-                        ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
-                    }
+            for (int h = 0; h < G; ++h) {
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    s_acc[h][warp][4*lane + j] = in[h*(HD + 2) + 4*lane + j];
                 }
-            } else {
-                for (int kt = w0; kt < w1; kt += 16) {
-                    ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                if (lane == 0) {
+                    s_m[h][warp] = in[h*(HD + 2) + HD];
+                    s_l[h][warp] = in[h*(HD + 2) + HD + 1];
                 }
             }
-        }
-        // the warp's partial result
-        ik_mma_finish<G>(st, s_acc[ht][warp]);
-        if (lane < G) {
-            s_m[lane][warp] = st.mm;
-            s_l[lane][warp] = st.ll;
+        } else {
+            ik_mma_lane<G> st;
+            ik_mma_init<G>(st, s_q, s_sink);
+            if (has_cells && !(args.dbg_skip & 2)) {
+                const char * kb = args.k_cache + g*args.kc_nb1;
+                const char * vb = args.v_cache + g*args.vc_nb1;
+                if constexpr (SHORT_SCAN) {
+                    // Each warp takes two tiles. Skip tiles that only contain masked cells or the current token.
+    #pragma unroll
+                    for (int tile = warp; tile < 16; tile += IK_A2_WARPS) {
+                        if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
+                            ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
+                        }
+                    }
+                } else {
+                    for (int kt = w0; kt < w1; kt += 16) {
+                        ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                    }
+                }
+            }
+            // the warp's partial result
+            ik_mma_finish<G>(st, s_acc[ht][warp]);
+            if (lane < G) {
+                s_m[lane][warp] = st.mm;
+                s_l[lane][warp] = st.ll;
+            }
         }
     }
     IK_DBG_T(4);
@@ -3391,7 +3481,13 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             if (!fixed)          { inkling_attn_kv_rows_kernel<block_q8_0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
             else if (a.has_taps) { inkling_attn_kv_rows_kernel<block_q8_0, 1><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
             else                 { inkling_attn_kv_rows_kernel<block_q8_0, 0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a); }
-            if (fixed) {
+            static const int shared_min = getenv("IK_WINDOW_SCAN_MIN") ? atoi(getenv("IK_WINDOW_SCAN_MIN")) : 0;
+            if (fixed && shared_min > 0 && a.n_kv >= shared_min && (uintptr_t) a.k_cache % 8 == 0 && (uintptr_t) a.v_cache % 8 == 0) {
+                ggml_cuda_pool_alloc<float> scan(ctx.pool(), (size_t) n_rows*8*a.n_split*IK_A2_WARPS*3*(IK_ATTN_HD + 2));
+                inkling_window_scan<<<dim3(IK_A2_WARPS, 8, a.n_split), n_rows*WARP_SIZE, 0, stream>>>(a, scan.get());
+                if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, true, 1, false, true><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a, scan.get()); }
+                else            { inkling_attn2_kernel<block_q8_0, true, 3, true, true, 0, false, true><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a, scan.get()); }
+            } else if (fixed) {
                 if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, true, 1><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a); }
                 else            { inkling_attn2_kernel<block_q8_0, true, 3, true, true, 0><<<grid_mr, IK_A2_BLOCK, 0, stream>>>(a); }
             } else if (mma) {
