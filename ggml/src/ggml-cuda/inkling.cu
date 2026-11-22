@@ -887,14 +887,10 @@ static __device__ __forceinline__ float ik_w(const T * w, const int i) {
 }
 
 template <int block_size, typename wt>
-static __global__ void loop_ctrl_down_f32(const wt * __restrict__ w, const float * __restrict__ a, const float * __restrict__ b,
+static __device__ __forceinline__ void ik_ctrl_down_row(const wt * __restrict__ w, const float * __restrict__ a, const float * __restrict__ b,
         float * __restrict__ dst, const int n, const int rank, const int64_t a_nb1, const int64_t a_nb2, const int64_t b_nb1, const int64_t b_nb2,
-        const float eps) {
+        const float eps, int k, int t, int ib, int tokens) {
     constexpr int n_warps = block_size/WARP_SIZE;
-
-    const int k  = blockIdx.x;
-    const int t  = blockIdx.y;
-    const int ib = blockIdx.z;
 
     const int lane = threadIdx.x % WARP_SIZE;
     const int wid  = threadIdx.x / WARP_SIZE;
@@ -951,11 +947,19 @@ static __global__ void loop_ctrl_down_f32(const wt * __restrict__ w, const float
         }
         const float ra = rsqrtf(sa/n + eps);
         const float rb = rsqrtf(sb/n + eps);
-        dst[((int64_t) ib*gridDim.y + t)*rank + k] = da*ra + db*rb;
+        dst[((int64_t) ib*tokens + t)*rank + k] = da*ra + db*rb;
     }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+
+template <int block_size, typename wt>
+static __global__ void loop_ctrl_down_f32(const wt * __restrict__ w, const float * __restrict__ a, const float * __restrict__ b,
+        float * __restrict__ dst, const int n, const int rank, const int64_t a_nb1, const int64_t a_nb2, const int64_t b_nb1, const int64_t b_nb2,
+        const float eps) {
+    ik_ctrl_down_row<block_size>(w, a, b, dst, n, rank, a_nb1, a_nb2, b_nb1, b_nb2, eps, blockIdx.x, blockIdx.y, blockIdx.z, gridDim.y);
+}
+
 template<bool message>
 static __global__ void ik_ctrl_half(const half * weights, const float * x, size_t stride, float eps, float2 * terms, float * dst) {
     const int row = blockIdx.y*64 + blockIdx.x;
@@ -1024,7 +1028,7 @@ static __global__ void __launch_bounds__(640) ik_mix_down(ik_mix_ctrl_args a) {
             }
         }
     }
-    __shared__ float mixed[2304];
+    __shared__ __align__(16) float mixed[2304];
     ik_mix_vec4<640, false, ns>(a.query + col*a.q_stride, a.st, mixed, 576, 1, ns, 0, a.eps, a.scale, {}, 0, 0);
     __syncthreads();
     if (blockIdx.x == 0 && b == col && t < 576) {
@@ -1524,6 +1528,93 @@ static __global__ void ik_ctrl_apply8_rows(const float * cur, const float * msg,
         const float forget = tanhf((fv[0]+fv[2])+(fv[1]+fv[3]));
         y[((size_t) b*n_tok + t)*n + i] = (c-forget*c) + gain*m;
     }
+}
+
+struct ik_ctrl_pair_args {
+    const half * down_w;
+    const half * gain;
+    const half * forget;
+    const float * cur;
+    const float * msg;
+    float * d;
+    float * out;
+    int cur_stride, msg_stride;
+    float eps;
+    int * counters;
+};
+
+template<bool preload>
+static __global__ void __launch_bounds__(256, 3) ik_ctrl_pair(ik_ctrl_pair_args a) {
+    const int b = blockIdx.y, tile = blockIdx.x, t = threadIdx.x, lane = t%8;
+    const int c = tile*32 + t/8, row = b*2304 + c;
+    const half * g = a.gain + row*64 + lane*4;
+    const half * f = a.forget + row*64 + lane*4;
+    uint2 g0, g1, f0, f1;
+    if constexpr (preload) {
+        g0 = *(const uint2 *)g; g1 = *(const uint2 *)(g+32);
+        f0 = *(const uint2 *)f; f1 = *(const uint2 *)(f+32);
+        asm volatile("" :: "r"(g0.x), "r"(g0.y), "r"(g1.x), "r"(g1.y), "r"(f0.x), "r"(f0.y), "r"(f1.x), "r"(f1.y));
+    }
+    if (tile < 64) {
+        ik_ctrl_down_row<256>(a.down_w, a.cur, a.msg, a.d, 2304, 64, 0, a.cur_stride*sizeof(float),
+                0, a.msg_stride*sizeof(float), a.eps, tile, 0, b, 1);
+        if (t == 0 && ik_atomic_add_acq_rel(a.counters + b, 1) == 63) {
+            ik_st_relaxed(a.counters + b, 0);
+            ik_st_release(a.counters + 4 + b, 1);
+        }
+    }
+    if (!t) {
+        while (!ik_ld_acquire(a.counters + 4 + b)) {}
+    }
+    __syncthreads();
+    if constexpr (!preload) {
+        g0 = *(const uint2 *)g; g1 = *(const uint2 *)(g+32);
+        f0 = *(const uint2 *)f; f1 = *(const uint2 *)(f+32);
+    }
+    const float * dv = a.d + b*64 + lane*4;
+    float4 d0 = *(const float4 *)dv, d1 = *(const float4 *)(dv+32);
+    float gv[4], fv[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        float x = ((const float *)&d0)[j], y = ((const float *)&d1)[j];
+        gv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *)&g1)[j]), y, __fmul_rn(__half2float(((const half *)&g0)[j]), x)));
+        fv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *)&f1)[j]), y, __fmul_rn(__half2float(((const half *)&f0)[j]), x)));
+    }
+    if (lane == 0) {
+        const float cur = a.cur[b*a.cur_stride + c], msg = a.msg[b*a.msg_stride + c];
+        const float gain = tanhf((gv[0]+gv[2])+(gv[1]+gv[3]));
+        const float forget = tanhf((fv[0]+fv[2])+(fv[1]+fv[3]));
+        a.out[row] = (cur - forget*cur) + gain*msg;
+    }
+    if (t == 0 && ik_atomic_add_acq_rel(a.counters + 8 + b, 1) == 71) {
+        ik_st_relaxed(a.counters + 4 + b, 0);
+        ik_st_relaxed(a.counters + 8 + b, 0);
+    }
+}
+
+bool ggml_cuda_ctrl_pair(ggml_backend_cuda_context & ctx, ggml_tensor * down, ggml_tensor * apply, int mode) {
+    const int batches = down->ne[2];
+    auto * cur = down->src[1], * msg = down->src[2], * nw = apply->src[5];
+    if (apply->src[2] != down || cur != apply->src[0] || msg != apply->src[1] || down->ne[1] != 1 ||
+            down->ne[0] != 64 || (batches != 1 && batches != 3) || cur->ne[0] != 2304 ||
+            down->src[0]->type != GGML_TYPE_F16 || apply->src[3]->type != GGML_TYPE_F16 || apply->src[4]->type != GGML_TYPE_F16 ||
+            (nw ? apply->type != GGML_TYPE_Q8_1 : apply->type != GGML_TYPE_F32)) { return false; }
+    auto kernel = mode == 2 ? ik_ctrl_pair<true> : ik_ctrl_pair<false>;
+    int resident;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, kernel, 256, 0));
+    if (resident*ggml_cuda_info().devices[ctx.device].nsm < 72*batches) { return false; }
+    ggml_cuda_pool_alloc<float> scratch(ctx.pool());
+    ik_ctrl_pair_args a{(const half *)down->src[0]->data, (const half *)apply->src[3]->data, (const half *)apply->src[4]->data,
+        (const float *)cur->data, (const float *)msg->data, (float *)down->data,
+        nw ? scratch.alloc(2304*batches) : (float *)apply->data, int(cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float)),
+        int(msg->nb[2]/sizeof(float)), ggml_get_op_params_f32(down, 0), ik_counters(ctx, 832, 12)};
+    void * params[] = { &a };
+    CUDA_CHECK(cudaLaunchCooperativeKernel((void *)kernel, dim3(72, batches), 256, params, 0, ctx.stream()));
+    if (nw) {
+        rms_norm_mul_inplace_f32<1024, true><<<dim3(1, batches), 1024, 0, ctx.stream()>>>(a.out, (const float *)nw->data,
+                apply->data, 2304, 1, ggml_nrows(nw) == 1 ? 0 : nw->nb[1], ggml_get_op_params_f32(apply, 0));
+    }
+    return true;
 }
 
 void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

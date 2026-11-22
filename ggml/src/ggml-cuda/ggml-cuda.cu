@@ -4729,6 +4729,13 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+    static const int ctrl_pair = ggml_cuda_env_int("IK_CTRL_PAIR", 0);
+    if (ctrl_pair && !ggml_cuda_env_flag("IK_MR") && node->op == GGML_OP_LOOP_CTRL_DOWN &&
+            cuda_ctx->stream_context().concurrent_events.empty() && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X) {
+        const int j = ik_next_compute(cgraph, i);
+        if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_LOOP_CTRL_APPLY &&
+                ggml_cuda_ctrl_pair(*cuda_ctx, node, cgraph->nodes[j], ctrl_pair)) { return j - i; }
+    }
     static const int ctrl_branch = ggml_cuda_env_int("IK_CTRL_BRANCH", 0);
     if (ctrl_branch && !ggml_cuda_env_flag("IK_MR") && cuda_ctx->stream_context().concurrent_events.empty() &&
             cuda_ctx->curr_stream_no == 0 && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X) {
