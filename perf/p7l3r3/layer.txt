@@ -1,0 +1,10 @@
+ik_complete_layer                     19.0   96.104  1825.967
+ik_route_experts                      23.0   33.761   776.513
+ik_dense_scan_inputs                  29.0   10.920   316.683
+ik_q2_down_rows                       25.0   10.036   250.910
+residency=2 exact
+ik_complete_layer                     19.0   96.101  1825.920
+ik_route_experts                      23.0   29.196   671.502
+ik_dense_scan_inputs                  29.0   10.909   316.356
+ik_q2_down_rows                       25.0   10.008   250.199
+residency=3 exact

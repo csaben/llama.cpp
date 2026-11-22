@@ -1,0 +1,12 @@
+sync=0 exact
+r3-packsync-0.sqlite     apply and norm    24.0/token   7.173 us/call
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.53 ± 0.41 |
+sync=1 exact
+r3-packsync-1.sqlite     apply and norm    24.0/token   6.809 us/call
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.06 ± 0.45 |
+sync=2 exact
+r3-packsync-2.sqlite     apply and norm    24.0/token   6.977 us/call
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.04 ± 0.09 |
+sync=3 exact
+r3-packsync-3.sqlite     apply and norm    24.0/token   7.074 us/call
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.93 ± 0.26 |

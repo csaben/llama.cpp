@@ -1,0 +1,48 @@
+119 warmed head-to-head intervals; output head included; signed gaps in us
+kernel  calls/token  busy_us/call  busy_us/token
+mul_mat_vec_q[576,8]                  48.0   19.146   919.006
+ik_dense_gate_scan                    48.0   12.401   595.234
+ik_dense_scan_inputs                  48.0   10.901   523.252
+ik_q2_down_rows                       44.0   10.095   444.178
+inkling_router2_kernel                48.0    7.289   349.879
+ik_projection_conv_kernel             48.0    6.956   333.892
+mul_mat_vec_q[100512,1]                1.0  298.589   298.589
+res_mix_f32_vec4                      75.0    3.795   284.601
+loop_ctrl_down_f32                    48.0    4.130   198.251
+ik_ctrl_apply8                        48.0    3.061   146.940
+mul_mat_vec_q[1152,8]                  4.0   30.275   121.100
+inkling_moe_sum_conv_kernel           48.0    2.047    98.279
+rms_norm_mul_inplace_f32              24.0    3.861    92.657
+situ_q8_1_kernel                      48.0    1.846    88.587
+rms_norm_f32                           1.0    3.159     3.159
+softcap_f32                            1.0    2.608     2.608
+k_get_rows_float                       1.0    1.715     1.715
+quantize_q8_1                          1.0    1.408     1.408
+producer -> consumer  calls/token  mean_gap_us  mean_consumer_us  total_gap_us/token
+softcap_f32                 -> rms_norm_f32                  1.0  331.615    3.159   331.615
+inkling_router2_kernel      -> mul_mat_vec_q[576,8]         42.0    0.135   19.442     5.688
+res_mix_f32_vec4            -> loop_ctrl_down_f32           48.0    0.082    4.130     3.958
+loop_ctrl_down_f32          -> ik_ctrl_apply8               48.0    0.080    3.061     3.849
+res_mix_f32_vec4            -> ik_dense_scan_inputs         24.0    0.087   10.814     2.089
+rms_norm_mul_inplace_f32    -> ik_dense_scan_inputs         24.0    0.086   10.989     2.070
+ik_ctrl_apply8              -> inkling_router2_kernel       24.0    0.079    6.238     1.893
+ik_ctrl_apply8              -> rms_norm_mul_inplace_f32     24.0    0.066    3.861     1.592
+ik_projection_conv_kernel   -> res_mix_f32_vec4             24.0    0.036    3.502     0.874
+ik_projection_conv_kernel   -> inkling_router2_kernel       24.0    0.034    8.340     0.808
+inkling_router2_kernel      -> mul_mat_vec_q[1152,8]         4.0    0.084   30.275     0.335
+ik_q2_down_rows             -> inkling_moe_sum_conv_kernel  44.0    0.007    2.040     0.318
+res_mix_f32_vec4            -> mul_mat_vec_q[576,8]          2.0    0.083   19.416     0.166
+inkling_router2_kernel      -> res_mix_f32_vec4              2.0    0.080    2.751     0.159
+rms_norm_f32                -> res_mix_f32_vec4              1.0    0.090    2.959     0.090
+quantize_q8_1               -> mul_mat_vec_q[100512,1]       1.0    0.079  298.589     0.079
+k_get_rows_float            -> quantize_q8_1                 1.0    0.071    1.408     0.071
+res_mix_f32_vec4            -> k_get_rows_float              1.0    0.066    1.715     0.066
+mul_mat_vec_q[100512,1]     -> softcap_f32                   1.0   -0.041    2.608    -0.041
+ik_dense_gate_scan          -> ik_projection_conv_kernel    48.0   -0.001    6.956    -0.072
+situ_q8_1_kernel            -> mul_mat_vec_q[576,8]          4.0   -0.053   15.903    -0.211
+mul_mat_vec_q[576,8]        -> inkling_moe_sum_conv_kernel   4.0   -0.055    2.126    -0.218
+mul_mat_vec_q[1152,8]       -> situ_q8_1_kernel              4.0   -0.077    1.837    -0.308
+inkling_moe_sum_conv_kernel -> res_mix_f32_vec4             48.0   -0.014    4.002    -0.670
+situ_q8_1_kernel            -> ik_q2_down_rows              44.0   -0.050   10.095    -2.195
+mul_mat_vec_q[576,8]        -> situ_q8_1_kernel             44.0   -0.057    1.846    -2.502
+ik_dense_scan_inputs        -> ik_dense_gate_scan           48.0   -0.058   12.401    -2.794

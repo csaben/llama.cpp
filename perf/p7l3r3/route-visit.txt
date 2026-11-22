@@ -1,0 +1,9 @@
+ik_route_experts                      42.0   47.168  1981.053
+inkling_router2_kernel                 6.0    8.352    50.115
+residency=1 exact
+ik_route_experts                      42.0   33.553  1409.226
+inkling_router2_kernel                 6.0    8.345    50.067
+residency=2 exact
+ik_route_experts                      42.0   30.921  1298.683
+inkling_router2_kernel                 6.0    8.365    50.191
+residency=3 exact

@@ -1,0 +1,8 @@
+tile=-1 exact
+inkling_router2_kernel                48.0    9.159   439.611
+tile=-2 exact
+inkling_router2_kernel                48.0    7.688   369.021
+tile=-4 exact
+inkling_router2_kernel                48.0    7.057   338.724
+tile=-8 exact
+inkling_router2_kernel                48.0    7.140   342.710

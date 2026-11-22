@@ -10,14 +10,14 @@
 #include <string>
 #include <vector>
 
-static bool decode(llama_context * ctx, const llama_token * tokens, int n, int pos) {
+static bool decode(llama_context * ctx, const llama_token * tokens, int n, int pos, int seq = 0) {
     llama_batch batch = llama_batch_init(n, 0, 1);
     batch.n_tokens = n;
     for (int i = 0; i < n; ++i) {
         batch.token[i] = tokens[i];
         batch.pos[i] = pos + i;
         batch.n_seq_id[i] = 1;
-        batch.seq_id[i][0] = 0;
+        batch.seq_id[i][0] = seq;
         batch.logits[i] = i == n - 1;
     }
     const int rc = llama_decode(ctx, batch);
@@ -26,8 +26,9 @@ static bool decode(llama_context * ctx, const llama_token * tokens, int n, int p
 }
 
 int main(int argc, char ** argv) {
-    if (argc < 3 || argc > 5) {
-        fprintf(stderr, "usage: logits model.gguf corpus.txt [prefix [rows]]\n");
+    const bool interleave = argc == 6 && std::string(argv[5]) == "interleave";
+    if (argc < 3 || argc > 6 || (argc == 6 && !interleave)) {
+        fprintf(stderr, "usage: logits model.gguf corpus.txt [prefix [rows [interleave]]]\n");
         return 1;
     }
     const int prefix = argc > 3 ? atoi(argv[3]) : 200;
@@ -61,10 +62,14 @@ int main(int argc, char ** argv) {
         }
     }
     llama_context_params cp = llama_context_default_params();
-    cp.n_ctx = std::max(8192, prefix + steps);
+    const int sequences = interleave ? 2 : 1;
+    cp.n_ctx = std::max(8192, sequences*(prefix + steps));
     cp.n_batch = 2048;
     cp.n_ubatch = 512;
-    cp.n_seq_max = 1;
+    cp.n_seq_max = sequences;
+    if (interleave) {
+        cp.kv_unified = true;
+    }
     cp.type_k = GGML_TYPE_Q8_0;
     cp.type_v = GGML_TYPE_Q8_0;
     cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
@@ -72,12 +77,24 @@ int main(int argc, char ** argv) {
     cp.no_perf = true;
     llama_context * ctx = llama_init_from_model(model, cp);
     bool ok = ctx && n_tokens >= prefix + steps;
-    for (int pos = 0; ok && pos < prefix; pos += cp.n_batch) {
-        ok = decode(ctx, tokens.data() + pos, std::min<int>(cp.n_batch, prefix - pos), pos);
+    std::vector<llama_token> second;
+    if (interleave && ok) {
+        second.assign(tokens.begin(), tokens.begin() + prefix + steps);
+        std::rotate(second.begin(), second.begin() + second.size()/3, second.end());
+    }
+    const int chunk = interleave ? 47 : cp.n_batch;
+    for (int pos = 0; ok && pos < prefix; pos += chunk) {
+        for (int seq = 0; ok && seq < sequences; ++seq) {
+            const auto & input = seq ? second : tokens;
+            ok = decode(ctx, input.data() + pos, std::min(chunk, prefix - pos), pos, seq);
+        }
     }
     for (int pos = prefix; ok && pos < prefix + steps; ++pos) {
-        ok = decode(ctx, tokens.data() + pos, 1, pos) &&
-             fwrite(llama_get_logits_ith(ctx, 0), sizeof(float), n_vocab, stdout) == size_t(n_vocab);
+        for (int seq = 0; ok && seq < sequences; ++seq) {
+            const auto & input = seq ? second : tokens;
+            ok = decode(ctx, input.data() + pos, 1, pos, seq) &&
+                 fwrite(llama_get_logits_ith(ctx, 0), sizeof(float), n_vocab, stdout) == size_t(n_vocab);
+        }
     }
     if (ctx) {
         llama_free(ctx);

@@ -1,0 +1,15 @@
+width=0 exact
+r3-width-0.sqlite                24.0 controller/router pairs per token, 8.922 us/pair, 0 specialized launches/token
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.27 ± 0.47 |
+width=direct exact
+r3-width-direct.sqlite           24.0 controller/router pairs per token, 8.738 us/pair, 0 specialized launches/token
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.01 ± 0.14 |
+width=2 exact
+r3-width-2.sqlite                24.0 controller/router pairs per token, 8.727 us/pair, 24 specialized launches/token
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.00 ± 0.50 |
+width=4 exact
+r3-width-4.sqlite                24.0 controller/router pairs per token, 8.678 us/pair, 24 specialized launches/token
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.47 ± 0.46 |
+width=8 exact
+r3-width-8.sqlite                24.0 controller/router pairs per token, 8.979 us/pair, 24 specialized launches/token
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.10 ± 0.20 |

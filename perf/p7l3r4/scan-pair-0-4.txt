@@ -1,0 +1,12 @@
+IK_SCAN_SCHEDULE=0 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.61 ± 0.72 |
+build: 812b439 (231)
+IK_SCAN_SCHEDULE=4 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.68 ± 0.25 |
+build: 812b439 (231)
+IK_SCAN_SCHEDULE=4 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.44 ± 0.64 |
+build: 812b439 (231)
+IK_SCAN_SCHEDULE=0 start_C=81
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.68 ± 0.31 |
+build: 812b439 (231)

@@ -1,0 +1,44 @@
+mode=1 exact
+mode=1 ctas=16
+ik_dense_drain                        48.0   28.629  1374.189
+mode=1 ctas=32
+ik_dense_drain                        48.0   29.069  1395.290
+mode=1 ctas=48
+ik_dense_drain                        48.0   29.407  1411.539
+mode=1 ctas=72
+ik_dense_drain                        48.0   29.030  1393.462
+mode=1 ctas=96
+ik_dense_drain                        48.0   28.547  1370.248
+mode=-1 exact
+mode=-1 ctas=16
+ik_dense_drain                        48.0   27.990  1343.530
+mode=-1 ctas=32
+ik_dense_drain                        48.0   28.345  1360.540
+mode=-1 ctas=48
+ik_dense_drain                        48.0   29.367  1409.625
+mode=-1 ctas=72
+ik_dense_drain                        48.0   29.657  1423.534
+mode=-1 ctas=96
+ik_dense_drain                        48.0   29.814  1431.065
+mode=2 exact
+mode=2 ctas=16
+ik_dense_drain                        48.0   29.928  1436.547
+mode=2 ctas=32
+ik_dense_drain                        48.0   28.253  1356.154
+mode=2 ctas=48
+ik_dense_drain                        48.0   27.883  1338.394
+mode=2 ctas=72
+ik_dense_drain                        48.0   28.159  1351.632
+mode=2 ctas=96
+ik_dense_drain                        48.0   29.173  1400.317
+mode=-2 exact
+mode=-2 ctas=16
+ik_dense_drain                        48.0   26.059  1250.848
+mode=-2 ctas=32
+ik_dense_drain                        48.0   26.232  1259.114
+mode=-2 ctas=48
+ik_dense_drain                        48.0   26.262  1260.571
+mode=-2 ctas=72
+ik_dense_drain                        48.0   26.061  1250.929
+mode=-2 ctas=96
+ik_dense_drain                        48.0   28.647  1375.060

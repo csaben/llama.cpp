@@ -1,0 +1,12 @@
+MUL_MAT,MUL_MAT_ID
+  3777/3777 tests passed
+  Backend CUDA0: OK
+INKLING_ATTN,INKLING_ROUTER,SHORTCONV_RES,RES_MIX,LOOP_CTRL_DOWN,LOOP_CTRL_APPLY
+  162/162 tests passed
+  Backend CUDA0: OK
+SITU
+  5/5 tests passed
+  Backend CUDA0: OK
+CONCAT
+  44/44 tests passed
+  Backend CUDA0: OK

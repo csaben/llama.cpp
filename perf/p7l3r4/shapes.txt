@@ -1,0 +1,190 @@
+r4 apply attn_ctrl-24 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-25 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-26 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-27 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-28 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-29 cols=3 B=3 norm_rows=3
+r4 apply attn_ctrl-30 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-31 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-32 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-33 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-34 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-35 cols=3 B=3 norm_rows=3
+r4 apply attn_ctrl-36 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-37 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-38 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-39 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-40 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-41 cols=3 B=3 norm_rows=3
+r4 apply attn_ctrl-42 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-43 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-44 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-45 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-46 cols=1 B=3 norm_rows=1
+r4 apply attn_ctrl-47 cols=3 B=3 norm_rows=3
+r4 apply node_1033 cols=1 B=1 norm_rows=0
+r4 apply node_1079 cols=1 B=1 norm_rows=0
+r4 apply node_1124 cols=1 B=1 norm_rows=0
+r4 apply node_1170 cols=1 B=1 norm_rows=0
+r4 apply node_1214 cols=1 B=1 norm_rows=0
+r4 apply node_1258 cols=1 B=1 norm_rows=0
+r4 apply node_1302 cols=1 B=1 norm_rows=0
+r4 apply node_1346 cols=1 B=1 norm_rows=0
+r4 apply node_1389 cols=1 B=1 norm_rows=0
+r4 apply node_1434 cols=1 B=1 norm_rows=0
+r4 apply node_1480 cols=1 B=1 norm_rows=0
+r4 apply node_1526 cols=1 B=1 norm_rows=0
+r4 apply node_1572 cols=1 B=1 norm_rows=0
+r4 apply node_1618 cols=1 B=1 norm_rows=0
+r4 apply node_1663 cols=1 B=1 norm_rows=0
+r4 apply node_631 cols=1 B=1 norm_rows=0
+r4 apply node_675 cols=1 B=1 norm_rows=0
+r4 apply node_719 cols=1 B=1 norm_rows=0
+r4 apply node_763 cols=1 B=1 norm_rows=0
+r4 apply node_807 cols=1 B=1 norm_rows=0
+r4 apply node_850 cols=1 B=1 norm_rows=0
+r4 apply node_895 cols=1 B=1 norm_rows=0
+r4 apply node_941 cols=1 B=1 norm_rows=0
+r4 apply node_987 cols=1 B=1 norm_rows=0
+r4 attention attn_gated-0 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-0 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-1 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-1 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-10 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-10 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-11 cells=16640 split=10 per=1664 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-11 cells=256 split=1 per=256 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-12 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-12 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-13 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-13 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-14 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-14 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-15 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-15 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-16 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-16 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-17 cells=16640 split=10 per=1664 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-17 cells=256 split=1 per=256 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-18 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-18 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-19 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-19 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-2 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-2 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-20 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-20 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-21 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-21 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-22 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-22 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-23 cells=16640 split=10 per=1664 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-23 cells=256 split=1 per=256 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-24 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-24 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-25 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-25 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-26 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-26 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-27 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-27 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-28 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-28 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-29 cells=16640 split=10 per=1664 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-29 cells=256 split=1 per=256 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-3 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-3 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-30 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-30 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-31 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-31 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-32 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-32 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-33 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-33 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-34 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-34 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-35 cells=16640 split=10 per=1664 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-35 cells=256 split=1 per=256 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-36 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-36 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-37 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-37 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-38 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-38 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-39 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-39 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-4 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-4 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-40 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-40 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-41 cells=16640 split=10 per=1664 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-41 cells=256 split=1 per=256 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-42 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-42 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-43 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-43 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-44 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-44 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-45 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-45 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-46 cells=1536 split=10 per=154 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-46 cells=256 split=1 per=256 columns=3 taps=0 mask_bytes=2
+r4 attention attn_gated-47 cells=16640 split=10 per=1664 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-47 cells=256 split=1 per=256 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-5 cells=16640 split=10 per=1664 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-5 cells=256 split=1 per=256 columns=3 taps=1 mask_bytes=2
+r4 attention attn_gated-6 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-6 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-7 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-7 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-8 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-8 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-9 cells=1536 split=10 per=154 columns=1 taps=0 mask_bytes=2
+r4 attention attn_gated-9 cells=256 split=1 per=256 columns=1 taps=0 mask_bytes=2
+r4 down node_1014 ns=4 cols=1 heads=3
+r4 down node_1029 ns=4 cols=1 heads=1
+r4 down node_1060 ns=4 cols=1 heads=3
+r4 down node_1075 ns=4 cols=1 heads=1
+r4 down node_1106 ns=4 cols=3 heads=3
+r4 down node_1120 ns=4 cols=1 heads=1
+r4 down node_1166 ns=3 cols=1 heads=1
+r4 down node_1195 ns=3 cols=1 heads=3
+r4 down node_1210 ns=3 cols=1 heads=1
+r4 down node_1239 ns=3 cols=1 heads=3
+r4 down node_1254 ns=3 cols=1 heads=1
+r4 down node_1283 ns=3 cols=1 heads=3
+r4 down node_1298 ns=3 cols=1 heads=1
+r4 down node_1327 ns=3 cols=1 heads=3
+r4 down node_1342 ns=3 cols=1 heads=1
+r4 down node_1371 ns=3 cols=3 heads=3
+r4 down node_1385 ns=3 cols=1 heads=1
+r4 down node_1415 ns=3 cols=1 heads=3
+r4 down node_1430 ns=4 cols=1 heads=1
+r4 down node_1461 ns=4 cols=1 heads=3
+r4 down node_1476 ns=4 cols=1 heads=1
+r4 down node_1507 ns=4 cols=1 heads=3
+r4 down node_1522 ns=4 cols=1 heads=1
+r4 down node_1553 ns=4 cols=1 heads=3
+r4 down node_1568 ns=4 cols=1 heads=1
+r4 down node_1599 ns=4 cols=1 heads=3
+r4 down node_1614 ns=4 cols=1 heads=1
+r4 down node_1645 ns=4 cols=3 heads=3
+r4 down node_1659 ns=4 cols=1 heads=1
+r4 down node_627 ns=3 cols=1 heads=1
+r4 down node_656 ns=3 cols=1 heads=3
+r4 down node_671 ns=3 cols=1 heads=1
+r4 down node_700 ns=3 cols=1 heads=3
+r4 down node_715 ns=3 cols=1 heads=1
+r4 down node_744 ns=3 cols=1 heads=3
+r4 down node_759 ns=3 cols=1 heads=1
+r4 down node_788 ns=3 cols=1 heads=3
+r4 down node_803 ns=3 cols=1 heads=1
+r4 down node_832 ns=3 cols=3 heads=3
+r4 down node_846 ns=3 cols=1 heads=1
+r4 down node_876 ns=3 cols=1 heads=3
+r4 down node_891 ns=4 cols=1 heads=1
+r4 down node_922 ns=4 cols=1 heads=3
+r4 down node_937 ns=4 cols=1 heads=1
+r4 down node_968 ns=4 cols=1 heads=3
+r4 down node_983 ns=4 cols=1 heads=1

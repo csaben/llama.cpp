@@ -1,0 +1,12 @@
+IK_DOWN_TILE=0 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.29 ± 0.51 |
+build: 812b439 (231)
+IK_DOWN_TILE=3 start_C=85
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        219.49 ± 0.55 |
+build: 812b439 (231)
+IK_DOWN_TILE=3 start_C=85
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        219.34 ± 0.23 |
+build: 812b439 (231)
+IK_DOWN_TILE=0 start_C=85
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.91 ± 0.19 |
+build: 812b439 (231)

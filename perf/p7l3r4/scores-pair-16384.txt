@@ -1,0 +1,12 @@
+IK_SCORE_TILES=0 start_C=77
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        193.93 ± 2.31 |
+build: 812b439 (231)
+IK_SCORE_TILES=1 start_C=85
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        181.75 ± 1.06 |
+build: 812b439 (231)
+IK_SCORE_TILES=1 start_C=82
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        181.49 ± 0.96 |
+build: 812b439 (231)
+IK_SCORE_TILES=0 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        193.17 ± 2.16 |
+build: 812b439 (231)

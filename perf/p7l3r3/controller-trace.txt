@@ -1,0 +1,20 @@
+r3-control.sqlite        mix and down      48.0/token   7.693 us/call
+r3-control.sqlite        down and apply    48.0/token   7.272 us/call
+r3-control.sqlite        apply and norm    24.0/token   7.680 us/call
+r3-branch-1.sqlite       message overlap   46.0/token   3.071 us/call
+r3-branch-1.sqlite       mix and down      48.0/token   6.936 us/call
+r3-branch-1.sqlite       down and apply     2.0/token   8.695 us/call
+r3-branch-1.sqlite       apply and norm    24.0/token   7.708 us/call
+r3-branch-2.sqlite       message overlap   46.0/token   3.468 us/call
+r3-branch-2.sqlite       mix and down      48.0/token   6.351 us/call
+r3-branch-2.sqlite       down and apply     2.0/token   8.659 us/call
+r3-branch-2.sqlite       apply and norm    24.0/token   7.671 us/call
+r3-branch-3.sqlite       message overlap   46.0/token   4.862 us/call
+r3-branch-3.sqlite       mix and down      48.0/token   6.439 us/call
+r3-branch-3.sqlite       down and apply     2.0/token   8.689 us/call
+r3-branch-3.sqlite       apply and norm    24.0/token   7.679 us/call
+r3-mixdown-1.sqlite      mix and down      48.0/token   6.742 us/call
+r3-mixdown-1.sqlite      down and apply     2.0/token   8.568 us/call
+r3-mixdown-1.sqlite      apply and norm    24.0/token   7.727 us/call
+r3-pair-1.sqlite         down and apply    48.0/token   7.082 us/call
+r3-pair-2.sqlite         down and apply    48.0/token   7.397 us/call

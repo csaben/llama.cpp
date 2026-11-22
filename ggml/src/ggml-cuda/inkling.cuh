@@ -1,5 +1,7 @@
 #include "common.cuh"
 
+bool ggml_cuda_inkling_fast_glue(const ggml_backend_cuda_context & ctx);
+
 // fused ops of the Inkling 2 family (attention residual mixing, short convolutions, loop controllers)
 
 void ggml_cuda_op_l2_clip(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
@@ -21,3 +23,4 @@ void ggml_cuda_inkling_segmented_projection(ggml_backend_cuda_context & ctx, ggm
 bool ggml_cuda_inkling_segmented_projection_rows(ggml_backend_cuda_context & ctx, ggml_tensor * projection, int q_rows, int n_tok);
 bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst);
+bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml_tensor * down);

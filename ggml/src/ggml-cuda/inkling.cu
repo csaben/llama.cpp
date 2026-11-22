@@ -1,8 +1,14 @@
 #include "inkling.cuh"
 #include "inkling-common.cuh"
+#include "graph.cuh"
 #include "vecdotq.cuh"
 #include "cp-async.cuh"
 
+#ifdef GGML_USE_HIP
+#include <hip/hip_cooperative_groups.h>
+#else
+#include <cooperative_groups.h>
+#endif
 #include <cmath>
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -12,6 +18,17 @@
 static bool ik_mr_enabled() {
     static const bool on = getenv("IK_MR") && atoi(getenv("IK_MR")) != 0;
     return on;
+}
+
+static bool ik_dependency_fusion(const ggml_backend_cuda_context & ctx) {
+    static const bool enabled = !getenv("IK_DEPENDENCY_FUSION") || atoi(getenv("IK_DEPENDENCY_FUSION")) != 0;
+    const auto & dev = ggml_cuda_info().devices[ctx.device];
+    return enabled && !ik_mr_enabled() && dev.nsm == 82 && dev.cc == GGML_CUDA_CC_AMPERE_GA10X;
+}
+
+bool ggml_cuda_inkling_fast_glue(const ggml_backend_cuda_context & ctx) {
+    static const bool enabled = !getenv("IK_GLUE_FAST") || atoi(getenv("IK_GLUE_FAST")) != 0;
+    return enabled && ik_dependency_fusion(ctx);
 }
 
 template <int n_per_lane>
@@ -262,22 +279,44 @@ static __global__ void res_mix_f32(const float * __restrict__ query, const ik_st
     }
 }
 
+// Each shuffle reduces two moments and leaves one in each half of the warp.
+template<int n, int delta = 16>
+static __device__ __forceinline__ float ik_reduce_moments(const float (&v)[n], int lane) {
+    if constexpr (n == 1) {
+        return warp_reduce_sum<2*delta>(v[0]);
+    } else {
+        float next[(n+1)/2];
+#pragma unroll
+        for (int i = 0; i < n/2; ++i) {
+            const bool upper = (lane & delta) != 0;
+            const float own = upper ? v[2*i+1] : v[2*i];
+            const float peer = upper ? v[2*i] : v[2*i+1];
+            next[i] = own + __shfl_xor_sync(0xffffffffu, peer, delta);
+        }
+        if constexpr (n%2 != 0) {
+            next[n/2] = v[n-1] + __shfl_xor_sync(0xffffffffu, v[n-1], delta);
+        }
+        if constexpr (delta == 1) {
+            return next[0];
+        } else {
+            return ik_reduce_moments<(n+1)/2, delta/2>(next, lane);
+        }
+    }
+}
+
 // n_embd % 4 == 0 and n_embd/4 <= block_size: one float4 of every state per thread, a single pass of loads
-template <int block_size, bool q8, int NS = 0>
-static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
+template <int block_size, bool q8, int NS = 0, bool compact = false>
+static __device__ __forceinline__ void ik_mix_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
         const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
-        const ik_res_mix_norm norm) {
+        const ik_res_mix_norm norm, int t, int iq) {
     const int n_states = NS ? NS : state_count;
     constexpr int n_warps = block_size/WARP_SIZE;
-
-    const int t  = blockIdx.x;
-    const int iq = blockIdx.y;
 
     const int lane = threadIdx.x % WARP_SIZE;
     const int wid  = threadIdx.x / WARP_SIZE;
     const int k    = threadIdx.x;
 
-    __shared__ float red[n_warps][2*IK_MAX_STATES];
+    __shared__ float red[n_warps][2*(compact ? NS : IK_MAX_STATES)];
     __shared__ float s_rms[IK_MAX_STATES];
     __shared__ float s_p[IK_MAX_STATES];
     __shared__ float s_red[n_warps];
@@ -299,9 +338,9 @@ static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const
     if (query) {
         const float4 * q = (const float4 *) ((const char *) query + iq*q_nb1);
 
-        float acc[2*IK_MAX_STATES];
+        float acc[2*(NS ? NS : IK_MAX_STATES)];
 #pragma unroll
-        for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
+        for (int i = 0; i < 2*(NS ? NS : IK_MAX_STATES); ++i) {
             acc[i] = 0.0f;
         }
 
@@ -316,21 +355,29 @@ static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const
             }
         }
 
-#pragma unroll
-        for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
-            if (i < 2*n_states) {
-                acc[i] = warp_reduce_sum(acc[i]);
+        if constexpr (compact) {
+            const float v = ik_reduce_moments(acc, lane);
+            const int moment = __brev(lane) >> 27;
+            if (moment < 2*NS) {
+                red[wid][moment] = v;
             }
-        }
-        if (lane < 2*n_states) {
-            float v = 0.0f;
+        } else {
 #pragma unroll
-            for (int i = 0; i < 2*IK_MAX_STATES; ++i) {
-                if (i == lane) {
-                    v = acc[i];
+            for (int i = 0; i < 2*(NS ? NS : IK_MAX_STATES); ++i) {
+                if (i < 2*n_states) {
+                    acc[i] = warp_reduce_sum(acc[i]);
                 }
             }
-            red[wid][lane] = v;
+            if (lane < 2*n_states) {
+                float v = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 2*(NS ? NS : IK_MAX_STATES); ++i) {
+                    if (i == lane) {
+                        v = acc[i];
+                    }
+                }
+                red[wid][lane] = v;
+            }
         }
         __syncthreads();
 
@@ -394,6 +441,13 @@ static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const
     } else if (k < n_embd4) {
         ((float4 *) dst_v)[row*n_embd4 + k] = y;
     }
+}
+
+template <int block_size, bool q8, int NS = 0, bool compact = false>
+static __global__ void res_mix_f32_vec4(const float4 * __restrict__ query, const ik_state_ptrs st, void * __restrict__ dst_v,
+        const int n_embd4, const int n_tok, const int state_count, const int64_t q_nb1, const float eps, const float scale,
+        const ik_res_mix_norm norm) {
+    ik_mix_vec4<block_size, q8, NS, compact>(query, st, dst_v, n_embd4, n_tok, state_count, q_nb1, eps, scale, norm, blockIdx.x, blockIdx.y);
 }
 
 // The trailing normalization weight is a source but never a mixed state.
@@ -466,6 +520,13 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                 static const bool specialize = getenv("IK_MIX_SPECIALIZE") && atoi(getenv("IK_MIX_SPECIALIZE")) != 0;
                 auto launch_mix = [&](auto state_count) {
                     constexpr int ns = decltype(state_count)::value;
+                    if constexpr (ns != 0) {
+                        if (ggml_cuda_inkling_fast_glue(ctx) && n_tok == 1 && n_embd4 == 576) {
+                            res_mix_f32_vec4<576, kQ8, ns, true><<<grid, 576, 0, stream>>>((const float4 *) q_d, st, dst->data,
+                                    n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
+                            return;
+                        }
+                    }
                     res_mix_f32_vec4<640, kQ8, ns><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
                             n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
                 };
@@ -951,6 +1012,146 @@ static __global__ void loop_ctrl_down_f32(const wt * __restrict__ w, const float
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+static int ik_ctrl_gemm_min() {
+    static const int v = getenv("IK_CTRL_GEMM_MIN") ? atoi(getenv("IK_CTRL_GEMM_MIN")) : 8; // tokens; 0: never
+    return v;
+}
+
+struct ik_mix_ctrl_args {
+    ik_state_ptrs st;
+    const float4 * query;
+    const half * weights;
+    const float * msg;
+    float * mixed;
+    float * down;
+    int cols;
+    size_t q_stride, msg_stride;
+    float eps, scale, ctrl_eps;
+};
+
+template <int ns, bool compact = false, int ranks = 2>
+static __global__ void __launch_bounds__(compact ? 576 : 640) ik_mix_down(ik_mix_ctrl_args a) {
+    constexpr int threads = compact ? 576 : 640;
+    const int b = blockIdx.y, t = threadIdx.x;
+    const int col = a.cols == 1 ? 0 : b;
+    __shared__ __align__(16) float mixed[2304];
+    ik_mix_vec4<threads, false, ns, compact>(a.query + col*a.q_stride, a.st, mixed, 576, 1, ns, 0, a.eps, a.scale, {}, 0, 0);
+    __syncthreads();
+    // The mix also feeds later nodes. Write each column once.
+    if (blockIdx.x == 0 && b == col && t < 576) {
+        ((float4 *) a.mixed)[col*576 + t] = ((float4 *) mixed)[t];
+    }
+    __shared__ float4 partial[8*ranks];
+    for (int slot = t; slot < 256*ranks; slot += threads) {
+        const int k = slot%256;
+        float sa = 0, da = 0, sb = 0, db = 0;
+        const half * w = a.weights + (b*64 + ranks*blockIdx.x + slot/256)*4608;
+#pragma unroll
+        for (int j = 0; j < 9; ++j) {
+            const int i = j*256 + k;
+            const float x = mixed[i];
+            sa += x*x;
+            const float v = a.msg[b*a.msg_stride + i];
+            sb += v*v;
+            db += v*__half2float(w[2304+i]);
+            da += x*__half2float(w[i]);
+        }
+        if constexpr (compact) {
+            const float terms[] = {sa, da, sb, db};
+            const int moment = __brev(t%32) >> 27;
+            const float value = ik_reduce_moments(terms, t%32);
+            if (moment < 4) {
+                ((float *) &partial[slot/32])[moment] = value;
+            }
+        } else {
+            sa = warp_reduce_sum(sa);
+            da = warp_reduce_sum(da);
+            sb = warp_reduce_sum(sb);
+            db = warp_reduce_sum(db);
+            if (t%32 == 0) {
+                partial[slot/32] = make_float4(sa, da, sb, db);
+            }
+        }
+    }
+    __syncthreads();
+    if (t < ranks) {
+        float sa = 0, da = 0, sb = 0, db = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const float4 p = partial[t*8+j];
+            sa += p.x;
+            da += p.y;
+            sb += p.z;
+            db += p.w;
+        }
+        a.down[b*64+ranks*blockIdx.x+t] = da*rsqrtf(sa/2304 + a.ctrl_eps) + db*rsqrtf(sb/2304 + a.ctrl_eps);
+    }
+}
+
+static bool ik_storage_overlaps(const ggml_tensor * a, const ggml_tensor * b) {
+    const uintptr_t x = (uintptr_t) a->data, y = (uintptr_t) b->data;
+    return x <= y ? y - x < ggml_nbytes(a) : x - y < ggml_nbytes(b);
+}
+
+bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml_tensor * down) {
+    const int states = ik_res_mix_state_count(mix);
+    const ggml_tensor * cur = down->src[1];
+    static const bool big_down = getenv("IK_CTRL_DOWN_1024") && atoi(getenv("IK_CTRL_DOWN_1024"));
+    static const bool specialize = getenv("IK_MIX_SPECIALIZE") && atoi(getenv("IK_MIX_SPECIALIZE"));
+    if (!ik_dependency_fusion(ctx) || !specialize || big_down || ik_ctrl_gemm_min() == 1 ||
+            down->ne[0] != 64 || down->ne[1] != 1 || down->src[0]->type != GGML_TYPE_F16 || down->src[0]->ne[0] != 4608 ||
+            (cur != mix && cur->view_src != mix) || cur->data != mix->data || !ggml_are_same_shape(cur, mix) || !ggml_is_contiguous(cur) ||
+            (uintptr_t) mix->data % 16 != 0 || !mix->src[0] || states < 1 || states > 5 || ggml_get_op_params_i32(mix, 3) || mix->type != GGML_TYPE_F32 ||
+            mix->ne[0] != 2304 || mix->ne[1] != 1 || !ggml_is_contiguous(mix) || !ggml_is_contiguous(mix->src[0]) ||
+            (mix->ne[2] != 1 && mix->ne[2] != down->ne[2])) {
+        return false;
+    }
+    if (ik_storage_overlaps(mix, down) || ik_storage_overlaps(mix, down->src[2]) || ik_storage_overlaps(down, down->src[2]) ||
+            ik_storage_overlaps(mix, down->src[0]) || ik_storage_overlaps(down, down->src[0])) {
+        return false;
+    }
+    ik_mix_ctrl_args a{};
+    for (int j = 0; j <= states; ++j) {
+        if (ik_storage_overlaps(mix->src[j], mix) || ik_storage_overlaps(mix->src[j], down) || (uintptr_t) mix->src[j]->data % 16 != 0) {
+            return false;
+        }
+        if (j > 0) {
+            a.st.p[j-1] = (const float *) mix->src[j]->data;
+        }
+    }
+    a.query = (const float4 *) mix->src[0]->data;
+    a.weights = (const half *) down->src[0]->data;
+    a.msg = (const float *) down->src[2]->data;
+    a.mixed = (float *) mix->data;
+    a.down = (float *) down->data;
+    a.cols = mix->ne[2];
+    a.q_stride = mix->src[0]->nb[1]/sizeof(float4);
+    a.msg_stride = down->src[2]->nb[2]/sizeof(float);
+    a.eps = ggml_get_op_params_f32(mix, 0);
+    a.scale = ggml_get_op_params_f32(mix, 1);
+    a.ctrl_eps = ggml_get_op_params_f32(down, 0);
+    auto launch = [&](auto count) {
+        constexpr int n = decltype(count)::value;
+        if (ggml_cuda_inkling_fast_glue(ctx)) {
+            if (down->ne[2] == 3) {
+                ik_mix_down<n, true, 4><<<dim3(16, 3), 576, 0, ctx.stream()>>>(a);
+            } else {
+                ik_mix_down<n, true><<<dim3(32, down->ne[2]), 576, 0, ctx.stream()>>>(a);
+            }
+            return;
+        }
+        ik_mix_down<n><<<dim3(32, down->ne[2]), 640, 0, ctx.stream()>>>(a);
+    };
+    switch (states) {
+        case 1: launch(std::integral_constant<int, 1>{}); break;
+        case 2: launch(std::integral_constant<int, 2>{}); break;
+        case 3: launch(std::integral_constant<int, 3>{}); break;
+        case 4: launch(std::integral_constant<int, 4>{}); break;
+        case 5: launch(std::integral_constant<int, 5>{}); break;
+    }
+    return true;
+}
+
 // The controllers of a batch (prefill): the per-token kernels above launch a block per (rank, token) and a warp per
 // output element, which was 35% of the prefill time (phase 5 profile). For n_tok >= IK_CTRL_GEMM_MIN the same sums are
 // two GEMMs: D = W_down^T [rmsnorm(a); rmsnorm(msg)] and [G, F] = [W_gain, W_forget] D, in FP32 (the handle's TF32
@@ -1000,11 +1201,6 @@ static __global__ void ik_ctrl_apply_elem(const float * __restrict__ cur, const 
     const float c = *(const float *) ((const char *) cur + t*cur_nb1 + ib*cur_nb2 + i*sizeof(float));
     const float m = *(const float *) ((const char *) msg + t*msg_nb1 + ib*msg_nb2 + i*sizeof(float));
     y[o] = (c - tanhf(f[o])*c) + tanhf(g[o])*m;
-}
-
-static int ik_ctrl_gemm_min() {
-    static const int v = getenv("IK_CTRL_GEMM_MIN") ? atoi(getenv("IK_CTRL_GEMM_MIN")) : 8; // tokens; 0: never
-    return v;
 }
 
 // the weights as FP32: the tensor itself, or a widened copy in the scratch
@@ -1315,11 +1511,10 @@ static void loop_ctrl_apply2_launch(ggml_backend_cuda_context & ctx, const float
 
 // Four rank-64 output rows per warp. Each eight-lane group loads two
 // contiguous four-element vectors per lane, keeping the full-warp sum order.
-static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, const float * d,
-        const half * wg, const half * wf, float * y, int n, size_t cur_stride, size_t msg_stride) {
-    const int i = blockIdx.x*32 + threadIdx.x/8;
+template<bool compact = false>
+static __device__ __forceinline__ float ik_ctrl_apply_channel(const float * cur, const float * msg, const float * d,
+        const half * wg, const half * wf, int n, size_t cur_stride, size_t msg_stride, int i, int b) {
     const int lane = threadIdx.x % 8;
-    const int b = blockIdx.y;
     const int row = b*n + i;
     const float * dv = d + b*64 + lane*4;
     float gv[4], fv[4];
@@ -1331,16 +1526,44 @@ static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, cons
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
         const float a = ((const float *) &d0)[j], z = ((const float *) &d1)[j];
-        gv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *) &g1)[j]), z,
-                __fmul_rn(__half2float(((const half *) &g0)[j]), a)));
-        fv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *) &f1)[j]), z,
-                __fmul_rn(__half2float(((const half *) &f0)[j]), a)));
+        gv[j] = __fmaf_rn(__half2float(((const half *) &g1)[j]), z,
+                __fmul_rn(__half2float(((const half *) &g0)[j]), a));
+        fv[j] = __fmaf_rn(__half2float(((const half *) &f1)[j]), z,
+                __fmul_rn(__half2float(((const half *) &f0)[j]), a));
+        if constexpr (!compact) {
+            gv[j] = warp_reduce_sum<8>(gv[j]);
+            fv[j] = warp_reduce_sum<8>(fv[j]);
+        }
+    }
+    if constexpr (compact) {
+        float v[8] = {gv[0], gv[1], gv[2], gv[3], fv[0], fv[1], fv[2], fv[3]};
+        float part = ik_reduce_moments<8, 4>(v, lane);
+        part += __shfl_xor_sync(0xffffffffu, part, 2);
+        part += __shfl_xor_sync(0xffffffffu, part, 4);
+        const float f = __shfl_xor_sync(0xffffffffu, part, 1);
+        if (lane == 0) {
+            const float c = cur[b*cur_stride+i], m = msg[b*msg_stride+i];
+            return (c-tanhf(f)*c) + tanhf(part)*m;
+        }
+        return 0.0f;
     }
     if (lane == 0) {
         const float c = cur[b*cur_stride+i], m = msg[b*msg_stride+i];
         const float gain = tanhf((gv[0]+gv[2])+(gv[1]+gv[3]));
         const float forget = tanhf((fv[0]+fv[2])+(fv[1]+fv[3]));
-        y[row] = (c-forget*c) + gain*m;
+        return (c-forget*c) + gain*m;
+    }
+    return 0.0f;
+}
+
+static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, const float * d,
+        const half * wg, const half * wf, float * y, int n, size_t cur_stride, size_t msg_stride) {
+    const int i = blockIdx.x*32 + threadIdx.x/8;
+    const int lane = threadIdx.x % 8;
+    const int b = blockIdx.y;
+    const float value = ik_ctrl_apply_channel(cur, msg, d, wg, wf, n, cur_stride, msg_stride, i, b);
+    if (lane == 0) {
+        y[b*n+i] = value;
     }
 }
 
@@ -1375,6 +1598,45 @@ static __global__ void ik_ctrl_apply8_rows(const float * cur, const float * msg,
     }
 }
 
+template<int threads = 256, bool compact = false>
+static __global__ void __launch_bounds__(threads) ik_ctrl_apply_pack(const float * cur, const float * msg, const float * d,
+        const half * wg, const half * wf, size_t cur_stride, size_t msg_stride, const float * nw, size_t nw_stride,
+        block_q8_1 * out, float * partial, float eps) {
+    const int b = blockIdx.y, tile = blockIdx.x, t = threadIdx.x;
+    __shared__ float y[3][32];
+#pragma unroll
+    for (int j = t/256; j < 3; j += threads/256) {
+        const int c = j*1024 + tile*32 + (t%256)/8;
+        if (c < 2304) {
+            const float value = ik_ctrl_apply_channel<compact>(cur, msg, d, wg, wf, 2304, cur_stride, msg_stride, c, b);
+            if (t%8 == 0) {
+                y[j][(t%256)/8] = value;
+            }
+        }
+    }
+    __syncthreads();
+    if (t < 32) {
+        float ss = 0;
+#pragma unroll
+        for (int j = 0; j < 3; ++j) {
+            if (j*1024 + 32*tile < 2304) { ss += y[j][t]*y[j][t]; }
+        }
+        ss = warp_reduce_sum(ss);
+        if (t == 0) {
+            partial[b*32 + tile] = ss;
+        }
+    }
+    cooperative_groups::this_grid().sync();
+    if (t < 32) {
+        const float scale = rsqrtf(warp_reduce_sum(partial[32*b+t])/2304 + eps);
+#pragma unroll
+        for (int j = 0; j < 3; ++j) {
+            const int c = j*1024 + 32*tile + t;
+            if (c < 2304) { ik_warp_store_q8_1(y[j][t]*scale*nw[b*nw_stride+c], out+b*72+c/32, t, true); }
+        }
+    }
+}
+
 void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * cur = dst->src[0];
     const ggml_tensor * msg = dst->src[1];
@@ -1393,6 +1655,39 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
     GGML_ASSERT(!q8 || (nw != nullptr && n % QK8_1 == 0));
     GGML_ASSERT(ggml_is_contiguous(dst));
 
+    static const bool group8 = getenv("IK_CTRL_APPLY8") && atoi(getenv("IK_CTRL_APPLY8"));
+    static const bool fuse_norm = getenv("IK_CTRL_NORM_FUSED") && atoi(getenv("IK_CTRL_NORM_FUSED")) != 0;
+    static const bool v2 = getenv("IK_CTRL_APPLY_V2") && atoi(getenv("IK_CTRL_APPLY_V2")) != 0;
+    const size_t nw_nb1 = nw && ggml_nrows(nw) != 1 ? nw->nb[1] : 0;
+    float eps = nw ? ggml_get_op_params_f32(dst, 0) : 0.0f;
+
+    if (q8 && group8 && !v2 && !fuse_norm && n_tok == 1 && n == 2304 && B == 3 && rank == 64 &&
+            wg->type == GGML_TYPE_F16 && (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 &&
+            (uintptr_t) wf->data % 8 == 0 && ik_ctrl_gemm_min() != 1 && ik_dependency_fusion(ctx) &&
+            ggml_cuda_info().devices[ctx.device].supports_cooperative_launch && ctx.curr_stream_no == 0 && ctx.stream_context().concurrent_events.empty()) {
+        bool aliases_input = false;
+        for (const ggml_tensor * input : {cur, msg, d, wg, wf, nw}) {
+            aliases_input |= ik_storage_overlaps(input, dst);
+        }
+        const bool fast = ggml_cuda_inkling_fast_glue(ctx);
+        const int threads = fast ? 768 : 256;
+        const auto kernel = fast ? ik_ctrl_apply_pack<768, true> : ik_ctrl_apply_pack<256, false>;
+        int resident;
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, kernel, threads, 0));
+        if (!aliases_input && resident*82 >= 32*B) {
+            ggml_cuda_pool_alloc<float> partial(ctx.pool(), 32*B);
+            float * sums = partial.get();
+            size_t cur_stride = cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float);
+            size_t msg_stride = msg->nb[2]/sizeof(float);
+            size_t nw_stride = nw_nb1/sizeof(float);
+            void * inputs[] = {cur->data, msg->data, d->data, wg->data, wf->data, nw->data};
+            void * params[] = {&inputs[0], &inputs[1], &inputs[2], &inputs[3], &inputs[4],
+                &cur_stride, &msg_stride, &inputs[5], &nw_stride, &dst->data, &sums, &eps};
+            CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, dim3(32, B), threads, params, 0, ctx.stream()));
+            return;
+        }
+    }
+
     // the F32 result: the output itself, or a scratch when the output is quantized
     ggml_cuda_pool_alloc<float> scratch(ctx.pool());
     float * y = (float *) dst->data;
@@ -1401,13 +1696,7 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
         y = scratch.get();
     }
 
-    static const bool v2 = getenv("IK_CTRL_APPLY_V2") && atoi(getenv("IK_CTRL_APPLY_V2")) != 0; // measured slower (thread per output: 27 blocks)
     if (v2 && rank <= IK_CA2_RANK && rank % 8 == 0 && B*n_tok <= 32 && (nw == nullptr || ggml_nrows(nw) == 1 || nw->nb[1] % 16 == 0)) {
-        float eps = 0.0f;
-        if (nw) {
-            memcpy(&eps, (const float *) dst->op_params + 0, sizeof(float));
-        }
-        const int64_t nw_nb1 = nw && ggml_nrows(nw) != 1 ? nw->nb[1] : 0;
         if (wg->type == GGML_TYPE_F16) {
             loop_ctrl_apply2_launch<half>(ctx, (const float *) cur->data, (const float *) msg->data, (const float *) d->data, (const half *) wg->data, (const half *) wf->data,
                     y, nw ? (const float *) nw->data : nullptr, dst->data, n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2], nw_nb1, eps, q8, B);
@@ -1422,19 +1711,11 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
     const int64_t nblocks = ((int64_t) n*n_tok*WARP_SIZE + block_size - 1)/block_size;
     const dim3 grid(nblocks, B, 1);
 
-    float eps = 0.0f;
-    if (nw) {
-        memcpy(&eps, (const float *) dst->op_params + 0, sizeof(float));
-    }
-    const int64_t nw_nb1 = nw && ggml_nrows(nw) != 1 ? nw->nb[1] : 0;
-    // the fused norm (last block of 288 arriving on one counter) measured slower than the separate norm kernel: opt-in
-    static const bool fuse_norm = getenv("IK_CTRL_NORM_FUSED") && atoi(getenv("IK_CTRL_NORM_FUSED")) != 0;
     const bool fused = nw != nullptr && n_tok == 1 && B <= 32 && fuse_norm;
     int * counters = fused ? ik_counters(ctx, 32, B) : nullptr;
 #define IK_CA_LAUNCH(wt_t, NORM, Q8) loop_ctrl_apply_f32<wt_t, NORM, Q8><<<grid, block_size, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data, \
             (const float *) d->data, (const wt_t *) wg->data, (const wt_t *) wf->data, y, n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2], \
             nw ? (const float *) nw->data : nullptr, nw_nb1, dst->data, eps, counters)
-    static const bool group8 = getenv("IK_CTRL_APPLY8") && atoi(getenv("IK_CTRL_APPLY8"));
     const bool mr_rows = ik_mr_enabled() && n_tok > 1 && n_tok <= 8;
     if (mr_rows && group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n % 32 == 0 &&
             (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 && (uintptr_t) wf->data % 8 == 0) {
@@ -2202,8 +2483,8 @@ static __device__ __forceinline__ void ik_mma_init(ik_mma_lane<G> & st, const fl
 // One step: the 16 cells kt .. kt + 15, of which the cells below w1 other than kv_idx (the current token's, not stored
 // yet) count. The Q8_0 rows of the kv head are at kb + row*k_nb2 and vb + row*v_nb2, row = min(cell - row0, row_max):
 // the cache itself, or a tile of it in shared memory.
-template <int G, bool ROW_COLS = false>
-static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
+template <int G, bool late_values = false, bool fixed_bias = false, bool ROW_COLS = false>
+static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[fixed_bias ? 36 : 32],
         const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
         const int kt, const int w1, const int64_t kv_idx) {
     constexpr float PS = IK_MMA_PS;
@@ -2243,19 +2524,24 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
         dk[i] = args.rel_pos[idx];
     }
     uint32_t vh[4][2], vl[4][2], vq[4][4];
+    auto load_values = [&]() {
 #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
-        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
+        for (int i = 0; i < 4; ++i) {
+            const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
+            const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
 #pragma unroll
-        for (int P = 0; P < 2; ++P) {
-            vh[i][P] = r.head(P);
-            vl[i][P] = r.tail(P);
+            for (int P = 0; P < 2; ++P) {
+                vh[i][P] = r.head(P);
+                vl[i][P] = r.tail(P);
+            }
+#pragma unroll
+            for (int b = 0; b < 4; ++b) {
+                vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
+            }
         }
-#pragma unroll
-        for (int b = 0; b < 4; ++b) {
-            vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
-        }
+    };
+    if constexpr (!late_values) {
+        load_values();
     }
     // ---- Q K^T: C[16 cells][8 columns] += A[16 cells][16 dims] B[16 dims][8 columns], block by block ----
     float s[2] = { 0.0f, 0.0f };
@@ -2273,17 +2559,36 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
         s[1] += ik_q8row::scale(b, kh[1][b >> 1], kl[1][b >> 1])*(cb[2] + cb[3]);
     }
     // ---- the logits: scale, relative bias (within the extent), sink, mask ----
-    const bool e0 = dk[0] >= 0 && dk[0] < args.n_extent, e1 = dk[1] >= 0 && dk[1] < args.n_extent;
-    float bias[2] = { 0.0f, 0.0f };
+    const auto in_extent = [&](int distance) {
+        return fixed_bias ? (unsigned) distance < 1024u : distance >= 0 && distance < args.n_extent;
+    };
+    const bool e0 = in_extent(dk[0]), e1 = in_extent(dk[1]);
+    float bias[2] = {0.0f, 0.0f};
     if (__ballot_sync(0xffffffffu, e0 || e1)) {
-        const float * t0 = table + (int64_t) (e0 ? dk[0] : 0)*n_rel;
-        const float * t1 = table + (int64_t) (e1 ? dk[1] : 0)*n_rel;
+        const int d0 = e0 ? dk[0] : 0, d1 = e1 ? dk[1] : 0;
+        if constexpr (fixed_bias) {
 #pragma unroll
-        for (int j = 0; j < 16; ++j) {
-            if (j < n_rel) {
-                const float rj = s_r[ht][j];
-                bias[0] += t0[j]*rj;
-                bias[1] += t1[j]*rj;
+            for (int chunk = 0; chunk < 4; ++chunk) {
+                const float4 a = ((const float4 *) table)[4*d0 + chunk];
+                const float4 b = ((const float4 *) table)[4*d1 + chunk];
+                const float4 r = ((const float4 *) s_r[ht])[chunk];
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const float v = ((const float *) &r)[j];
+                    bias[0] += ((const float *) &a)[j]*v;
+                    bias[1] += ((const float *) &b)[j]*v;
+                }
+            }
+        } else {
+            const float * t0 = table + (int64_t) d0*n_rel;
+            const float * t1 = table + (int64_t) d1*n_rel;
+#pragma unroll
+            for (int j = 0; j < 16; ++j) {
+                if (j < n_rel) {
+                    const float rj = s_r[ht][j];
+                    bias[0] += t0[j]*rj;
+                    bias[1] += t1[j]*rj;
+                }
             }
         }
         bias[0] = e0 ? bias[0] : 0.0f;
@@ -2319,6 +2624,9 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
     const float pv[4] = { __shfl_sync(0xffffffffu, p0, src), __shfl_sync(0xffffffffu, p0, src + 4),
                           __shfl_sync(0xffffffffu, p1, src), __shfl_sync(0xffffffffu, p1, src + 4) };
     const float pvz[4] = { col_ok ? pv[0] : 0.0f, col_ok ? pv[1] : 0.0f, col_ok ? pv[2] : 0.0f, col_ok ? pv[3] : 0.0f };
+    if constexpr (late_values) {
+        load_values();
+    }
     // ---- P V: C[16 dims][8 columns] += A[16 dims][16 cells] B[16 cells][8 columns]; an mma takes 16 dims of one block
     //      (two per lane group), so the block's scales ride on P. A cell without weight may be past the end: no scale. ----
 #pragma unroll
@@ -2472,7 +2780,7 @@ static __device__ __forceinline__ void ik_scan_sync() {
     }
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false, bool STAGED = false, bool ROW_COLS = false, bool ungated = false, bool warp_split = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false, bool STAGED = false, bool ROW_COLS = false, bool ungated = false, bool warp_split = false, bool fast = false>
 static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, const float * scan, const int row, const char * tile, int g = MR ? blockIdx.y : blockIdx.x, int split = MR ? blockIdx.z : blockIdx.y, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -2524,7 +2832,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
     __shared__ float s_q[G][HD];
     __shared__ float s_k[HD];
     __shared__ float s_v[HD];
-    __shared__ float s_r[G][32];
+    __shared__ __align__(16) float s_r[G][fast ? 36 : 32];
     __shared__ float s_sink[G];
     __shared__ float s_ssq[G][IK_A2_WARPS];
     __shared__ float s_red[2][IK_A2_WARPS];
@@ -2643,7 +2951,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             s_ssq[hh][warp] = v;
         }
     }
-    ik_scan_sync<warp_split>();
+    ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
         float tau_h = tau;
@@ -2666,7 +2974,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             }
         }
     }
-    ik_scan_sync<warp_split>();
+    ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
     IK_DBG_T(2);
 
     // ===== the attention over the cells of this warp (online softmax per head, a lane holds 4 dims), the current
@@ -2810,16 +3118,29 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
     #pragma unroll
                     for (int tile = warp; tile < 16; tile += IK_A2_WARPS) {
                         if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
-                            ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
+                            ik_mma_step<G, fast, fast>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
+                        }
+                    }
+                } else if constexpr (fast && !HAS_TAPS) {
+                    for (int kt = w0; kt < w1; kt += 32) {
+                        const int cell = kt + lane;
+                        const bool visible = cell < w1 && cell != kv_idx && (args.mask_f16 ?
+                                __half2float(((const half *) args.mask)[cell]) : ((const float *) args.mask)[cell]) != -INFINITY;
+                        const unsigned mask = __ballot_sync(0xffffffffu, visible);
+#pragma unroll
+                        for (int half = 0; half < 2; ++half) {
+                            if (mask & (0xffffu << (16*half))) {
+                                ik_mma_step<G, false, fast>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt + 16*half, w1, kv_idx);
+                            }
                         }
                     }
                 } else {
                     for (int kt = w0; kt < w1; kt += 16) {
                         if (STAGED && args.n_kv == args_in.n_kv) {
                             const int stride = 4*sizeof(block_q8_0);
-                            ik_mma_step<G>(args, st, s_r, tile, stride, tile + args_in.kv_per_split*stride, stride, kv0, kv1 - kv0 - 1, kt, w1, kv_idx);
+                            ik_mma_step<G, false, fast>(args, st, s_r, tile, stride, tile + args_in.kv_per_split*stride, stride, kv0, kv1 - kv0 - 1, kt, w1, kv_idx);
                         } else {
-                            ik_mma_step<G, ROW_COLS>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                            ik_mma_step<G, false, fast, ROW_COLS>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
                         }
                     }
                 }
@@ -2875,7 +3196,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         if (lane == 0) {
             s_red[which][warp % 4] = ss;
         }
-        ik_scan_sync<warp_split>();
+        ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
         const float sst = s_red[which][0] + s_red[which][1] + s_red[which][2] + s_red[which][3];
         float factor;
         if (which == 0) {
@@ -2910,7 +3231,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         }
         (which ? s_v : s_k)[ci] = yq;
     }
-    ik_scan_sync<warp_split>();
+    ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
 
     // ===== the current token's cell, by the warp whose range holds it =====
     if constexpr (MMA) {
@@ -3018,7 +3339,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             }
         }
     }
-    ik_scan_sync<warp_split>();
+    ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
     IK_DBG_T(5);
 
     float M[G], L[G], A[G];
@@ -3054,11 +3375,11 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
                 }
             }
         }
-        ik_scan_sync<warp_split>();
+        ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
         if (tid == 0) {
             s_last = args.ext_scan ? 1 : ik_atomic_add_acq_rel(&args.counters[part_g], 1) == args.n_split - 1;
         }
-        ik_scan_sync<warp_split>();
+        ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
         IK_DBG_T(6);
         if (!s_last) {
             return;
@@ -3122,7 +3443,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             while (ik_ld_acquire(ready) != producers) {}
             ik_st_relaxed(ready, 0);
         }
-        ik_scan_sync<warp_split>();
+        ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
         if (tid < HD) {
 #pragma unroll
             for (int hh = 0; hh < G; ++hh) { gate_v[hh] = pr0[args.off_gate + (g*G + hh)*HD + tid]; }
@@ -3917,10 +4238,13 @@ void ggml_cuda_op_inkling_moe_down(ggml_backend_cuda_context & ctx, ggml_tensor 
 // ---------------------------------------------------------------------------------------------------------------------
 // inkling_moe_sum_conv: the weighted expert sum, the FFN short convolution and the residual, one thread per channel
 
+template<bool fixed = false>
 static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a, const int64_t a_s1, const float * __restrict__ w, const int w_s1,
         const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
         const int write_cell, const int chan_offset, const float scale, const float * __restrict__ residual, float * __restrict__ dst,
-        const int n_embd, const int n_used, const int n_conv) {
+        const int n_embd, const int n_used_in, const int n_conv_in) {
+    const int n_used = fixed ? 8 : n_used_in;
+    const int n_conv = fixed ? 4 : n_conv_in;
     const int c = blockIdx.x*blockDim.x + threadIdx.x;
     if (c >= n_embd) {
         return;
@@ -3942,9 +4266,11 @@ static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a,
     }
     const float res = residual[c];
 
+    const int lane = threadIdx.x % WARP_SIZE;
+    const float route = fixed && lane < 8 ? w[lane*w_s1] : 0.0f;
     float sum = 0.0f;
     for (int e = 0; e < n_used; ++e) {
-        sum += av[e]*w[e*w_s1];
+        sum += av[e]*(fixed ? __shfl_sync(0xffffffffu, route, e) : w[e*w_s1]);
     }
     xs[n_conv - 1] = sum;
     float out = 0.0f;
@@ -4052,7 +4378,10 @@ void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_ten
                 (float *) dst->data, dst->nb[1]/sizeof(float), n_embd, n_used, n_conv, (int) dst->ne[1]);
         return;
     }
-    inkling_moe_sum_conv_kernel<<<(n_embd + block - 1)/block, block, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float),
+    const bool fast = ggml_cuda_inkling_fast_glue(ctx) && n_used == 8 && n_conv == 4 && n_embd == 2304;
+    const int width = fast ? 64 : block;
+    const auto kernel = fast ? inkling_moe_sum_conv_kernel<true> : inkling_moe_sum_conv_kernel<false>;
+    kernel<<<(n_embd + width - 1)/width, width, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float),
             (const float *) w->data, (int) (w->nb[1]/sizeof(float)), (const float *) conv_w->data, (float *) state->data, state->nb[1]/sizeof(float),
             (const int32_t *) rs_ids->data, write_cell, chan_offset, scale, (const float *) residual->data, (float *) dst->data, n_embd, n_used, n_conv);
 }
@@ -4374,7 +4703,7 @@ static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long 
     return key;
 }
 
-template <int NS, int NC, bool MR = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
     if constexpr (MR) {
@@ -4396,7 +4725,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
     constexpr int C4 = (IK_R2_MAX_EMBD/4 + IK_R2_BLOCK - 1)/IK_R2_BLOCK; // float4 slots per thread
     extern __shared__ float4 r2_smem[];
     float4 * s_rows = r2_smem;                                          // [IK_R2_WARPS][n_embd/4]
-    float4 * s_x    = r2_smem + IK_R2_WARPS*(IK_R2_MAX_EMBD/4);         // [n_embd/4]
+    float4 * s_x    = register_rows ? nullptr : r2_smem + IK_R2_WARPS*(IK_R2_MAX_EMBD/4);         // [n_embd/4]
     __shared__ float s_red[IK_R2_WARPS][NP];
     __shared__ float s_tot[NP];
     __shared__ float s_w[2*NS + 1];            // rms[NS], p[NS], factor
@@ -4410,7 +4739,8 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
     const int warp = tid / WARP_SIZE;
     const int n_embd  = args.n_embd;
     const int n_embd4 = n_embd/4;
-    const int e0 = blockIdx.x*IK_R2_WARPS;
+    constexpr int rows = register_rows ? 4 : IK_R2_WARPS;
+    const int e0 = blockIdx.x*rows;
     IK_RDBG_T(0);
 
     // ===== all loads in one round trip: the states / query / norm weight into registers (float4, lane-consecutive),
@@ -4429,7 +4759,19 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         q[j]  = ok && args.query ? ((const float4 *) args.query)[k] : z;
         nw[j] = ok ? ((const float4 *) args.norm_w)[k] : z;
     }
-    {
+    float4 weights[register_rows ? rows : 1][register_rows ? C4 : 1];
+    if constexpr (register_rows) {
+#pragma unroll
+        for (int r = 0; r < rows; ++r) {
+#pragma unroll
+            for (int j = 0; j < C4; ++j) {
+                const int k = tid + IK_R2_BLOCK*j;
+                if (k < 576) {
+                    weights[r][j] = ((const float4 *) args.gate_inp)[(e0 + r)*576 + k];
+                }
+            }
+        }
+    } else {
         const float4 * row = (const float4 *) (args.gate_inp + (int64_t) (e0 + warp)*n_embd);
         for (int k = lane; k < n_embd4; k += WARP_SIZE) {
             cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(s_rows + warp*(IK_R2_MAX_EMBD/4) + k), row + k);
@@ -4499,43 +4841,72 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             acc[NG + i] = v;
         }
         IK_RDBG_T(7); // the loads landed (the products need them)
-#pragma unroll
-        for (int i = 0; i < NP; ++i) {
-            acc[i] = warp_reduce_sum(acc[i]);
-        }
-        IK_RDBG_T(8); // reduced
-        if (lane < NP) {
-            float v = 0.0f;
+        if constexpr (compact) {
+            const float v = ik_reduce_moments(acc, lane);
+            const int moment = __brev(lane) >> 27;
+            if (moment < NP) {
+                s_red[warp][moment] = v;
+            }
+        } else {
 #pragma unroll
             for (int i = 0; i < NP; ++i) {
-                if (i == lane) {
-                    v = acc[i];
-                }
+                acc[i] = warp_reduce_sum(acc[i]);
             }
-            s_red[warp][lane] = v;
+            IK_RDBG_T(8); // reduced
+            if (lane < NP) {
+                float v = 0.0f;
+#pragma unroll
+                for (int i = 0; i < NP; ++i) {
+                    if (i == lane) {
+                        v = acc[i];
+                    }
+                }
+                s_red[warp][lane] = v;
+            }
         }
     }
     __syncthreads();
+    float moment = 0.0f;
     if (tid < NP) {
         float v = 0.0f;
 #pragma unroll
         for (int w = 0; w < IK_R2_WARPS; ++w) {
             v += s_red[w][tid];
         }
-        s_tot[tid] = v;
+        if constexpr (compact) {
+            moment = v;
+        } else {
+            s_tot[tid] = v;
+        }
     }
-    __syncthreads();
+    if constexpr (!compact) {
+        __syncthreads();
+    }
     IK_RDBG_T(1);
-    if (warp == 0) {
+    float direct_factor = 1.0f;
+    if constexpr (compact && NS == 1) {
+        // Every warp needs the single state RMS.
+        float ss = 0.0f;
+#pragma unroll
+        for (int w = 0; w < IK_R2_WARPS; ++w) {
+            ss += s_red[w][0];
+        }
+        direct_factor = rsqrtf(ss/n_embd + args.norm_eps);
+    } else if (warp == 0) {
         // lane i < NS: state i
         auto gram = [&](const int i, const int k) -> float {
             const int lo = min(i, k), hi = max(i, k);
-            return s_tot[lo*NS - lo*(lo - 1)/2 + (hi - lo)];
+            const int idx = lo*NS - lo*(lo - 1)/2 + (hi - lo);
+            if constexpr (compact) {
+                return __shfl_sync(0xffffffff, moment, idx);
+            }
+            return s_tot[idx];
         };
         float r = 1.0f, wgt = 0.0f;
         if (args.query) {
-            const float ss = lane < NS ? gram(lane, lane) : 0.0f;
-            const float dt = lane < NS ? s_tot[NG + lane] : 0.0f;
+            const int h = min(lane, NS-1);
+            const float ss = gram(h, h);
+            const float dt = compact ? __shfl_sync(0xffffffff, moment, NG+h) : s_tot[NG+h];
             r = rsqrtf(ss/n_embd + args.eps);
             float       sc = lane < NS ? dt*r*args.scale : -INFINITY;
             const float mx = warp_reduce_max(sc);
@@ -4550,8 +4921,9 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
 #pragma unroll
         for (int k = 0; k < NS; ++k) {
             const float wk = __shfl_sync(0xffffffff, wgt, k);
+            const float g = gram(min(lane, NS-1), k);
             if (lane < NS) {
-                ssy += wgt*wk*gram(lane, k);
+                ssy += wgt*wk*g;
             }
         }
         ssy = warp_reduce_sum(ssy);
@@ -4563,13 +4935,15 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             s_w[2*NS] = rsqrtf(ssy/n_embd + args.norm_eps);
         }
     }
-    __syncthreads();
+    if constexpr (!(compact && NS == 1)) {
+        __syncthreads();
+    }
     IK_RDBG_T(9); // weights ready
 
     // ===== the normalized input: shared memory for the logits; the F32 and Q8_1 outputs spread over the blocks
     //       (block b stores the Q8_1 blocks k/8 with (k/8) % gridDim.x == b) =====
     {
-        const float factor = s_w[2*NS];
+        const float factor = compact && NS == 1 ? direct_factor : s_w[2*NS];
 #pragma unroll
         for (int j = 0; j < C4; ++j) {
             const int  k  = tid + j*IK_R2_BLOCK;
@@ -4577,7 +4951,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             float4 y = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 #pragma unroll
             for (int i = 0; i < NS; ++i) {
-                const float f0 = s_w[i], f1 = s_w[NS + i];
+                const float f0 = compact && NS == 1 ? 1.0f : s_w[i], f1 = compact && NS == 1 ? 1.0f : s_w[NS + i];
                 y.x += (x[i][j].x*f0)*f1;
                 y.y += (x[i][j].y*f0)*f1;
                 y.z += (x[i][j].z*f0)*f1;
@@ -4586,7 +4960,15 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             const float4 v = make_float4(factor*y.x*nw[j].x, factor*y.y*nw[j].y, factor*y.z*nw[j].z, factor*y.w*nw[j].w);
             const bool mine = ok && (k/8) % gridDim.x == blockIdx.x;
             if (ok) {
-                s_x[k] = v;
+                if constexpr (register_rows) {
+#pragma unroll
+                    for (int r = 0; r < rows; ++r) {
+                        const float4 w = weights[r][j];
+                        ((float *) r2_smem)[r*576 + k] = w.x*v.x + w.y*v.y + w.z*v.z + w.w*v.w;
+                    }
+                } else {
+                    s_x[k] = v;
+                }
             }
             if (mine) {
                 ((float4 *) args.dst)[k] = v;
@@ -4597,18 +4979,25 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         }
     }
     IK_RDBG_T(10); // y stored
-    cp_async_wait_all();
+    if constexpr (!register_rows) { cp_async_wait_all(); }
     __syncthreads();
     IK_RDBG_T(2);
 
     // ===== the logit of this warp's expert =====
-    {
-        const float4 * row = s_rows + warp*(IK_R2_MAX_EMBD/4);
+    if (warp < rows) {
         float dot = 0.0f;
-        for (int k = lane; k < n_embd4; k += WARP_SIZE) {
-            const float4 w = row[k];
-            const float4 v = s_x[k];
-            dot += w.x*v.x + w.y*v.y + w.z*v.z + w.w*v.w;
+        if constexpr (register_rows) {
+#pragma unroll
+            for (int j = 0; j < 18; ++j) {
+                dot += ((float *) r2_smem)[warp*576 + j*32 + lane];
+            }
+        } else {
+            const float4 * row = s_rows + warp*(IK_R2_MAX_EMBD/4);
+            for (int k = lane; k < n_embd4; k += WARP_SIZE) {
+                const float4 w = row[k];
+                const float4 v = s_x[k];
+                dot += w.x*v.x + w.y*v.y + w.z*v.z + w.w*v.w;
+            }
         }
         dot = warp_reduce_sum(dot);
         if (lane == 0) {
@@ -4732,6 +5121,11 @@ static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_rou
     if (a.wo_out) {
         GGML_ASSERT(a.cv_n_conv == 4);
         inkling_router2_launch_nc<NS, 4>(ctx, a);
+    } else if (ggml_cuda_inkling_fast_glue(ctx) && (NS == 1 ? !a.query : a.query != nullptr) && a.n_embd == 2304 &&
+            a.n_expert == 128 && a.n_used == 8 && a.warp_topk && !a.dbg_times) {
+        inkling_router2_kernel<NS, 0, false, true, true><<<32, IK_R2_BLOCK, 4*576*sizeof(float), ctx.stream()>>>(a);
+    } else if (a.query && ik_dependency_fusion(ctx) && a.n_embd == 2304 && a.n_expert == 128 && a.n_used == 8 && a.warp_topk && !a.dbg_times) {
+        inkling_router2_kernel<NS, 0, false, true><<<32, IK_R2_BLOCK, 4*576*sizeof(float), ctx.stream()>>>(a);
     } else {
         inkling_router2_launch_nc<NS, 0>(ctx, a);
     }

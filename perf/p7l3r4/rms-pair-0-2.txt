@@ -1,0 +1,12 @@
+IK_ROUTE_PARTIALS=0 start_C=82
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        229.45 ± 0.28 |
+build: 812b439 (231)
+IK_ROUTE_PARTIALS=2 start_C=82
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        229.27 ± 0.69 |
+build: 812b439 (231)
+IK_ROUTE_PARTIALS=2 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        229.34 ± 0.87 |
+build: 812b439 (231)
+IK_ROUTE_PARTIALS=0 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        229.45 ± 0.80 |
+build: 812b439 (231)

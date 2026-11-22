@@ -1,0 +1,9 @@
+ik_tail_mix                           46.0    8.324   382.899
+inkling_moe_sum_conv_kernel            2.0    2.035     4.069
+tail=1 exact
+ik_tail_mix                           46.0    6.491   298.582
+inkling_moe_sum_conv_kernel            2.0    2.024     4.048
+tail=4 exact
+ik_tail_mix                           46.0    6.426   295.591
+inkling_moe_sum_conv_kernel            2.0    2.034     4.067
+tail=-4 exact

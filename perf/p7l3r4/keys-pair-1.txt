@@ -1,0 +1,12 @@
+IK_ROUTE_KEYS=0 start_C=77
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.95 ± 0.24 |
+build: 812b439 (231)
+IK_ROUTE_KEYS=1 start_C=81
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.84 ± 0.22 |
+build: 812b439 (231)
+IK_ROUTE_KEYS=1 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.97 ± 0.20 |
+build: 812b439 (231)
+IK_ROUTE_KEYS=0 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.75 ± 0.47 |
+build: 812b439 (231)

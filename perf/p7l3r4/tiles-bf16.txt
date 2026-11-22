@@ -1,0 +1,12 @@
+IK_ROUTER_BF16=0 start_C=76
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.63 ± 0.18 |
+build: 812b439 (231)
+IK_ROUTER_BF16=1 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.58 ± 0.31 |
+build: 812b439 (231)
+IK_ROUTER_BF16=1 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.59 ± 0.24 |
+build: 812b439 (231)
+IK_ROUTER_BF16=0 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.70 ± 0.50 |
+build: 812b439 (231)

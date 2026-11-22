@@ -1,0 +1,12 @@
+IK_MMA_ORDER=0 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.51 ± 0.33 |
+build: 812b439 (231)
+IK_MMA_ORDER=4 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.24 ± 0.45 |
+build: 812b439 (231)
+IK_MMA_ORDER=4 start_C=84
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.47 ± 0.36 |
+build: 812b439 (231)
+IK_MMA_ORDER=0 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.77 ± 0.50 |
+build: 812b439 (231)

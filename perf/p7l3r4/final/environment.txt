@@ -1,0 +1,17 @@
+5d1f9e0824b24a9c0819f555a73f0b0d06d24464
+name, pci.bus_id, compute_cap, driver_version, power.limit [W]
+NVIDIA GeForce RTX 3090, 00000000:01:00.0, 8.6, 580.173.02, 370.00 W
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Fri_Feb_21_20:23:50_PST_2025
+Cuda compilation tools, release 12.8, V12.8.93
+Build cuda_12.8.r12.8/compiler.35583870_0
+NVIDIA Nsight Systems version 2024.6.2.225-246235244400v0
+CMAKE_BUILD_TYPE:STRING=Release
+CMAKE_CUDA_ARCHITECTURES:UNINITIALIZED=86
+GGML_CUDA:BOOL=ON
+GGML_CUDA_FA:BOOL=ON
+GGML_CUDA_FA_QUANTS:STRING=q4_0-q4_0;q8_0-q8_0;f16-f16;bf16-bf16;f8_e4m3-f8_e4m3
+GGML_CUDA_FORCE_MMQ:BOOL=OFF
+bc7f51192fbc35eeb5eaec6a342028b8588691023a2399d97c29eb633a049d07  /home/arelius/models/inkling-2-mini/Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf
+af0be9d6d59418b9f4d599aebe17b69c55ae06bbf90b8650f6b288396d90d0be  perf/ppl.txt

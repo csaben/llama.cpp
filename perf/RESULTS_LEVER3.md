@@ -1,6 +1,6 @@
 # Phase 7 GPU0 plain decode
 
-[Round 2 results and streaming-floor measurements](#round-2-on-gpu0)
+[Round 3 dependency measurements and results](#round-3-on-gpu0) | [Round 2 streaming floor](#round-2-on-gpu0)
 
 ## Plain single-token decode
 
@@ -225,3 +225,182 @@ LD_LIBRARY_PATH="$probe_bin" GGML_CUDA_DISABLE_GRAPHS=1 IK_DENSE_VISIT=0 IK_EXPE
 ```
 
 At `p7l3r2-late-gate-221tok`, mode 5 selects the single-launch late gate and mode 7 selects the staged short-cache schedule. Set `IK_DENSE_PREFETCH=0` and `IK_DENSE_GATE_BLOCKS=12` for the tuned short benchmark. At `p7l3r2-resident-router-tuning`, modes 18/19 select shared-memory staging or direct L2 prefetch for a resident visit through routing, and mode 22 reuses the dense workers with a two-block residency budget. At `p7l3r2-exact-expert-tail`, `IK_EXPERT_TAIL=2` selects the native-weight four-row tile and `IK_Q2_PACK=1 IK_EXPERT_TAIL=8` selects its lossless packed variant. The selected implementation uses `0` to disable the optimization and `1` to request it explicitly. [Short-context sweep](p7l3r2/stage-screen.txt), [resident sweep](p7l3r2/resident-router-tune.txt), [expert sweep](p7l3r2/expert-layout-screen.txt)
+
+## Round 3 on GPU0
+
+### Final plain decode
+
+The default reached **224.77 / 206.57 / 193.43 / 178.68 tok/s** at context depths 0 / 4096 / 16384 / 32768 on GPU0. Depth zero took 4.449 ms/token, leaving 1.116 ms/token to the 300 tok/s target. The measured complete visit was slower than its graph, so work on that schedule stopped at the visit scale. Selected source `812b439`, results tag `p7l3r3-final-225tok`. [Fresh 16264c6 baseline](p7l3r3/final/official-base.txt), [final default](p7l3r3/final/official-on.txt), [matched full visit](p7l3r3/layer-and-pass.txt)
+
+| Cache depth | 16264c6, tok/s | Final default, tok/s | Gain vs 16264c6 | Round 2 path, paired | Round 3 path, paired | Incremental gain |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 215.91 +/- 1.98 | 224.77 +/- 1.36 | +4.10% | 222.75 | 224.80 | +0.92% |
+| 4096 | 198.06 +/- 3.56 | 206.57 +/- 3.31 | +4.30% | 205.46 | 207.51 | +1.00% |
+| 16384 | 186.16 +/- 2.30 | 193.43 +/- 2.11 | +3.91% | 192.78 | 194.37 | +0.82% |
+| 32768 | 170.45 +/- 2.00 | 178.68 +/- 2.10 | +4.83% | 178.15 | 179.81 | +0.93% |
+
+The first two rate columns use the specified four-depth tg128 command with three repetitions and show the reported sample standard deviation. The paired columns average two three-repetition runs per setting, in off/on/on/off order separately at each depth. Off selects the Round 2 path in the same binary. All 16 paired runs began at or below 63 C. The earlier opt-in build also improved all four per-depth paired means. [Final paired runs](p7l3r3/final/paired.txt), [earlier paired runs](p7l3r3/paired.txt), [benchmark and validation driver](p7l3r3/validate.sh)
+
+The final Release sm_86 build uses the two-rank mixed-state controller down kernel at 46 sites, cooperative controller apply/RMS/Q8 at 24 sites, and four-row register routing for the 24 queried routers. It keeps the existing eight-row kernel at the 24 single-state routers. The 82-SM GA10x device and shape guards select these paths with the brief's plain-decode environment. `IK_DEPENDENCY_FUSION=0` runs the Round 2 control. Both the depth-zero and 32K traces cover the selected controller kernels. [Short launch geometry](p7l3r3/final/coverage.txt), [32K trace](p7l3r3/final/32k-edges.txt), [implementation](../ggml/src/ggml-cuda/inkling.cu)
+
+The final default and 16264c6 measured prefill/decode PPL **3.0530 / 4.1979** on the requested workloads. All 88 full-vocabulary rows matched bit for bit, including eight rows after each long prefix. All **2,834 DSpark rows** matched the single-token reference across 12 checks, including trace replay and rollback. All **3,988 supported backend cases** passed. Six fallback settings matched their same-configuration controls for eight additional vocabulary rows each. [PPL](p7l3r3/final/ppl.txt), [logit hashes](p7l3r3/final/logits.txt), [DSpark](p7l3r3/final/mr.txt), [CUDA operators](p7l3r3/final/ops.txt), [fallbacks](p7l3r3/final/fallbacks.txt)
+
+### Cost of a dependency
+
+At 82 blocks on the RTX 3090, one point-to-point handoff took 0.352 us, 47% less than an empty CUDA graph edge. A cooperative grid barrier took 0.651 us. A single producer waking every block and waiting for acknowledgements took 0.817 us. For four dependencies per visit across 48 visits, replacing graph edges with ideal point-to-point handoffs would save 0.061 ms/token. Round 2 needed 1.150 ms/token to reach 300 tok/s. The scope of the dependency matters when projecting that saving onto decode. [Microbenchmark](p7l3r3/dependency.cu), [raw event times](p7l3r3/dependency.txt), [Round 2 rates](p7l3r2/default.txt)
+
+| Dependent work | 2 blocks, us/edge | 16 blocks | 82 blocks | 192 edges at 82 blocks, ms |
+|---|---:|---:|---:|---:|
+| Empty kernels in one graph | 0.636 | 0.597 | 0.668 | 0.128 |
+| Cooperative grid barrier | 0.663 | 0.652 | 0.651 | 0.125 |
+| Release/acquire to the next block | 0.385 | 0.358 | 0.352 | 0.068 |
+| One block publishes to all others, with acknowledgement | 0.739 | 0.798 | 0.817 | 0.157 |
+
+Each graph has N+1 empty kernels and N edges. Each resident launch performs N handoffs. GPU events time 16 replays per sample, with seven samples per chain length and N = 32, 128, 512, 1024. Slopes use the 1024-minus-128 median divided by 896. This subtracts fixed launch and counter-reset work. The ring checks its final sequence number, and broadcast checks the total acknowledgements. All tests used 128-thread blocks. Release/acquire has device scope. The broadcast timing includes consumption by every worker before the next publication. [Implementation and final-state checks](p7l3r3/dependency.cu), [CUDA 12.8 cooperative groups and graphs](https://docs.nvidia.com/cuda/archive/12.8.0/cuda-c-programming-guide/index.html), [PTX memory model](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#memory-consistency-model)
+
+### What the decoder actually pays
+
+Across 119 warmed head-to-head intervals, the top three within-token boundaries by aggregate signed idle time were router to Q2_K gate/up (42 calls, 5.688 us/token), residual mix to controller down (48, 3.958 us), and controller down to apply (48, 3.849 us). The respective mean gap per visit was 0.135, 0.082 and 0.080 us. An empty-node slope includes dispatch and block execution. Subtracting the end of one active kernel from the start of the next measures a different interval. Nsight node timestamps even overlap slightly for some serial pairs. The 332 us softcap-to-next-input gap crosses the host decode boundary. [Ranked edges and kernel durations](p7l3r3/control-edges.txt), [trace analysis](p7l3r3/edges.py)
+
+Of the 4.850 ms/token instrumented control interval, 4.503 ms was active kernel time, 0.332 ms crossed the host boundary, and the remaining signed gaps summed to 0.015 ms. The 1.6 ms difference from the isolated matvec stream includes real attention, routing and glue computation. The first combined candidate cut active kernel time by 0.062 ms/token. The final grid-barrier build cut it by 0.087 ms, from 4.503 to 4.416 ms, and reduced 584 launches to 514. Its 46 fused down dots took 6.825 us against 7.668 us for the matched graph sites. Its 24 apply/pack launches took 6.766 us. [Interval accounting](p7l3r3/final/token-spans.txt), [matched sites](p7l3r3/final/matched-edges.txt), [launch coverage](p7l3r3/final/coverage.txt), [short trace](p7l3r3/final/short-edges.txt)
+
+Router work cost 350 us/token, residual mixes 285, controller-down 198, apply 147, expert sum/state update 98, separate RMS/packing 93 and SITU 89. Q2 gate/up itself averaged 19.442 us on the 42 directly adjacent router edges. Each experiment below timed useful work from the first producer's start through the last consumer's finish. Rows with different coverage use their own matched graph control. [Kernel and edge inventory](p7l3r3/control-edges.txt), [matched FFN spans](p7l3r3/matched-ffn.txt), [controller spans](p7l3r3/controller-trace.txt)
+
+| Experiment | Matched visits/token | Graph, us/visit | Best experiment, us/visit | Local source tag |
+|---|---:|---:|---:|---|
+| Router and routed gate/up in one resident grid | 42 | 26.703 | 30.921 | `p7l3r3-resident-route` |
+| Mix and controller down, including two fallback calls | 48 | 7.693 | 6.742 | `p7l3r3-ctrl-pair` |
+| Controller down and apply | 48 | 7.272 | 7.082 | `p7l3r3-ctrl-pair` |
+| Router through FFN state update | 42 | 40.585 | 62.171 | `p7l3r3-full-ffn` |
+| Attention input projection through FFN state update | 19 | 71.734 | 96.101 | `p7l3r3-complete-layer` |
+| Controller apply plus RMS/Q8 packing | 24 | 7.680 | 7.130 | `p7l3r3-apply-pack` |
+
+The router/up kernel uses the 16-row Q2_K dot from the production-rounded Round 2 floor, the live normalized Q8 input and the router's actual top-eight experts. The FFN extension releases activation tiles per expert after SITU, then releases each 32-channel output tile after all eight contributions arrive. It performs the convolution and state writes in the same launch. These kernels matched all 64 vocabulary rows at each of the three tested residency settings. Two visits have a message operation between router and gate/up. Four use IQ4_NL experts. [Bit-exact floor](p7l3r2/bitwise-floor.txt), [router/up](p7l3r3/route-visit.txt), [full FFN](p7l3r3/full-visit.txt), [matched comparisons](p7l3r3/matched-ffn.txt)
+
+The complete short-cache visit runs the per-KV-head projection instruction list, cache update and attention, output projection and recurrent convolution, router, gate/up, SITU, down and recurrent FFN update. It replaced eight graph nodes at each of 19 direct visits. It matched the 64 reference rows. The complete kernel used 128 registers/thread and actually launched 160 blocks of 256 threads at the higher requested residency. The graph could launch a separately sized grid for each stage. Higher requested residency left the complete visit at 96.10 us. Its 24.37 us loss per visit failed the brief's gate for scaling this design to a token. The Round 2 floor supplies known inputs and routes up front, so its 2.775 ms cannot serve as a live decode time. [Layer traces](p7l3r3/layer.txt), [matched spans](p7l3r3/layer-and-pass.txt), [registers and launch geometry](p7l3r3/resources.txt), [Hazy Research persistent decoder](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles)
+
+The winning mixed-state down dot recomputes the 2304-channel state mix in shared memory in each two-rank controller block. One block writes each mixed column for later users. The isolated fused calls took 6.683 us across 46 sites. Reading the message half early raised this to 7.058 us. Fusing down with apply saved less and competes for the same down operation. The apply/pack kernel instead retains 32-channel groups while 32 blocks exchange their RMS partials, then writes Q8_1 directly. The selected 256-thread version took 7.131 us. A separate router sweep loaded four expert rows in registers and formed channel products during normalization. It took 7.057 us versus 7.269 with eight shared rows. Reducing only the shared-memory tile width lost. [Mix/down](p7l3r3/mix-down.txt), [down/apply](p7l3r3/ctrl-pair.txt), [apply/pack](p7l3r3/apply-pack.txt), [shared-row sweep](p7l3r3/router-tiles.txt), [register-row sweep](p7l3r3/reg-router.txt)
+
+Real graph branches split the independent message half from the state half of the controller dot. Moving the fork from the mix to the preceding projection/FFN sum, then before attention, gave 3.071, 3.468 and 4.862 us of concurrent work per matched controller. The earliest fork had the most overlap and ran at 222.80 tok/s, below the 224.14 tok/s mix-local fork. Another schedule batched message halves from a complete pass into a 64-by-48 grid, twice per token. The side stream ran about 19.51 us per pass, with 4.21 us of measured overlap. Both exact pass schedules ran near 221 tok/s. Combining those prepared terms with the mixed-state down dot changed all 64 logit rows, with maximum absolute difference 1.44184 and unchanged argmaxes. Both rows of a graph-disabled cross-check also differed. The default excludes that variant. [Branch screens](p7l3r3/branches.txt), [measured overlap](p7l3r3/controller-trace.txt), [pass timings](p7l3r3/layer-and-pass.txt), [pass screen](p7l3r3/pass-screen.txt), [prototype logit hashes](p7l3r3/prototype-logits.txt)
+
+A further 20 projection/attention schedules let the last projection tile for each KV head continue directly into attention. The fastest took 26.059 us against about 23.24 us for the two graph kernels. The exact FFN state-update-to-residual-mix experiment took 6.426-8.324 us against 6.064 us for the same 46 graph pairs, depending on the residence and tile schedule. These stages and the cross-pass branches remain reproducible at their experiment tags. [Dense continuation sweep](p7l3r3/drain.txt), [control](p7l3r3/control-edges.txt), [FFN sum/mix](p7l3r3/tail-mix.txt), [matched site timings](p7l3r3/matched-edges.txt)
+
+### Controller-to-router and live synchronization
+
+The next FFN boundary occurs 24 times, where the router consumes a single controlled state. One cooperative launch overlapped router weight reads with generation of that state. Three gate tile widths and two producer layouts matched all 64 vocabulary rows. At eight rows per router block, 72 dedicated apply blocks plus 16 router blocks took 11.116 us/pair. The two-node control took 8.870 us/pair. Letting the router blocks compute their own share of the applied channels took 13.043 us at that width. The best single-launch configuration also lost unprofiled, at 217.98 vs 222.00 tok/s in the same screen. The narrower standalone single-state specialization gave 8.669 us/pair but no consistent unprofiled advantage. [Controlled-router comparison](p7l3r3/controlled-control.txt), [six fused layouts](p7l3r3/controlled.txt), [unprofiled benchmark](p7l3r3/controlled-bench.txt), [standalone widths](p7l3r3/router-width.txt)
+
+The apply/pack kernel also provides a real-work counterpart to the empty-edge test. Its 96 CTAs perform three independent RMS reductions, with 32 partials per reduction. All four schedules matched the 64-row baseline. The original acknowledgement protocol took 7.173 us per call. A cooperative grid barrier took 6.809 us, an alternating per-group phase took 6.977 us, and having the last warp publish the 32 lane-specific normalization scales took 7.074 us. The fastest kernel in the trace did not lead the initial unprofiled tg128 screen. The forward/reverse crossover started each run at 63 C and collected ten tg128 repetitions per cell. With register tiles on queried routers, grid sync reached 225.39 tok/s, alternating phases 225.02, and acknowledgement 224.68. Extending register tiling to the single-state routers gave 225.34 with grid sync. The selected source uses the cooperative grid barrier, drops all three flag arrays from this path, and keeps the established router for the controlled single-state cases. [Live sync timings](p7l3r3/pack-sync.txt), [matched crossover](p7l3r3/sync-pairs.txt)
+
+### Reproducing the Round 3 measurements
+
+The archived baseline is the Release sm_86 build of 16264c6 described in Round 2. Round 3 benchmarks launch that executable with its own shared libraries. The test driver selects the 3090 before starting a CUDA process. Its four-depth run and its off/on/on/off comparisons start at or below 63 C. Each per-depth mean in the paired comparison pools two runs with three tg128 repetitions each. Quality, DSpark and operator commands use the same Q2 model and corpus. Full Nsight databases are under `build/p7l3/r3-*.sqlite`. [Test driver](p7l3r3/validate.sh), [reference build instructions](#round-2-on-gpu0), [logit driver](p7l3/logits.cpp), [DSpark trace checker](p6/mr_check.cpp), [CUDA operator fixtures](../tests/test-backend-ops.cpp)
+
+```bash
+. perf/p5env.sh
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0
+export LD_LIBRARY_PATH="$PWD/build/bin"
+mkdir -p build/p7l3r3
+"$HOME/opt/cuda-12.8/bin/nvcc" -O3 -std=c++17 -arch=sm_86 -rdc=true perf/p7l3r3/dependency.cu -o build/p7l3r3/dependency
+build/p7l3r3/dependency
+export P7L3R3_DEFAULT=1 P7L3R3_WORK=build/p7l3r3/final P7L3R3_OUT=perf/p7l3r3/final
+for stage in bench quality mr ops guards; do perf/p7l3r3/validate.sh "$stage" || break; done
+```
+
+At `p7l3r3-complete-layer`, set `IK_ROUTE_VISIT=3 IK_COMPLETE_LAYER=1` to exercise the 19 eligible layers. At `p7l3r3-full-ffn`, use `IK_ROUTE_VISIT=3 IK_FULL_FFN=1` for the 42 FFN visits. At `p7l3r3-resident-route`, set only `IK_ROUTE_VISIT=3`. Values 1-3 request resident blocks per SM, subject to the reported occupancy and whole-expert-grid rounding. Use `IK_ROUTER_TILE=-4` at `p7l3r3-register-router`, `IK_CTRL_BRANCH=-1` or `IK_CTRL_PAIR=1` at `p7l3r3-ctrl-pair`, and `IK_APPLY_PACK=1` at `p7l3r3-apply-pack`. The earlier `p7l3r3-mix-down` prototype predates the shared-memory alignment fix. [Route sweep](p7l3r3/route-visit.txt), [layer timing](p7l3r3/layer-and-pass.txt), [controller measurements](p7l3r3/controller-trace.txt)
+
+At `p7l3r3-controller-branches`, `IK_CTRL_BRANCH=1, 2, 3` select progressively earlier forks (set one integer per run). At `p7l3r3-message-pass`, use `IK_MESSAGE_PASS=1` for serial, `2` for the side stream. At `p7l3r3-projection-drain`, `IK_DENSE_DRAIN=-2 IK_DRAIN_CTAS=16` selects the best dense continuation. At `p7l3r3-tail-mix`, use `IK_TAIL_MIX=-4`. The Nsight commands profile CUDA graph nodes and export SQLite for matched-site analysis. [Branch overlap](p7l3r3/controller_trace.py), [layer spans](p7l3r3/layer_spans.py), [matched sites](p7l3r3/matched_edges.py), [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)
+
+```bash
+"$HOME/opt/cuda-12.8/nsight-systems-2024.6.2/bin/nsys" profile -t cuda --sample=none --cpuctxsw=none --cuda-graph-trace=node --export=sqlite -o build/p7l3r3/repro build/bin/llama-bench -m "$Q2" -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 0 -n 128 -d 0 -r 1
+python3 perf/p7l3r3/edges.py build/p7l3r3/repro.sqlite
+```
+
+At `p7l3r3-router-width`, enable `IK_DEPENDENCY_FUSION=1` first. `IK_CONTROLLED_ROUTER=1` selects standalone single-state routing. `IK_CONTROLLED_SINGLE_ROWS=2, 4, 8` selects one row-tile width. Controlled-router modes 2/3/4 select dedicated apply blocks with four/eight/two router rows. Negative modes reuse router blocks for apply. `IK_ROUTER_DIRECT_ONLY=1` leaves controlled states on the original eight-row router. `IK_PACK_SYNC=0, 1, 2, 3` select acknowledgement, grid, alternating per-group phase and scale publication. [FFN graph construction](../src/models/inkling2.cpp), [local CUDA implementation](../ggml/src/ggml-cuda/inkling.cu), [Round 2 dense tile program](../ggml/src/ggml-cuda/inkling-visit.cuh), [quantized products](../ggml/src/ggml-cuda/vecdotq.cuh)
+
+## Round 4 on GPU0
+
+### Plain decode throughput
+
+The default reached **233.36 tok/s at depth zero** on GPU0. Compared with the Round 3 schedule in the same release binary, the gain was 3.98% at zero and 2.60-3.12% across the three longer prefixes. The original `16264c6` control and the default each ran all four depths in one invocation of the requested three-repeat tg128 benchmark. The Round 3 retest was measured at the start of this round. [Default benchmark](p7l3r4/final/official-on.txt), [fresh original control](p7l3r4/final/official-base.txt), [Round 3 retest](p7l3r4/round3.txt)
+
+| Prefix | 16264c6 | Round 3 retest | Round 4 | Gain over 16264c6 | Paired off | Paired on | Paired gain |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 215.92 | 225.06 | 233.36 | +8.08% | 224.34 | 233.27 | +3.98% |
+| 4096 | 198.04 | 206.84 | 213.68 | +7.90% | 207.52 | 214.00 | +3.12% |
+| 16384 | 186.24 | 194.27 | 200.00 | +7.39% | 194.46 | 199.52 | +2.60% |
+| 32768 | 171.00 | 178.57 | 183.89 | +7.54% | 179.44 | 184.75 | +2.96% |
+
+All rates are tok/s. For each depth the release binary ran with Round 4 off, on, on and off. Every process started at 63 C and measured three repetitions. The final 32K process completed at 07:07:52 EST on November 22, 2026. The selected binary was built from `5d1f9e0`. The local code-only release tag is `p7l3r4-release-233tok` (`ab2ad69`), and the complete results tag is `p7l3r4-final-233tok`. [All 16 crossover trials](p7l3r4/final/paired.md), [validation timeline](p7l3r4/final/validation.txt), [GPU and build](p7l3r4/final/environment.txt)
+
+At 233.36 tok/s the measured token time is 4.285 ms. Reaching 300 tok/s requires a further 0.952 ms/token. For scale, the positive excess remaining in all profiled non-matvec families at zero sums to 0.486 ms/token under the traffic model. [Final per-kernel accounting](p7l3r4/final/kernel-deltas.md), [floor model](p7l3r4/latency.py)
+
+### Kernel latency and logical traffic
+
+The first generated token at depth 0 took 562 kernel launches, including 48 clears of the 19,968-float recurrent state rows. The first token after a 16,384-token prefix and the following steady-state tokens at both depths took 514 launches. Each table groups identical kernel templates and grid/block dimensions. It reports calls per token, mean and total duration, logical bytes, modeled minimum time and signed excess. The single-step tables retain the measured variation among visits within that token. [First token at each depth](p7l3r4/latency-first.md), [65th token](p7l3r4/latency-single.md), [average of generation indices 8-127](p7l3r4/latency-mean.md), [state clear](../src/llama-graph.cpp), [observed graph shapes](p7l3r4/shapes.txt)
+
+Each modeled floor is 2.5 us plus the distinct required tensor bytes divided by GPU0's measured 889 GB/s streaming bandwidth. Repeated reads of a shared input count once per launch. The attention estimate counts live Q8_0 cells, current K/V writes, recurrent state, half masks, positions, relative table rows and the 3,072 IQ4_NL gate rows. Controller and router estimates include their matrix reads. Intermediate scratch traffic, cache-line overfetch and optional projection residual reads are excluded. The 2.5 us intercept follows the Round 4 brief. A cached input or a small kernel can beat this model. Nsight durations already include the kernel execution intervals, so graph edge time is not added again. [Per-kernel byte formulas and trace query](p7l3r4/latency.py), [GPU0 bandwidth measurement](p6p/bandwidth.txt), [Round 4 brief](PHASE7_LEVER3_BRIEF.md), [layer graph](../src/models/inkling2.cpp), [CUDA kernels](../ggml/src/ggml-cuda/inkling.cu), [fused gate and scan](../ggml/src/ggml-cuda/inkling-visit.cuh)
+
+On the first depth-zero token, the excess was 150.54 us for routing, 140.91 for controller mix/down and 129.14 for gate/attention. After the KV history grew, gate/attention ranked first at 243.70 us on average. At depth 16K it ranked first immediately at 560.64 us and averaged 524.74 us. Of the latter, 405.71 us came from 40 sliding-window visits and 119.03 us from eight full-attention visits. Controller apply/pack and standalone residual mixes were the next two steady-state targets. SITU and the expert sum both ran below the launch-plus-streaming model at both depths. [First-token ranking](p7l3r4/latency-first.md), [steady-state ranking](p7l3r4/latency-mean.md)
+
+The original 16264c6 executable measured 215.80/198.06/186.20/171.02 tok/s. The starting Round 3 source measured 225.06/206.84/194.27/178.57 at prefixes 0/4096/16384/32768. Measurements used the local 82-SM RTX 3090, IQ4_NL/Q2 model, flash attention and Q8_0 K/V. [Fresh 16264c6 control](p7l3r4/baseline-16264c6.txt), [fresh Round 3 control](p7l3r4/round3.txt), [commands](p7l3r4/run.sh)
+
+### Experiments on the ranked kernels
+
+All timings below come from GPU0 running the real model. The isolated family times are means over the last 120 timed tokens. The screening runs compare two processes for each setting in A/B/B/A order. Each process benchmarks three tg128 repetitions. The logs record the initial GPU temperature. Small differences in these warm screenings carry less weight than the final temperature-matched comparison. Each local source tag begins with `p7l3r4-`. [Crossover runner](p7l3r4/pair.sh), [trace runner](p7l3r4/run.sh), [kernel-time extraction](p7l3r4/summarize.py)
+
+| Kernel | Change and measurement | Local source tags and measurements |
+|---|---|---|
+| Short gate/attention | In a 36-configuration sweep, six gate blocks and one scan block per KV head, each with 384 threads, cut 12.35 to 11.12 us/visit. Only 256 threads enter the scan. Loading V after scoring also shortened the scan. The grid crossover gained 0.90% at depth zero. | `gate-geometry`, `mma-order`, `gate-waves`. [Geometry trace](p7l3r4/geometry-kernels.txt), [paired geometry](p7l3r4/geometry-pair-384.txt), [instruction ordering](p7l3r4/mma-kernels.txt), [gate/scan timing](p7l3r4/wave-times.txt) |
+| Long gate/attention | Each warp checks 32 mask entries and skips a 16-cell MMA step if it has no historical contribution. This reduced the average over all 48 visits from 27.01 to 25.84 us at 16K. Paired decode gained 0.70%. The full-attention visits retain the dense scan. | `attention-tail`. [Family trace](p7l3r4/scan-kernels.txt), [crossover](p7l3r4/scan-pair-16384-2.txt), [hashes](p7l3r4/scan-hashes.txt) |
+| Router | A transposed butterfly reduces several moments in one warp. For one state without a query the kernel obtains the RMS directly. Queried states retain the original weighting and normalization order. The winning register schedule computes four expert rows. Native routing went from about 6.92 to 6.74 us/visit. | `warp-moments`, `router-warp`. [State and row schedules](p7l3r4/warp-kernels.txt), [four-row crossover](p7l3r4/warp-pair-4.txt), [exactness](p7l3r4/warp-hashes.txt) |
+| Controller down and residual mix | 576 threads cover all 576 float4 channels in one pass. A block computes two down rows for one controller head or four rows for three heads. The one-head and three-head timings went from 5.374 to 5.136 and 8.608 to 7.003 us/visit in the geometry tests. The standalone mix went from 4.282 to 3.696 us. | `residual-tiles`, `warp-moments`. [Grid sweep](p7l3r4/tileres-kernels.txt), [down crossover](p7l3r4/tileres-pair-down.txt), [residual crossover](p7l3r4/tileres-pair-res.txt) |
+| Controller apply and pack | Three 256-thread groups compute the three channel stripes concurrently. The groups reduce gain and forget values using the same eight-lane sum tree. Time fell from 7.00 to 6.67 us/call. | `apply-tiles`. [Trace](p7l3r4/apply-kernels.txt), [crossover](p7l3r4/apply-pair-5.txt), [hashes](p7l3r4/apply-hashes.txt) |
+| Expert sum and SITU quantization | 64-thread blocks broadcast eight routing weights within each warp and preserve the expert accumulation order. SITU addresses 1,152 channels directly, with one grid dimension for each expert. The expert sum fell from 2.052 to 1.665 us/call and SITU from 1.851 to 1.739 us/call. Each runs 48 times/token. | `ctrl-teams`. [Epilogue traces](p7l3r4/teams-kernels.txt), [expert-sum crossover](p7l3r4/sum-pair.txt), [SITU crossover](p7l3r4/situ-pair.txt), [hashes](p7l3r4/teams-hashes.txt) |
+
+Moving the current K/V update into the upstream projection cost 2.00-2.14% across the two test depths. Publishing KQ scores for a later PV scan cost 4.01-6.16%. Distributing the short history across one to eight additional blocks cost 0.71-1.43%. A separate short attention kernel with warp-local reductions reached 11.29 us/visit. Moving gate rows into the upstream projection increased producer latency. These comparisons include the consumer and producer costs. [Current K/V](p7l3r4/prepare-pair-0.txt), [split scores](p7l3r4/scores-pair-16384.txt), [history stripes](p7l3r4/stripes-kernels.txt), [warp-local scan](p7l3r4/local-kernels.txt), [gate waves](p7l3r4/waves-kernels.txt)
+
+The long-context cache-staging tests compared direct, asynchronous and shared-memory K/V reads. Staging cost 0.66% in the paired test. Computing a second score tile ahead of the first value tile cost 0.14%. A different gate/scan completion protocol tested coalesced partials, gate sigmoid placement and a cooperative merge. [Cache-staging trace](p7l3r4/stageq-kernels.txt), [crossover](p7l3r4/stageq-pair.txt), [score-ahead trace](p7l3r4/ahead-kernels.txt), [crossover](p7l3r4/ahead-pair.txt), [join schedules](p7l3r4/join-kernels.txt)
+
+Every one of the 7,077,888 router weights round-tripped through BF16. FP16 changed 1,453. A duplicate BF16 router layout used 14.2 MB and gave little throughput benefit. An eight-row packed IQ4_NL gate layout gained 0.45% at a duplicate-layout cost of 95.6 MB. The candidate uses the native weights. Splitting routing into normalization, matrix-vector and top-eight stages slowed decode. Adaptive probability/ID keys reproduced the sort order but lost 0.43-0.88%. Dedicated controller message teams gained 0.36% but were slower than the selected down geometry. Asynchronous and split controller weight loads lost 0.54-1.43%. [Weight audit](p7l3r4/router-bits.txt), [gate layouts](p7l3r4/tiles-kernels.txt), [packed gate crossover](p7l3r4/tiles-pair-1.txt), [split router](p7l3r4/router-kernels.txt), [sort keys](p7l3r4/keys-kernels.txt), [controller teams](p7l3r4/teams-pair.txt), [controller loads](p7l3r4/down-kernels.txt)
+
+The experiments use the repository's tensor layouts, online softmax, Q8 packing, IQ4_NL dots and CUDA warp primitives. The quantized attention code identifies the Project Maya Q8 tensor-core implementation from which the original kernel was derived. No external kernel implementation was added in this round. [Attention and source attribution](../ggml/src/ggml-cuda/inkling.cu), [gate dot](../ggml/src/ggml-cuda/inkling-visit.cuh), [quantized dot primitives](../ggml/src/ggml-cuda/vecdotq.cuh), [SITU](../ggml/src/ggml-cuda/unary.cu)
+
+
+At 16K, loading each 16-component relative-position row as four aligned float4 values and padding the shared head stride from 32 to 36 floats reduced the short-range and full visits from 19.15/62.75 to 17.71/60.78 us. Paired decode gained 0.72% at 16K and 0.01% at depth zero. The 16 FMAs retain their original order. Each of the six bias schedules matched all 72 tested rows. Calculating the bias before the key dot and broadcasting table entries across four lanes both gave smaller gains. The compact candidate before this change gained 3.76%/2.86%/2.15%/2.70% across the four warm crossovers. [Relative-bias trace](p7l3r4/bias-kernels.txt), [16K crossover](p7l3r4/bias-pair-16384-3.txt), [relative-bias hashes](p7l3r4/bias-hashes.txt), [candidate hashes](p7l3r4/slim-hashes.txt), [32K crossover](p7l3r4/slim-pair-32768.txt)
+
+Assigning additional gate rows to empty sliding-window splits was slower across all tested proportions with both last-block and cooperative merges. A different last-block merge lost 0.85% in paired decode despite shortening its own kernel slightly. The BF16 staged four-row router gained 0.09% over BF16 without staging, and the fixed-width bitonic sort gained 0.06% over its native control. [Masked split schedules](p7l3r4/balance-kernels.txt), [completion crossover](p7l3r4/join-pair.txt), [router staging](p7l3r4/rstage-pair.txt), [bitonic crossover](p7l3r4/bitonic-pair.txt)
+
+A two-kernel controller/router variant published 64 or 256 exact RMS partials while applying the controller. All six variants matched the 64-row reference. The fastest producer and router together took 382.5 us/token against 379.9 for the compact control. Its paired result was -0.06%. Sharing attention merge coefficients and skipping entirely empty short-scan warps gained 0.36% in the short-context crossover. The shared combine lengthened long-context attention. [RMS handoff](p7l3r4/rms-kernels.txt), [paired RMS handoff](p7l3r4/rms-pair-0-2.txt), [attention combines](p7l3r4/combine-kernels.txt), [short crossover](p7l3r4/combine-pair-0-6.txt)
+
+Keeping the gate's Q8 input in registers across rows cut the 16K family from 25.91 to 25.51 us/visit in a pre-vector build. Grouping two or four rows pushed it above 32 us/visit. The single-row long-context crossover gained 0.49%, with its two control processes 3.15 tok/s apart. The short sweep favored the ordinary one-row loop. Transposing the Q/R clipping sums or using a native integer reduction for absolute maxima saved up to 4.3 us/token in the short trace and increased time at 16K. The release keeps the vectorized bias and native gate layout. [Gate grouping](p7l3r4/gateregs-kernels.txt), [long crossover](p7l3r4/gateregs-pair-16384-1.txt), [warp primitives](p7l3r4/prim-kernels.txt), [short crossover](p7l3r4/prim-pair-0-2.txt), [long crossover](p7l3r4/prim-pair-16384-1.txt), [all individual crossovers](p7l3r4/screenings.md)
+
+### Final kernel latency
+
+In the same release binary, the steady token still used 514 launches. At depth zero, the profiled kernel intervals summed to 4.448 ms with Round 4 disabled and 4.268 ms with it enabled. The gate/attention visits saved 79.31 us/token, controller down 46.75, expert sum 18.22, standalone residual mix 14.06, router 8.67, controller apply/pack 7.61 and SITU 5.44. Together the non-matvec families saved 177.17 us/token. At 16K the sum of all kernel intervals fell from 5.156 to 4.965 ms. The sliding and full attention visits saved 81.36 and 12.21 us/token, respectively. The independent throughput runs measure wall time. [Matched kernel comparison](p7l3r4/final/kernel-deltas.md), [all launches](p7l3r4/final/coverage.txt)
+
+The release tables give every kernel's measured duration, launch configuration, byte estimate, floor and excess for the first token, the 65th token and the steady mean. After optimization, sliding gate/attention, router and controller down had the three largest positive excesses at depth zero. Their steady totals were 144.09, 134.81 and 89.97 us/token. The remaining positive excess across all non-matvec families was 486.46 us at zero and 752.45 us at 16K, counting full and sliding attention separately. These sums use the 2.5-us-plus-streaming floor defined above. [Final first token](p7l3r4/final/latency-first.md), [65th token](p7l3r4/final/latency-single.md), [steady mean](p7l3r4/final/latency-mean.md), [grouped comparison](p7l3r4/final/kernel-deltas.md)
+
+### Exactness and backend checks
+
+Against the separately built `16264c6` reference, the default produced identical bytes for all 200,058 FP32 logits in each of 88 rows. These were 64 rows after a 200-token prefix and eight rows after each of 4K, 16K and 32K. Prefill PPL was 3.0530 on eight 2,048-token chunks. Single-token decode PPL was 4.1979 on two 1,024-token chunks with `-ub 1`. Both estimates and their reported uncertainty matched the reference. [Full-row hashes](p7l3r4/final/logits.txt), [PPL logs](p7l3r4/final/ppl.txt), [validation commands](p7l3r4/validate.sh)
+
+Two different token streams shared one KV buffer. Their prefills alternated in 47-token chunks, and their subsequent single-token steps alternated for 32 positions per sequence. The short and long prefix cases each produced 64 rows. All 128 matched in three runs using `16264c6`, Round 4 disabled and the default. Eight fallback configurations also matched all eight checked rows per configuration. [Interleaved hashes](p7l3r4/final/sequences.txt), [checker](p7l3/logits.cpp), [fallback checks](p7l3r4/final/fallbacks.txt)
+
+All 12 DSpark comparisons passed under `IK_MR=1`, including the captured 1,699-row replay. Across 2,834 rows the maximum absolute logit difference was zero. The CUDA backend passed all 3,988 supported cases in the four selected operator groups. Compute Sanitizer's synchronization checker reported zero errors on the selected gate/attention and cooperative pack kernels for two graph-disabled decode steps at each of prefixes 113 and 1129. [DSpark results](p7l3r4/final/mr.txt), [backend results](p7l3r4/final/ops.txt), [synchronization checks](p7l3r4/final/synccheck.txt)
+
+### Reproducing the release measurements
+
+The release binary was built from `5d1f9e0`, tagged `p7l3r4-default-vector`. The four production CUDA files also form commit `ab2ad69` on the Round 3 final commit `549883d`. Their source bytes match the measured revision. The `p7l3r4-release-233tok` tag identifies that standalone commit. The measurement scripts and detailed evidence are on `inkling-3090-lever3`. [Release environment](p7l3r4/final/environment.txt), [kernel dispatch](../ggml/src/ggml-cuda/inkling.cu), [gate/scan geometry](../ggml/src/ggml-cuda/inkling-visit.cuh)
+
+The default selects the matching single-token path on an 82-SM GA10x device. `IK_GLUE_FAST=0` selects the Round 3 schedule. Both settings use the same calibrated GGUF. The validation driver selects GPU0 before starting each CUDA process. It uses the archived `16264c6` executable built under this worktree as described in the Round 2 reproduction instructions. [Validation driver](p7l3r4/validate.sh), [archive build instructions](#round-2-on-gpu0), [synchronization checker](p7l3r4/synccheck.sh)
+
+```sh
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_COMPILER="$HOME/opt/cuda-12.8/bin/nvcc" -DCMAKE_CUDA_ARCHITECTURES=86
+cmake --build build -j8
+for stage in metadata quality mr ops guards sequences trace bench; do
+    bash perf/p7l3r4/validate.sh "$stage"
+done
+bash perf/p7l3r4/synccheck.sh
+```
