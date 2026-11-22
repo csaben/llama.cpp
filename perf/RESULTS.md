@@ -1756,3 +1756,9 @@ The release already caches target verifier graphs by width and can pause or shor
 | model-only | 234.5 | 202.7 | 268.5 |
 | ema | 236.8 | 215.4 | 267.4 |
 | release-after | 255.9 | 224.3 | 300.0 |
+
+### SM86 Q8_0 prefill dispatch
+
+Local candidate `2487b485` keeps the projected dense bias and the existing FP16 MMA arithmetic, unpacking eight Q8_0 values per worker as it fills a shared K or V tile. It applies to 128-wide heads, at least 128 query rows, both caches Q8_0, a per-head REL_BIAS mask and no gathered KV. The allocator and launcher share the same decision. Decode uses the existing kernel.
+
+Requiring 4,096 active keys mixed the two paths and slowed prefill to 3,390 / 3,059 / 2,654 tok/s in a crossover against 3,462 / 3,150 / 2,822. Switching to byte strides and explicit integer-to-half conversion at the same cutoff gave 3,395 / 3,059 / 2,652. At 16K the mixed path issued 2,672 conversions across 1,536 attention calls. Dispatching at every cache length measured 3,479 / 3,181 / 2,869 in the integrated kernel prototype. The all-layer reference profile issued zero whole-cache conversions at both 4K and 16K. Using the all-layer reference loader with the long-only allocator still lost speed, at 3,402 / 3,066 / 2,660. [Controls before](p9/selective-control/) and [after](p9/selective-after/), [mixed run 1](p9/selective1/), [mixed run 2](p9/selective2/), [byte strides](p9/byte/), [all lengths](p9/all/), [allocator control](p9/raw-sized/), [reference profiles](p9/direct/).
