@@ -1,3 +1,35 @@
+// An input tile produces up to eight rows for one KV head. The last producer runs that head's attention.
+struct ik_dense_tile {
+    short base, stride;
+    unsigned char rows, col;
+};
+
+template<int taps, bool gates = true>
+struct ik_dense_program {
+    ik_dense_tile tiles[138]{};
+    int count = 0;
+
+    constexpr void add(int base, int span, int col) {
+        for (int r = 0; r < span; r += 8) {
+            tiles[count++] = {short(base + r), short(span), (unsigned char) (r + 8 <= span ? 8 : span - r), (unsigned char) col};
+        }
+    }
+
+    constexpr ik_dense_program() {
+        add(0, 384, 0);
+        add(3072, 48, 0);
+        add(3456, 3, 0);
+        if constexpr (gates) { add(3480, 384, 0); }
+        add(6552, 128, 1);
+        if (taps) { add(7576, 4, 1); }
+        add(7576 + 32*taps, 128, 2);
+        if (taps) { add(8632, 4, 2); }
+    }
+};
+
+template<int taps, bool gates = true>
+static __device__ __constant__ ik_dense_program<taps, gates> ik_dense_code;
+
 // The scan reads Q, relative, sink, K and V first. Its sigmoid gate is needed only at the final store.
 static __device__ __forceinline__ void ik_project_row(const block_iq4_nl * w, const block_q8_1 * x, float * out, int row) {
     constexpr int blocks = 2304/QK4_NL;
@@ -74,11 +106,70 @@ static __global__ void __launch_bounds__(384) ik_dense_warp_roles(ik_attn_args a
     }
 }
 
+template<int taps, bool late>
+static __global__ void __launch_bounds__(256, 2) ik_dense_drain(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x,
+        float * values, int * counts, int workers, bool interleave) {
+    constexpr int gates = late ? 12 : 0;
+    const int block = blockIdx.x, t = threadIdx.x, warp = t/32;
+    const int task = interleave ? block/8 : block%(workers+gates), head = interleave ? block%8 : block/(workers+gates);
+    __shared__ int last;
+    const auto & program = ik_dense_code<taps, !late>;
+    block_q8_1 * out = (block_q8_1 *)a.dst;
+    if (task < workers) {
+        for (int k = task; k < program.count; k += workers) {
+            auto tile = program.tiles[k];
+            if (warp < tile.rows) {
+                const int row = tile.base + head*tile.stride + warp;
+                const int col = a.proj_ncols == 3 ? tile.col : 0;
+                ik_project_row(w, x + col*72, (float *)a.proj, row);
+            }
+        }
+        __syncthreads();
+        if (!t) { last = ik_atomic_add_acq_rel(counts+head, 1) + 1 == workers; }
+        __syncthreads();
+        if (!last) { return; }
+        if (!t) { ik_st_relaxed(counts+head, 0); }
+        a.proj_ncols = 1;
+        if constexpr (late) {
+            a.dst = values;
+            ik_attention_tile<block_q8_0, false, 3, true, false, taps, true, true>(a, head, 0);
+        } else {
+            ik_attention_tile<block_q8_0, true, 3, true, false, taps, true>(a, head, 0);
+        }
+    } else if constexpr (late) {
+        for (int i = (task-workers)*8 + warp; i < 384; i += gates*8) {
+            ik_project_row(w, x, (float *)a.proj, a.off_gate + head*384 + i);
+        }
+    }
+    if constexpr (late) {
+        __syncthreads();
+        if (!t) { last = ik_atomic_add_acq_rel(counts+8+head, 1) == gates; }
+        __syncthreads();
+        if (last) {
+            if (!t) { ik_st_relaxed(counts+8+head, 0); }
+            for (int i = t; i < 384; i += 256) {
+                const int c = 384*head + i;
+                float y = values[c]*(1.0f/(1.0f + expf(-a.proj[a.off_gate+c])));
+                ik_warp_store_q8_1(y, out + c/32, t%32, true);
+            }
+        }
+    }
+}
+
 template<int taps>
 static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
     const auto * x = (const block_q8_1 *) proj->src[1]->data;
     int * counters = ik_counters(ctx, 192, 8);
+    static const int drain = getenv("IK_DENSE_DRAIN") ? atoi(getenv("IK_DENSE_DRAIN")) : 0;
+    static const int workers = getenv("IK_DRAIN_CTAS") ? std::clamp(atoi(getenv("IK_DRAIN_CTAS")), 4, 144) : 48;
+    if (short_scan && drain) {
+        ggml_cuda_pool_alloc<float> values(ctx.pool(), 3072);
+        bool late = abs(drain) == 2;
+        auto kernel = late ? ik_dense_drain<taps,true> : ik_dense_drain<taps,false>;
+        kernel<<<8*(workers + (late ? 12 : 0)), 256, 0, ctx.stream()>>>(a, w, x, values.get(), ik_counters(ctx, 192, 16), workers, drain < 0);
+        return;
+    }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
     if (short_scan) {
         ggml_cuda_pool_alloc<float> values(ctx.pool(), 3072);

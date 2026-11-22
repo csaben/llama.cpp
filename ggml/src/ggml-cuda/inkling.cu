@@ -4988,38 +4988,6 @@ static __device__ __forceinline__ void ik_ffn_tile(ik_router_args args, ik_exper
     }
 }
 
-// An input tile produces up to eight rows for one KV head. The last producer runs that head's attention.
-struct ik_dense_tile {
-    short base, stride;
-    unsigned char rows, col;
-};
-
-template<int taps>
-struct ik_dense_program {
-    ik_dense_tile tiles[138]{};
-    int count = 0;
-
-    constexpr void add(int base, int span, int col) {
-        for (int r = 0; r < span; r += 8) {
-            tiles[count++] = {short(base + r), short(span), (unsigned char) (r + 8 <= span ? 8 : span - r), (unsigned char) col};
-        }
-    }
-
-    constexpr ik_dense_program() {
-        add(0, 384, 0);
-        add(3072, 48, 0);
-        add(3456, 3, 0);
-        add(3480, 384, 0);
-        add(6552, 128, 1);
-        if (taps) { add(7576, 4, 1); }
-        add(7576 + 32*taps, 128, 2);
-        if (taps) { add(8632, 4, 2); }
-    }
-};
-
-template<int taps>
-static __device__ __constant__ ik_dense_program<taps> ik_dense_code;
-
 struct ik_layer_args {
     ik_attn_args a;
     const block_iq4_nl * wi;
