@@ -1,5 +1,32 @@
 # Phase 6 hand-off (keep current; newest status first)
 
+## Round 3 status (2026-11-21, in progress)
+
+Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Raw outputs: `perf/p6/r3_*`. Run-to-run spread of one spec_probe cell is
+large (edit max 3: 267 and 297 tok/s in two runs of the same build), so round 3 cells are medians of 3 (`SPEC_REPS=3`).
+
+Done (commits after `59449ce`):
+- Profile of a round (`LLAMA_SPEC_PROF=1` wall timers in the server, `perf/p6/r3_prof.sh <n_max> "<kinds>"`; nsys kernel order of
+  one round with the scratch script described in RESULTS "Round 3"). Edit, max 3, 13.1 ms per round under nsys: window 9.77
+  (body 9.19, target head 0.38), target sampling + feature copies 0.25, inject 0.46, host before the draft 0.3, drafter graph
+  1.66 (3 layers 0.55, base logits 0.38, 3 head steps 0.83 of which fold matvec 0.37), logits copy 0.25, host scan 0.29, next
+  target batch 0.26.
+- `ggml_dspark_pick` (new op `GGML_OP_DSPARK_PICK`, CPU + CUDA in `softcap.cu`): per draft position the token and its margin are
+  reduced on the device; the drafter graph returns 2*n ints through the h_nextn output, no logits (3.2 MB copy + host scan gone,
+  and the pool/argmax/concat chain). `LLAMA_DSPARK_PICK=0` restores the round 2 path. Edit max 3: 265 -> 290-297, same 282/302.
+- Merged `inkling-3090-plain` (Codex, tag `p6p-final-215tok`) after its unit went inactive. Plain default on GPU1: 222.7 / 204.0
+  (d0 / d4096). Its short 256-cell attention schedule stays off under `IK_MR`; its shape-specialized attention instance is now
+  also used for window rows and for single tokens under `IK_MR` (K/V rows kernel specialized the same way): `mr_check` 0 rows
+  differ (300- and 1500-token prefixes). `IK_ATTN_FIXED_MR=0` restores the generic instances. Plain with `IK_MMA=3 IK_MR=1`:
+  214.5 / 200.4 (before 211.3 / 196.1).
+- Shortlist head: `perf/p6/shortlist_rank.py` (token frequency over system code + docs through /tokenize; ranking in
+  `perf/p6/shortlist_rank.bin`), `perf/p6/dspark_fold.py TARGET DRAFTER OUT RANK.bin 32768` writes `dspark_short_{head,fold,ids}`;
+  file `~/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf`. Graph: `src/models/dspark.cpp` (pick path),
+  `LLAMA_DSPARK_SHORT=0` scores the full vocabulary. Static list only (no context tokens yet).
+
+In flight: measuring the shortlist; then deferred feature injection on plain steps + policy retune (`adaptive_step` in
+`common/speculative.cpp`), final table (`perf/p6/r3_spec.sh`), RESULTS "Round 3", restore.
+
 ## Round 2 status (2026-11-21, finished)
 
 Brief: "Round 2" at the end of `perf/PHASE6_BRIEF.md`. New flag **`IK_MMA`** (off by default; `IK_MMA=3` is the setting to use,
