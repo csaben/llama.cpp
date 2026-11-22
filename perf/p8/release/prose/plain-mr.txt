@@ -1,0 +1,5 @@
+plain-mr       letter    prompt     40   384 tok   224.9 tok/s    1446 chars  runs 224/225/225/225/226
+plain-mr       science   prompt     38   384 tok   224.7 tok/s    1590 chars  runs 224/224/225/225/225
+plain-mr       scene     prompt     44   384 tok   224.6 tok/s    1461 chars  runs 224/225/225/225/225
+plain-mr       review    prompt     39   384 tok   224.6 tok/s    1429 chars  runs 224/225/225/225/225
+plain-mr       dialogue  prompt     43   384 tok   224.3 tok/s    1651 chars  runs 224/224/224/224/225
