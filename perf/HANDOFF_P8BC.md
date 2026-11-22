@@ -23,3 +23,5 @@ Both correctness batteries are complete. The eight additional depth tests matche
 The 384-token main matrix passed all 42 drafted cells (three identical repeats each) against a fresh plain server. That includes guarded and explicit adaptive n2/n3/n4 and guarded n6 on all six prompts. Additional prose, forced-width controls and the 3,000-token matrices are running serially on GPU 0. [Main 384-token measurements](p8bc/matrix/main-384.txt).
 
 The additional short prose suite passed every byte and ID in all 100 drafted requests. The last review/dialogue cells ran below the initial plain control. GPU 0 reached 86 C and reported changing clocks during these rows. Paired runs bracket both implementations and repeat the same prompt order. [Additional short prose](p8bc/matrix/prose-384.txt).
+
+All 280 short drafted requests (107,520 emitted IDs) now match same-flags plain, including the forced-width controls. The 3,000-token matrix is in progress. [Fixed-width 384](p8bc/matrix/fixed-384.txt).
