@@ -1417,7 +1417,8 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
         }
         {
             const char * env = getenv("LLAMA_DSPARK_ADAPTIVE");
-            adapt.on = env != nullptr && atoi(env) != 0 && n_seq == 1;
+            adapt.on    = env != nullptr && atoi(env) != 0 && n_seq == 1;
+            adapt.never = env != nullptr && atoi(env) == 2; // measurement only: never draft (the cost of the drafter's bookkeeping)
         }
         if (has_rnn_context) {
             const llama_model * model_tgt = llama_get_model(this->params.ctx_tgt);
@@ -1486,7 +1487,7 @@ protected:
     // steps; while drafting wins, a couple of plain steps now and then keep the plain rate current (it falls with
     // the context depth). The output does not depend on any of this: the target verifies every token.
     struct adaptive_state {
-        bool   on = false;
+        bool   on = false, never = false;
         bool   last_valid = false, last_drafted = false;
         int64_t   last_us = 0;
         llama_pos last_pos0 = -1;
@@ -1506,8 +1507,10 @@ protected:
                 adapt.tok_p = 0.8*adapt.tok_p + tok; adapt.us_p = 0.8*adapt.us_p + us; adapt.n_p++;
             }
         } else if (adapt.last_valid && (pos0 <= adapt.last_pos0 || now - adapt.last_us >= 250000)) {
+            const bool never = adapt.never;
             adapt = adaptive_state(); // another request
             adapt.on = true;
+            adapt.never = never;
         }
         bool do_draft = true;
         if (adapt.skip_left > 0) {
@@ -1552,7 +1555,7 @@ public:
 
         batch.clear();
 
-        if (adapt.on && n_seq == 1 && dparams[0].drafting && !adaptive_step(dparams[0].pos0)) {
+        if (adapt.on && n_seq == 1 && dparams[0].drafting && (adapt.never || !adaptive_step(dparams[0].pos0))) {
             return; // a plain step
         }
 
