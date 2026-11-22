@@ -1,0 +1,15 @@
+GPU1, 384-token lighthouse request, cap 3, isolated diagnostic libraries.
+In the diagnostic only, before adaptive_window, replace the n paid model IDs with 1 and their top-two margins with 16. History windows use their original IDs. The target model and verifier are unchanged.
+Both full messages and 384 token IDs matched the frozen plain response.
+
+Before sustained-loss backoff
+n3-adapt       prose     prompt     36   384 tok   111.9 tok/s    1474 chars  accepted/proposed 5/751
+dspark history: 2 windows, 4/6 accepted
+dspark policy: gain 0.57, steps by kind: 5 0 1 363 6 0 0 0 0 0
+  cost ms: 6.18 7.41 9.70 10.93 13.23
+
+With sustained-loss backoff
+n3-adapt       prose     prompt     36   384 tok   198.5 tok/s    1474 chars  accepted/proposed 4/43
+dspark history: 2 windows, 4/6 accepted
+dspark policy: gain 0.51, steps by kind: 362 0 0 5 9 0 0 0 0 0
+  cost ms: 4.85 5.82 7.62 9.50 10.90
