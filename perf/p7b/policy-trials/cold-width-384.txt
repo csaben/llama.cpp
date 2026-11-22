@@ -1,0 +1,12 @@
+n3-adapt       code      prompt     47   384 tok   249.9 tok/s    1320 chars  accepted/proposed 191/249  runs 249/250/250
+n3-adapt       edit      prompt   1025   384 tok   320.6 tok/s    1115 chars  accepted/proposed 273/275  runs 321/321/322
+n3-adapt       prose     prompt     36   384 tok   215.4 tok/s    1474 chars  accepted/proposed 120/174  runs 213/215/216
+dspark policy: gain 0.96, steps by kind: 42 78 107 22 11 0 0 0 0 0
+cost ms: 4.86 5.79 7.50 9.22 10.96
+chance by bin: 0.00/0 0.01/1 0.43/2 0.66/1 0.66/0 0.46/0 1.00/0 1.00/1
+n4-adapt       code      prompt     47   384 tok   246.7 tok/s    1320 chars  accepted/proposed 190/249  runs 246/247/247
+n4-adapt       edit      prompt   1025   384 tok   320.9 tok/s    1115 chars  accepted/proposed 287/294  runs 320/321/322
+n4-adapt       prose     prompt     36   384 tok   212.4 tok/s    1474 chars  accepted/proposed 122/187  runs 211/212/214
+dspark policy: gain 0.95, steps by kind: 38 79 109 21 10 0 0 0 0 0
+cost ms: 4.84 5.80 7.50 9.44 10.80 12.77
+chance by bin: 0.00/0 0.01/1 0.47/2 0.67/1 0.90/0 0.79/0 1.00/0 1.00/1
