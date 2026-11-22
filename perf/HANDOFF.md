@@ -1,3 +1,7 @@
+# Phase 8
+
+Stream A in progress on physical GPU1. Frozen source `401460d` passed its nine-file manifest. Fresh tg128 node traces rank gate/attention, routing and controller down first at both depths. [Ranked baseline](p8/base/latency-mean.md), [results](RESULTS.md#phase-8).
+
 # Phase 7c hand-off
 
 **Staged and verified at 07:54 EST, local release tag `p7c-release`.** Source `401460d` (`p7c-merged`) includes `p7c-verify-windows` and lever 3 rounds 3-4 through `p7l3r4-final-233tok` (`954dd4a`). The snapshot is `~/inkling-live-bin-p7c-401460d`. All nine files passed their SHA-256 checks. The manual deploy script was syntax-checked and left unexecuted. It selects physical GPU1, one 64K slot and guarded adaptive cap 3, and falls back to Phase 5 on startup or health failure. [Deploy script](live/deploy-p7c.sh), [manifest](p7c/snapshot.sha256), [release results](RESULTS.md#phase-7c).
