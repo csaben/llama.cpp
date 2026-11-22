@@ -24,8 +24,21 @@ static __device__ __forceinline__ float ik_block_sum(float v, float * smem) {
 // Q8_1 stores of a row held by the lanes of a warp: one value per lane (32 consecutive values = one block), or one float4
 // per lane (8 consecutive lanes = one block). All lanes of the warp take part (v = 0 past the row), only `store` lanes write.
 
+template<bool native>
+static __device__ __forceinline__ float ik_absmax(float x) {
+    const float a = fabsf(x);
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
+    if constexpr (native) {
+        const unsigned bits = __reduce_max_sync(0xffffffffu,__float_as_uint(a));
+        if (bits <= 0x7f800000u) { return __uint_as_float(bits); }
+    }
+#endif
+    return warp_reduce_max(a);
+}
+
+template<bool native = false>
 static __device__ __forceinline__ void ik_warp_store_q8_1(const float v, block_q8_1 * __restrict__ y, const int lane, const bool store) {
-    const float amax = warp_reduce_max(fabsf(v));
+    const float amax = ik_absmax<native>(v);
     const float d    = amax/127.0f;
     const int   q    = amax == 0.0f ? 0 : (int) roundf(v/d);
     const int   sum  = warp_reduce_sum(q);

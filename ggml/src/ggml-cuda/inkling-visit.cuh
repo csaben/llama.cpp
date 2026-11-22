@@ -28,7 +28,7 @@ static __global__ void ik_dense_scan_inputs(ik_attn_args a, const block_iq4_nl *
     ik_project_row(w, x + col*(2304/QK8_1), (float *) a.proj, row);
 }
 
-template<int taps, bool fast = false>
+template<int taps, bool fast = false, int ops = 0>
 static __global__ void __launch_bounds__(fast ? 384 : 256) ik_dense_gate_scan(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x,
         float * values, int * counters) {
     constexpr int gates = fast ? 6 : 12;
@@ -40,7 +40,7 @@ static __global__ void __launch_bounds__(fast ? 384 : 256) ik_dense_gate_scan(ik
         a.proj_ncols = 1;
         a.dst = values;
         if (tid < 256) {
-            ik_attention_tile<block_q8_0, false, 3, true, false, taps, true, true, false, fast>(a, head, 0);
+            ik_attention_tile<block_q8_0, false, 3, true, false, taps, true, true, false, fast, ops>(a, head, 0);
         }
     } else {
         for (int i = ((blockIdx.x - 8)%gates)*warps + tid/32; i < 384; i += warps*gates) {
@@ -56,17 +56,17 @@ static __global__ void __launch_bounds__(fast ? 384 : 256) ik_dense_gate_scan(ik
         for (int i = tid; i < 384; i += blockDim.x) {
             const int c = 384*head + i;
             const float y = values[c]*(1.0f/(1.0f + expf(-a.proj[a.off_gate + c])));
-            ik_warp_store_q8_1(y, dst + c/QK8_1, tid%32, true);
+            ik_warp_store_q8_1<(ops & 2) != 0>(y, dst + c/QK8_1, tid%32, true);
         }
     }
 }
 
-template<int taps, bool fast = false>
+template<int taps, bool fast = false, int ops = 0>
 static __global__ void __launch_bounds__(384) ik_dense_warp_roles(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x, int * counters) {
     const int head = blockIdx.x, split = blockIdx.y;
     if (threadIdx.x < 256) {
         a.proj_ncols = 1;
-        ik_attention_tile<block_q8_0, true, 3, true, false, taps, false, false, true, fast>(a, head, split, counters + head, a.n_split);
+        ik_attention_tile<block_q8_0, true, 3, true, false, taps, false, false, true, fast, ops>(a, head, split, counters + head, a.n_split);
     } else {
         for (int i = split*4 + (threadIdx.x - 256)/32; i < 384; i += a.n_split*4) {
             ik_project_row(w, x, (float *) a.proj, a.off_gate + 384*head + i);
@@ -83,6 +83,22 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
     int * counters = ik_counters(ctx, 192, 8);
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
     const bool fast = ggml_cuda_inkling_fast_glue(ctx) && a.n_rel == 16 && (uintptr_t) (a.consts + a.c_table) % 16 == 0;
+    static const int ops = getenv("IK_SCAN_PRIMITIVES") ? atoi(getenv("IK_SCAN_PRIMITIVES")) : 0;
+    if (fast && ops >= 1 && ops <= 3) {
+        auto launch = [&](auto choice) {
+            constexpr int m = decltype(choice)::value;
+            if (short_scan) {
+                ggml_cuda_pool_alloc<float> values(ctx.pool(),3072);
+                ik_dense_gate_scan<taps,true,m><<<56,384,0,ctx.stream()>>>(a,w,x,values.get(),counters);
+            } else {
+                ik_dense_warp_roles<taps,true,m><<<dim3(8,a.n_split),384,0,ctx.stream()>>>(a,w,x,counters);
+            }
+        };
+        if (ops==1) { launch(std::integral_constant<int,1>{}); }
+        if (ops==2) { launch(std::integral_constant<int,2>{}); }
+        if (ops==3) { launch(std::integral_constant<int,3>{}); }
+        return;
+    }
     if (short_scan) {
         ggml_cuda_pool_alloc<float> values(ctx.pool(), 3072);
         if (fast) {

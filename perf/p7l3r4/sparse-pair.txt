@@ -1,0 +1,12 @@
+IK_SPARSE_TAIL=0 start_C=76
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        192.73 ± 1.56 |
+build: 812b439 (231)
+IK_SPARSE_TAIL=1 start_C=81
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        192.37 ± 1.25 |
+build: 812b439 (231)
+IK_SPARSE_TAIL=1 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        189.70 ± 2.49 |
+build: 812b439 (231)
+IK_SPARSE_TAIL=0 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        191.00 ± 2.09 |
+build: 812b439 (231)

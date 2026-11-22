@@ -1556,12 +1556,13 @@ static __device__ __forceinline__ float ik_ctrl_apply_channel(const float * cur,
     return 0.0f;
 }
 
+template<bool compact = false>
 static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, const float * d,
         const half * wg, const half * wf, float * y, int n, size_t cur_stride, size_t msg_stride) {
-    const int i = blockIdx.x*32 + threadIdx.x/8;
+    const int i = (blockIdx.x*blockDim.x + threadIdx.x)/8;
     const int lane = threadIdx.x % 8;
     const int b = blockIdx.y;
-    const float value = ik_ctrl_apply_channel(cur, msg, d, wg, wf, n, cur_stride, msg_stride, i, b);
+    const float value = ik_ctrl_apply_channel<compact>(cur, msg, d, wg, wf, n, cur_stride, msg_stride, i, b);
     if (lane == 0) {
         y[b*n+i] = value;
     }
@@ -1738,7 +1739,11 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
                 n, n_tok, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2]);
     } else if (group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n_tok == 1 && n % 32 == 0 &&
             (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 && (uintptr_t) wf->data % 8 == 0) {
-        ik_ctrl_apply8<<<dim3(n/32, B), 256, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
+        static const int requested = getenv("IK_APPLY_FLOAT") ? atoi(getenv("IK_APPLY_FLOAT")) : 0;
+        const bool tuned = ggml_cuda_inkling_fast_glue(ctx) && n == 2304 && requested >= 64 && requested <= 512 && requested%32 == 0 && (n*8)%requested == 0;
+        const int nt = tuned ? requested : 256;
+        const auto kernel = tuned ? ik_ctrl_apply8<true> : ik_ctrl_apply8<false>;
+        kernel<<<dim3(n*8/nt, B), nt, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
                 (const float *) d->data, (const half *) wg->data, (const half *) wf->data, y, n,
                 cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float), msg->nb[2]/sizeof(float));
     } else if (wg->type == GGML_TYPE_F16) {
@@ -2680,7 +2685,7 @@ static __device__ __forceinline__ void ik_scan_sync() {
     }
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast = false, int ops = 0>
 static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -2860,12 +2865,24 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     }
 
     // ===== the clipped Q and R of the heads (block reductions), scaled by tau =====
+    if constexpr (ops & 1) {
+        float terms[G];
+#pragma unroll
+        for (int hh=0; hh<G; ++hh) {
+            const float x = tid < HD ? qv[hh] : rv[hh];
+            terms[hh]=x*x;
+        }
+        const float v=ik_reduce_moments(terms,lane);
+        const int h=__brev(lane)>>27;
+        if (h<G) { s_ssq[h][warp]=v; }
+    } else {
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
         const float v = warp_reduce_sum(tid < HD ? qv[hh]*qv[hh] : rv[hh]*rv[hh]);
         if (lane == 0) {
             s_ssq[hh][warp] = v;
         }
+    }
     }
     ik_scan_sync<warp_split || (fast && SHORT_SCAN)>();
 #pragma unroll
@@ -3103,7 +3120,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             }
             yq = __half2float(hv);
         } else {
-            const float amax = warp_reduce_max(fabsf(y));
+            const float amax = ik_absmax<(ops & 2) != 0>(y);
             const float d    = amax/127.0f;
             const float id   = d != 0.0f ? 1.0f/d : 0.0f;
             const int   q    = (int) roundf(y*id);
@@ -3322,7 +3339,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             const float Lf    = L[hh]*corr + expf(0.0f - m_new);
             const float o     = ungated ? A[hh]*corr/Lf : A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate_v[hh])));
             if constexpr (q8_out) {
-                ik_warp_store_q8_1(o, (block_q8_1 *) args.dst + ((int64_t) h*HD)/QK8_1 + warp, lane, true);
+                ik_warp_store_q8_1<(ops & 2) != 0>(o, (block_q8_1 *) args.dst + ((int64_t) h*HD)/QK8_1 + warp, lane, true);
             } else {
                 ((float *) args.dst)[(int64_t) h*HD + tid] = o;
             }
