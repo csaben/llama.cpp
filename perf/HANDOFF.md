@@ -16,6 +16,8 @@ A diagnostic gave every paid model proposal the same high confidence and an inco
 
 The new candidate limits the paid model head to three predictions unless the user requests a larger minimum. A verified history continuation can use cap 4 after two sufficiently accurate history windows. The five-repeat cap-4 pilot reached 339.0 tok/s on edit, 217.3 on the lighthouse request and 213.1 on the gardener letter. Two paid model positions reduced long code to 254.3 tok/s versus 269.7 with three. The release matrix uses the original model files and three paid positions.
 
+Rebuilt candidate `a9cdc61` passed all fifteen additional 384-token prose comparisons. Across five repeats per prompt and cap, all 75 drafted responses and token IDs matched plain. The cap-4 gardener letter median was 213.1 versus 211.7 plain; its five individual rates ranged from 207 to 216. The two reserved prompts, a cafe review and piano dialogue, beat plain at all three caps. The main matrix and both exactness batteries are running. [Five-prompt short prose set](p7b/release/prose/).
+
 # Phase 7 hand-off
 
 The staged build is `59c71a9`, local tag `p7-release-edit-324tok`, on branch `inkling-3090`. All measurements used physical GPU1 (RTX 3090). The release uses a fixed three-token draft, four-row MMA verification, a folded 32K shortlist, GPU-resident embedding tables and one 64K slot.
