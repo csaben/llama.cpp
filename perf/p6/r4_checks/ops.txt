@@ -1,0 +1,2 @@
+  1108/1108 tests passed
+  Backend CUDA0: [1;32mOK[0m

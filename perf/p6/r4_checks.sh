@@ -27,9 +27,9 @@ for label in plain plain-mr; do
     if [[ $label == plain-mr ]]; then flags=(IK_MR=1 IK_MMA=3); fi
     env "${flags[@]}" build/bin/llama-bench "${args[@]}" -fa 1 -p 0 -n 128 -d 0,4096,16384,32768 -r 3 > "$out/$label.bench.txt" 2> "$tmp/bench.log"
     for mode in prefill decode; do
-        params=(-c 2048 --chunks 8)
-        if [[ $mode == decode ]]; then params=(-c 1024 -ub 1 --chunks 2); fi
-        env "${flags[@]}" build/bin/llama-perplexity "${args[@]}" -fa on -f perf/ppl.txt -b 2048 "${params[@]}" > "$tmp/ppl.log" 2>&1
+        params=(-c 2048 -b 2048 --chunks 8)
+        if [[ $mode == decode ]]; then params=(-c 1024 -b 1024 -ub 1 --chunks 2); fi
+        env "${flags[@]}" build/bin/llama-perplexity "${args[@]}" -fa on -f perf/ppl.txt "${params[@]}" > "$tmp/ppl.log" 2>&1
         grep 'Final estimate' "$tmp/ppl.log" > "$out/$label.$mode.txt"
     done
     env "${flags[@]}" MODEL="$Q2" bash perf/greedy.sh "$out/$label" -ctk q8_0 -ctv q8_0

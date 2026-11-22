@@ -18,6 +18,8 @@ Long proof complete: 24/24 messages and 72,000/72,000 emitted token IDs match th
 
 Both tables now complete (48/48 configurations and prompts across the two budgets, three repetitions at 384). RESULTS.md Round 4 has the tables and accepted/proposed counts. Max-3 edit is 302.1 tok/s at 384 and 267.0 tok/s at 3000. Regression checks, 64K smoke, read-tool replay and the optional KV scan scheduling experiment remain in flight.
 
+PPL reproduced Round 3 to all reported digits at the original batch sizes: prefill 3.0530, single-row decode 4.1979 (default) and 4.2038 (window flags). Backend ops 1108/1108. All boundary and mixed schedule checks passed. The deploy-sized 65536 slot started on GPU1; all four 384-token streams and JSON messages matched the 32K-slot reference. Benchmark A/B against the original library, the KV locality trial and P5 restoration are pending.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.
