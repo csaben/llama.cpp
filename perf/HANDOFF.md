@@ -1,6 +1,6 @@
 # Phase 8
 
-Stream A in progress on physical GPU1. The controller pack now assigns one warp per output stripe. The first paired test gained 0.57% at depth zero with identical full logits at prefixes 113 and 1129. Release validation is pending. Frozen source `401460d` passed its nine-file manifest. Fresh tg128 node traces rank gate/attention, routing and controller down first at both depths. [Ranked baseline](p8/base/latency-mean.md), [results](RESULTS.md#phase-8).
+Stream A in progress on physical GPU1. The controller pack now assigns one warp per output stripe. The first paired test gained 0.57% at depth zero with identical full logits at prefixes 113 and 1129. Scalar glue also passed the first MR/MMA crossover and logit checks (+3.05% at zero and +2.79% at 16K). Release validation is pending. Frozen source `401460d` passed its nine-file manifest. Fresh tg128 node traces rank gate/attention, routing and controller down first at both depths. [Ranked baseline](p8/base/latency-mean.md), [results](RESULTS.md#phase-8).
 
 # Phase 7c hand-off
 

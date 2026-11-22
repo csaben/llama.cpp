@@ -23,7 +23,7 @@ static bool ik_mr_enabled() {
 static bool ik_dependency_fusion(const ggml_backend_cuda_context & ctx) {
     static const bool enabled = !getenv("IK_DEPENDENCY_FUSION") || atoi(getenv("IK_DEPENDENCY_FUSION")) != 0;
     const auto & dev = ggml_cuda_info().devices[ctx.device];
-    return enabled && !ik_mr_enabled() && dev.nsm == 82 && dev.cc == GGML_CUDA_CC_AMPERE_GA10X;
+    return enabled && dev.nsm == 82 && dev.cc == GGML_CUDA_CC_AMPERE_GA10X;
 }
 
 bool ggml_cuda_inkling_fast_glue(const ggml_backend_cuda_context & ctx) {
