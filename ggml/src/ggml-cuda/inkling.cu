@@ -800,6 +800,15 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
 #define IK_REL_BIAS_BLOCK 256
 #define IK_REL_MAX_SMEM_EXTENT 12288
 
+static __device__ __forceinline__ float ik_rel_dot16(float4 a, float4 b, float4 c, float4 d, const float * v) {
+    float sum = 0.0f;
+    sum += a.x*v[0]  + a.y*v[1]  + a.z*v[2]  + a.w*v[3];
+    sum += b.x*v[4]  + b.y*v[5]  + b.z*v[6]  + b.w*v[7];
+    sum += c.x*v[8]  + c.y*v[9]  + c.z*v[10] + c.w*v[11];
+    sum += d.x*v[12] + d.y*v[13] + d.z*v[14] + d.w*v[15];
+    return sum;
+}
+
 template <typename dst_t, typename mask_t, bool use_smem>
 static __global__ void rel_bias_kernel(const float * __restrict__ r, const float * __restrict__ table, const float * __restrict__ sinks,
         const int32_t * __restrict__ pos, const mask_t * __restrict__ mask, dst_t * __restrict__ dst,
@@ -823,13 +832,7 @@ static __global__ void rel_bias_kernel(const float * __restrict__ r, const float
             // a table entry is 64 bytes: four float4 loads per thread
             for (int p = threadIdx.x; p < n_extent; p += IK_REL_BIAS_BLOCK) {
                 const float4 * tb = (const float4 *) (table + (int64_t) p*16);
-                const float4 t0 = tb[0], t1 = tb[1], t2 = tb[2], t3 = tb[3];
-                float bias = 0.0f;
-                bias += t0.x*rv[0]  + t0.y*rv[1]  + t0.z*rv[2]  + t0.w*rv[3];
-                bias += t1.x*rv[4]  + t1.y*rv[5]  + t1.z*rv[6]  + t1.w*rv[7];
-                bias += t2.x*rv[8]  + t2.y*rv[9]  + t2.z*rv[10] + t2.w*rv[11];
-                bias += t3.x*rv[12] + t3.y*rv[13] + t3.z*rv[14] + t3.w*rv[15];
-                tbl[p] = bias;
+                tbl[p] = ik_rel_dot16(tb[0], tb[1], tb[2], tb[3], rv);
             }
         } else {
             for (int p = threadIdx.x; p < n_extent; p += IK_REL_BIAS_BLOCK) {
@@ -876,6 +879,35 @@ static __global__ void rel_bias_kernel(const float * __restrict__ r, const float
     }
 }
 
+static __global__ void rel_bias_four_heads(const float * __restrict__ r, const float4 * __restrict__ table,
+        const float * __restrict__ sinks, const int32_t * __restrict__ pos, const half * __restrict__ mask, half * __restrict__ dst,
+        int n_head, int n_tok, int n_kv, int64_t mask_ne0, int64_t sinks_nb1) {
+    const int h0 = 4*blockIdx.x;
+    const int t = blockIdx.y;
+    __shared__ float bias[4][1024];
+    const float * rr = r + ((int64_t) t*n_head + h0)*16;
+
+    for (int p = threadIdx.x; p < 1024; p += blockDim.x) {
+        const float4 a = table[4*p], b = table[4*p+1], c = table[4*p+2], d = table[4*p+3];
+#pragma unroll
+        for (int h = 0; h < 4; ++h) {
+            bias[h][p] = ik_rel_dot16(a, b, c, d, rr + 16*h);
+        }
+    }
+    __syncthreads();
+
+    const float * sk = (const float *) ((const char *) sinks + t*sinks_nb1) + h0;
+    for (int kv = threadIdx.x; kv < n_kv; kv += blockDim.x) {
+        const unsigned p = pos[(int64_t) t*n_kv + kv];
+        const float m = __half2float(mask[t*mask_ne0 + kv]);
+#pragma unroll
+        for (int h = 0; h < 4; ++h) {
+            const float v = p < 1024 ? bias[h][p] : 0.0f;
+            dst[((int64_t) (h0+h)*n_tok + t)*n_kv + kv] = __float2half((v - sk[h]) + m);
+        }
+    }
+}
+
 template <typename dst_t, typename mask_t>
 static void rel_bias_launch(const float * r, const float * table, const float * sinks, const int32_t * pos, const mask_t * mask,
         dst_t * dst, const int n_rel, const int n_head, const int n_tok, const int n_kv, const int n_extent, const int64_t mask_ne0,
@@ -914,6 +946,14 @@ void ggml_cuda_op_rel_bias(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t   sinks_nb1 = sinks ? sinks->nb[1] : 0;
 
     cudaStream_t stream = ctx.stream();
+
+    if (n_tok >= 128 && n_head % 4 == 0 && n_rel == 16 && n_extent == 1024 && sinks && mask &&
+            dst->type == GGML_TYPE_F16 && mask->type == GGML_TYPE_F16 && (uintptr_t) table_d % 16 == 0 &&
+            ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X) {
+        rel_bias_four_heads<<<dim3(n_head/4, n_tok), 256, 0, stream>>>(r_d, (const float4 *) table_d, sinks_d,
+            pos_d, (const half *) mask->data, (half *) dst->data, n_head, n_tok, n_kv, mask_ne0, sinks_nb1);
+        return;
+    }
 
     if (dst->type == GGML_TYPE_F16) {
         if (mask && mask->type == GGML_TYPE_F16) {

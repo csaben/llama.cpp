@@ -1,0 +1,24 @@
+n2             code      prompt     47  3000 tok   250.9 tok/s    9296 chars  accepted/proposed 1780/2438
+n2             edit      prompt   1025  3000 tok   266.7 tok/s    9009 chars  accepted/proposed 1899/2200
+n2             prose     prompt     36  3000 tok   240.7 tok/s   10905 chars  accepted/proposed 1731/2535
+n2             edit@16K  prompt  16044  3000 tok   202.1 tok/s    4508 chars  accepted/proposed 1905/2186
+n2             edit@32K  prompt  32045  3000 tok   197.0 tok/s    2271 chars  accepted/proposed 1955/2086
+n2             agent     prompt   2025  3000 tok   236.1 tok/s    6154 chars  accepted/proposed 1955/2088
+n3             code      prompt     47  3000 tok   258.5 tok/s    9296 chars  accepted/proposed 1988/3033
+n3             edit      prompt   1025  3000 tok   282.4 tok/s    9009 chars  accepted/proposed 2113/2657
+n3             prose     prompt     36  3000 tok   234.8 tok/s   10905 chars  accepted/proposed 1888/3331
+n3             edit@16K  prompt  16044  3000 tok   222.3 tok/s    4508 chars  accepted/proposed 2135/2592
+n3             edit@32K  prompt  32045  3000 tok   222.5 tok/s    2271 chars  accepted/proposed 2186/2436
+n3             agent     prompt   2025  3000 tok   256.8 tok/s    6154 chars  accepted/proposed 2189/2430
+n4             code      prompt     47  3000 tok   237.9 tok/s    9296 chars  accepted/proposed 2091/3628
+n4             edit      prompt   1025  3000 tok   272.3 tok/s    9009 chars  accepted/proposed 2245/3014
+n4             prose     prompt     36  3000 tok   216.0 tok/s   10905 chars  accepted/proposed 1996/4011
+n4             edit@16K  prompt  16044  3000 tok   223.7 tok/s    4508 chars  accepted/proposed 2262/2944
+n4             edit@32K  prompt  32045  3000 tok   228.6 tok/s    2271 chars  accepted/proposed 2326/2690
+n4             agent     prompt   2025  3000 tok   262.0 tok/s    6154 chars  accepted/proposed 2330/2672
+plain          code      prompt     47  3000 tok   195.0 tok/s    9296 chars
+plain          edit      prompt   1025  3000 tok   127.5 tok/s    9009 chars
+plain          prose     prompt     36  3000 tok   149.0 tok/s   10905 chars
+plain          edit@16K  prompt  16044  3000 tok   164.3 tok/s    4508 chars
+plain          edit@32K  prompt  32045  3000 tok   154.1 tok/s    2271 chars
+plain          agent     prompt   2025  3000 tok   176.1 tok/s    6154 chars

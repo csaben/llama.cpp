@@ -1,0 +1,13 @@
+dspark history: 2 windows, 1/4 accepted, windows by width: 0 2 0 0 0 0 0 0
+dspark history: 2 windows, 1/4 accepted, windows by width: 0 2 0 0 0 0 0 0
+dspark history: 2 windows, 1/4 accepted, windows by width: 0 2 0 0 0 0 0 0
+dspark history: 71 windows, 266/270 accepted, windows by width: 0 2 10 59 0 0 0 0
+dspark history: 72 windows, 265/273 accepted, windows by width: 0 2 11 59 0 0 0 0
+dspark history: 72 windows, 265/273 accepted, windows by width: 0 2 11 59 0 0 0 0
+dspark history: 16 windows, 12/30 accepted, windows by width: 8 4 2 2 0 0 0 0
+dspark history: 14 windows, 11/28 accepted, windows by width: 6 4 2 2 0 0 0 0
+dspark history: 15 windows, 12/28 accepted, windows by width: 8 3 2 2 0 0 0 0
+dspark history: 46 windows, 164/175 accepted, windows by width: 0 1 7 38 0 0 0 0
+dspark history: 43 windows, 152/163 accepted, windows by width: 0 2 5 36 0 0 0 0
+dspark history: 43 windows, 152/163 accepted, windows by width: 0 2 5 36 0 0 0 0
+dspark policy: gain 1.46, steps by kind: 4 10 19 16 26 0 0 0 0 0

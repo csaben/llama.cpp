@@ -1,0 +1,48 @@
+plain          code      prompt     47   384 tok   205.9 tok/s    1320 chars  runs 206/206/206
+plain          edit      prompt   1025   384 tok   194.8 tok/s    1115 chars  runs 194/195/195
+plain          prose     prompt     36   384 tok   204.0 tok/s    1474 chars  runs 203/204/204
+plain          edit@16K  prompt  16044   384 tok   178.5 tok/s    1196 chars  runs 178/179/179
+plain          edit@32K  prompt  32045   384 tok   162.1 tok/s    1321 chars  runs 161/162/167
+plain          agent     prompt   2025   384 tok   186.8 tok/s    1284 chars  runs 186/187/187
+n2             code      prompt     47   384 tok   241.5 tok/s    1320 chars  accepted/proposed 177/222  runs 241/242/242
+n2             edit      prompt   1025   384 tok   306.1 tok/s    1115 chars  accepted/proposed 246/249  runs 305/306/307
+n2             prose     prompt     36   384 tok   214.3 tok/s    1474 chars  accepted/proposed 127/187  runs 214/214/214
+n2             edit@16K  prompt  16044   384 tok   255.4 tok/s    1196 chars  accepted/proposed 236/250  runs 255/255/255
+n2             edit@32K  prompt  32045   384 tok   195.3 tok/s    1321 chars  accepted/proposed 224/246  runs 194/195/202
+n2             agent     prompt   2025   384 tok   260.6 tok/s    1284 chars  accepted/proposed 233/252  runs 254/261/264
+n3             code      prompt     47   384 tok   244.4 tok/s    1320 chars  accepted/proposed 191/245  runs 243/244/245
+n3             edit      prompt   1025   384 tok   336.6 tok/s    1115 chars  accepted/proposed 275/278  runs 336/337/338
+n3             prose     prompt     36   384 tok   213.5 tok/s    1474 chars  accepted/proposed 131/193  runs 213/214/214
+n3             edit@16K  prompt  16044   384 tok   276.4 tok/s    1196 chars  accepted/proposed 265/290  runs 267/276/279
+n3             edit@32K  prompt  32045   384 tok   203.6 tok/s    1321 chars  accepted/proposed 246/275  runs 203/204/204
+n3             agent     prompt   2025   384 tok   266.6 tok/s    1284 chars  accepted/proposed 254/279  runs 261/267/269
+n4             code      prompt     47   384 tok   241.8 tok/s    1320 chars  accepted/proposed 188/243  runs 241/242/242
+n4             edit      prompt   1025   384 tok   332.4 tok/s    1115 chars  accepted/proposed 276/283  runs 332/332/333
+n4             prose     prompt     36   384 tok   211.8 tok/s    1474 chars  accepted/proposed 130/194  runs 212/212/212
+n4             edit@16K  prompt  16044   384 tok   275.7 tok/s    1196 chars  accepted/proposed 268/287  runs 107/276/277
+n4             edit@32K  prompt  32045   384 tok   211.2 tok/s    1321 chars  accepted/proposed 250/279  runs 209/211/212
+n4             agent     prompt   2025   384 tok   273.1 tok/s    1284 chars  accepted/proposed 256/281  runs 259/273/277
+n2-adapt       code      prompt     47   384 tok   240.8 tok/s    1320 chars  accepted/proposed 176/221  runs 240/241/242
+n2-adapt       edit      prompt   1025   384 tok   304.7 tok/s    1115 chars  accepted/proposed 246/249  runs 305/305/305
+n2-adapt       prose     prompt     36   384 tok   213.5 tok/s    1474 chars  accepted/proposed 126/187  runs 213/213/214
+n2-adapt       edit@16K  prompt  16044   384 tok   251.6 tok/s    1196 chars  accepted/proposed 236/252  runs 243/252/253
+n2-adapt       edit@32K  prompt  32045   384 tok   194.5 tok/s    1321 chars  accepted/proposed 224/246  runs 171/194/199
+n2-adapt       agent     prompt   2025   384 tok   247.7 tok/s    1284 chars  accepted/proposed 234/252  runs 247/248/253
+n3-adapt       code      prompt     47   384 tok   242.1 tok/s    1320 chars  accepted/proposed 189/244  runs 240/242/244
+n3-adapt       edit      prompt   1025   384 tok   335.9 tok/s    1115 chars  accepted/proposed 275/278  runs 336/336/337
+n3-adapt       prose     prompt     36   384 tok   212.9 tok/s    1474 chars  accepted/proposed 132/196  runs 213/213/214
+n3-adapt       edit@16K  prompt  16044   384 tok   275.8 tok/s    1196 chars  accepted/proposed 265/290  runs 266/276/278
+n3-adapt       edit@32K  prompt  32045   384 tok   210.3 tok/s    1321 chars  accepted/proposed 246/277  runs 194/210/210
+n3-adapt       agent     prompt   2025   384 tok   260.2 tok/s    1284 chars  accepted/proposed 254/281  runs 257/260/263
+n4-adapt       code      prompt     47   384 tok   242.7 tok/s    1320 chars  accepted/proposed 189/245  runs 242/243/244
+n4-adapt       edit      prompt   1025   384 tok   332.8 tok/s    1115 chars  accepted/proposed 276/283  runs 332/333/334
+n4-adapt       prose     prompt     36   384 tok   212.0 tok/s    1474 chars  accepted/proposed 131/197  runs 212/212/212
+n4-adapt       edit@16K  prompt  16044   384 tok   273.6 tok/s    1196 chars  accepted/proposed 268/290  runs 265/274/277
+n4-adapt       edit@32K  prompt  32045   384 tok   212.5 tok/s    1321 chars  accepted/proposed 250/279  runs 195/212/214
+n4-adapt       agent     prompt   2025   384 tok   263.8 tok/s    1284 chars  accepted/proposed 256/282  runs 259/264/267
+n6-adapt       code      prompt     47   384 tok   242.7 tok/s    1320 chars  accepted/proposed 189/245  runs 242/243/245
+n6-adapt       edit      prompt   1025   384 tok   333.1 tok/s    1115 chars  accepted/proposed 292/299  runs 310/333/336
+n6-adapt       prose     prompt     36   384 tok   213.0 tok/s    1474 chars  accepted/proposed 134/200  runs 212/213/214
+n6-adapt       edit@16K  prompt  16044   384 tok   274.5 tok/s    1196 chars  accepted/proposed 271/295  runs 262/275/277
+n6-adapt       edit@32K  prompt  32045   384 tok   203.9 tok/s    1321 chars  accepted/proposed 251/288  runs 194/204/210
+n6-adapt       agent     prompt   2025   384 tok   280.2 tok/s    1284 chars  accepted/proposed 271/293  runs 267/280/284

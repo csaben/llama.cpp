@@ -1,0 +1,6 @@
+cap3a          agent     prompt   2025   384 tok   290.2 tok/s    1284 chars  accepted/proposed 254/279  runs 290/290/290/292/292
+cap3b          agent     prompt   2025   384 tok   291.1 tok/s    1284 chars  accepted/proposed 254/279  runs 290/290/291/291/291
+cap6a          agent     prompt   2025   384 tok   294.4 tok/s    1284 chars  accepted/proposed 269/288  runs 294/294/294/295/295
+cap6b          agent     prompt   2025   384 tok   294.6 tok/s    1284 chars  accepted/proposed 269/288  runs 289/293/295/295/295
+frozen1        agent     prompt   2025   384 tok   285.3 tok/s    1284 chars  accepted/proposed 253/285  runs 285/285/285/287/288
+frozen2        agent     prompt   2025   384 tok   285.6 tok/s    1284 chars  accepted/proposed 253/286  runs 286/286/286/287/287

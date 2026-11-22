@@ -1,0 +1,2 @@
+0.02.451.426 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 3420.52 MiB on device 0: cudaMalloc failed: out of memory
+0.02.451.433 E ggml_gallocr_reserve_n_impl: failed to allocate CUDA0 buffer of size 3586678912

@@ -1,0 +1,25 @@
+plain          letter    prompt     40   384 tok   204.6 tok/s    1446 chars  runs 204/204/205/205/205
+plain          science   prompt     38   384 tok   204.0 tok/s    1590 chars  runs 204/204/204/204/204
+plain          scene     prompt     44   384 tok   202.9 tok/s    1461 chars  runs 201/203/203/203/204
+plain          review    prompt     39   384 tok   195.7 tok/s    1429 chars  runs 193/194/196/196/198
+plain          dialogue  prompt     43   384 tok   190.9 tok/s    1651 chars  runs 191/191/191/191/191
+n2-adapt       letter    prompt     40   384 tok   212.0 tok/s    1446 chars  accepted/proposed 132/200  runs 198/210/212/214/215
+n2-adapt       science   prompt     38   384 tok   232.8 tok/s    1590 chars  accepted/proposed 163/219  runs 231/232/233/233/234
+n2-adapt       scene     prompt     44   384 tok   202.1 tok/s    1461 chars  accepted/proposed 141/215  runs 197/200/202/212/214
+n2-adapt       review    prompt     39   384 tok   190.0 tok/s    1429 chars  accepted/proposed 132/207  runs 189/190/190/190/190
+n2-adapt       dialogue  prompt     43   384 tok   190.3 tok/s    1651 chars  accepted/proposed 129/200  runs 190/190/190/191/191
+n3-adapt       letter    prompt     40   384 tok   211.9 tok/s    1446 chars  accepted/proposed 135/201  runs 206/209/212/213/213
+n3-adapt       science   prompt     38   384 tok   235.7 tok/s    1590 chars  accepted/proposed 172/227  runs 232/232/236/237/237
+n3-adapt       scene     prompt     44   384 tok   213.9 tok/s    1461 chars  accepted/proposed 148/224  runs 210/211/214/215/218
+n3-adapt       review    prompt     39   384 tok   202.3 tok/s    1429 chars  accepted/proposed 141/225  runs 190/202/202/205/206
+n3-adapt       dialogue  prompt     43   384 tok   190.6 tok/s    1651 chars  accepted/proposed 136/215  runs 189/190/191/191/191
+n4-adapt       letter    prompt     40   384 tok   211.1 tok/s    1446 chars  accepted/proposed 134/202  runs 210/210/211/211/213
+n4-adapt       science   prompt     38   384 tok   235.3 tok/s    1590 chars  accepted/proposed 172/227  runs 229/235/235/236/236
+n4-adapt       scene     prompt     44   384 tok   204.8 tok/s    1461 chars  accepted/proposed 149/218  runs 203/204/205/215/215
+n4-adapt       review    prompt     39   384 tok   194.0 tok/s    1429 chars  accepted/proposed 145/228  runs 191/191/194/201/201
+n4-adapt       dialogue  prompt     43   384 tok   190.8 tok/s    1651 chars  accepted/proposed 137/214  runs 189/191/191/191/192
+n6-adapt       letter    prompt     40   384 tok   209.7 tok/s    1446 chars  accepted/proposed 134/204  runs 209/210/210/210/211
+n6-adapt       science   prompt     38   384 tok   234.9 tok/s    1590 chars  accepted/proposed 174/230  runs 234/235/235/235/235
+n6-adapt       scene     prompt     44   384 tok   215.5 tok/s    1461 chars  accepted/proposed 150/223  runs 204/211/215/217/217
+n6-adapt       review    prompt     39   384 tok   186.2 tok/s    1429 chars  accepted/proposed 138/220  runs 185/186/186/194/198
+n6-adapt       dialogue  prompt     43   384 tok   186.2 tok/s    1651 chars  accepted/proposed 135/209  runs 184/186/186/186/187

@@ -1,0 +1,4 @@
+cap6           code      prompt     47  3000 tok   264.8 tok/s    9296 chars  accepted/proposed 1803/2087
+cap6           edit      prompt   1025  3000 tok   290.2 tok/s    9009 chars  accepted/proposed 1983/2143
+cap6           prose     prompt     36  3000 tok   285.1 tok/s   10905 chars  accepted/proposed 1998/2268
+cap6           agent     prompt   2025  3000 tok   317.8 tok/s    6154 chars  accepted/proposed 2189/2272

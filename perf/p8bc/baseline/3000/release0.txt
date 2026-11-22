@@ -1,0 +1,6 @@
+release0       code      prompt     47  3000 tok   191.7 tok/s    9296 chars
+release0       edit      prompt   1025  3000 tok   191.1 tok/s    9009 chars
+release0       prose     prompt     36  3000 tok   196.5 tok/s   10905 chars
+release0       edit@16K  prompt  16044  3000 tok   178.0 tok/s    4508 chars
+release0       edit@32K  prompt  32045  3000 tok   164.9 tok/s    2271 chars
+release0       agent     prompt   2025  3000 tok   192.1 tok/s    6154 chars

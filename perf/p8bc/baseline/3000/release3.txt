@@ -1,0 +1,6 @@
+release3       code      prompt     47  3000 tok   262.6 tok/s    9296 chars  accepted/proposed 1806/2086
+release3       edit      prompt   1025  3000 tok   293.1 tok/s    9009 chars  accepted/proposed 1981/2139
+release3       prose     prompt     36  3000 tok   283.6 tok/s   10905 chars  accepted/proposed 1832/2027
+release3       edit@16K  prompt  16044  3000 tok   284.9 tok/s    4508 chars  accepted/proposed 2054/2209
+release3       edit@32K  prompt  32045  3000 tok   286.7 tok/s    2271 chars  accepted/proposed 2147/2232
+release3       agent     prompt   2025  3000 tok   308.8 tok/s    6154 chars  accepted/proposed 2137/2256

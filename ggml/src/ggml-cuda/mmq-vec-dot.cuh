@@ -756,7 +756,11 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     y += (threadIdx.y % ntx) * (tile_C::J*MMQ_TILE_Y_K);
 
     const int   * x_qs = (const int   *) x;
+#if __CUDA_ARCH__ == GGML_CUDA_CC_AMPERE_GA10X
+    const half2 * x_dm = (const half2 *) (x_qs + QI2_K);
+#else
     const half2 * x_dm = (const half2 *) x_qs + MMQ_TILE_NE_K*2;
+#endif
     const int   * y_qs = (const int   *) y + 4;
     const half2 * y_ds = (const half2 *) y;
 
@@ -768,12 +772,25 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
 
 #pragma unroll
     for (int n = 0; n < ntx; ++n) {
+#if __CUDA_ARCH__ == GGML_CUDA_CC_AMPERE_GA10X
+        tile_A_8 packed;
+        load_ldmatrix(packed, x_qs + (i0 + n*tile_A::I)*sram_stride + k00/QR2_K, sram_stride);
+#pragma unroll
+        for (int group = 0; group < QR2_K; ++group) {
+            tile_A_8 & expanded = ((tile_A_8 *) A[n])[group];
+#pragma unroll
+            for (int l = 0; l < tile_A_8::ne; ++l) {
+                expanded.x[l] = (uint32_t(packed.x[l]) >> (2*group)) & 0x03030303;
+            }
+        }
+#else
 #pragma unroll
         for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += QI8_1) {
             const int k0 = k00 + k01;
 
             load_ldmatrix(((tile_A_8 *) A[n])[k01/QI8_1], x_qs + (i0 + n*tile_A::I)*sram_stride + k0, sram_stride);
         }
+#endif
     }
 
 #pragma unroll

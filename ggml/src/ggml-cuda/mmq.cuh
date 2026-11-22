@@ -126,6 +126,7 @@ enum ggml_cuda_mmq_sram_layout {
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0,
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1,
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K,
+    GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K_PACKED,
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q3_K,
     GGML_CUDA_MMQ_SRAM_LAYOUT_Q6_K,
     GGML_CUDA_MMQ_SRAM_LAYOUT_FP4,   // MXFP4 and NVFP4 on Blackwell.
@@ -140,6 +141,8 @@ static constexpr __host__ __device__ int ggml_cuda_mmq_get_sram_stride(ggml_cuda
             return 2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_1 + 4;
         case GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K:
             return 2*MMQ_TILE_NE_K + MMQ_TILE_NE_K         + 4;
+        case GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K_PACKED:
+            return 2*QI2_K + 4;
         case GGML_CUDA_MMQ_SRAM_LAYOUT_Q3_K:
             return 2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/2       + 4;
         case GGML_CUDA_MMQ_SRAM_LAYOUT_Q6_K:
@@ -156,6 +159,7 @@ static constexpr __host__ __device__ int ggml_cuda_mmq_get_sram_stride(ggml_cuda
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_0)  % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q8_1)  % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K)  % 8 == 4, "Wrong padding.");
+static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K_PACKED) % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q3_K)  % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_Q6_K)  % 8 == 4, "Wrong padding.");
 static_assert(ggml_cuda_mmq_get_sram_stride(GGML_CUDA_MMQ_SRAM_LAYOUT_FP4)   % 8 == 4, "Wrong padding.");
@@ -230,6 +234,14 @@ struct ggml_cuda_mmq_config {
 
 #undef CASE
 
+static constexpr __host__ __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config_ga10x(ggml_type type, int J, bool fallback) {
+    auto config = ggml_cuda_mmq_get_config_ampere(type, J, fallback);
+    if (type == GGML_TYPE_Q2_K) {
+        config.sram_layout = GGML_CUDA_MMQ_SRAM_LAYOUT_Q2_K_PACKED;
+    }
+    return config;
+}
+
 static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(const ggml_type type, const int J, const bool fallback, const int cc, const ggml_prec prec_src1) {
     if (GGML_CUDA_CC_IS_AMD(cc)) {
         if (GGML_CUDA_CC_IS_GCN(cc)) {
@@ -258,6 +270,9 @@ static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(const ggml_type ty
             return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
         }
         return ggml_cuda_mmq_get_config_blackwell(type, J, fallback);
+    }
+    if (ggml_cuda_highest_compiled_arch(cc) == GGML_CUDA_CC_AMPERE_GA10X) {
+        return ggml_cuda_mmq_get_config_ga10x(type, J, fallback);
     }
     if (ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) {
         return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
@@ -292,6 +307,8 @@ static constexpr __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(ggml_t
         return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
     }
     return ggml_cuda_mmq_get_config_blackwell(type, J, fallback);
+#elif defined(TURING_MMA_AVAILABLE) && __CUDA_ARCH__ == GGML_CUDA_CC_AMPERE_GA10X
+    return ggml_cuda_mmq_get_config_ga10x(type, J, fallback);
 #elif !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
     return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
 #elif !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A
@@ -1081,13 +1098,12 @@ static __global__ void mul_mat_q(
         const int wt = tmp2.x;
         int       zt = tmp2.y;
 #if defined(GGML_USE_HIP)
-        // Row tiles innermost for MoE, see launch_mul_mat_q.
-        const int jt = ids_dst ? blockIdx.y : blockIdx.x;
-        const int it = ids_dst ? blockIdx.x : blockIdx.y;
+        const bool rows_innermost = ids_dst != nullptr;
 #else
-        const int jt = blockIdx.x;
-        const int it = blockIdx.y;
-#endif // defined(GGML_USE_HIP)
+        const bool rows_innermost = force_tiling && (type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q2_0) && ids_dst;
+#endif
+        const int jt = rows_innermost ? blockIdx.y : blockIdx.x;
+        const int it = rows_innermost ? blockIdx.x : blockIdx.y;
 
         // Defaults for regular matrix multiplication:
         int col_low        = jt*J;
@@ -1546,10 +1562,15 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
         (tiles_efficiency_percent >= 90 || ntiles_dst >= 2*stream_k_blocks ||
          k_chunks <= config.occupancy * tiles_nwaves);
 
-    if (force_tiling) {
-        GGML_ASSERT(nti <= 65535);
+    // Stream-K already gives each tile its full K range here. Group the row tiles of each expert.
+    const bool tile_experts = cc == GGML_CUDA_CC_AMPERE_GA10X && (type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q2_0) &&
+            args.ids_dst && args.ncols_dst >= 512 && tiles_efficiency_percent >= 90 && args.ntj <= 65535;
+
+    if (force_tiling || tile_experts) {
+        const dim3 grid = tile_experts ? dim3(nti, args.ntj, ntzw) : block_nums_xy_tiling;
+        GGML_ASSERT(grid.y <= 65535);
         CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, J, fallback, prec_src1, has_fusion, true>), nbytes_shared);
-        mul_mat_q<type, J, fallback, prec_src1, has_fusion, true><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
+        mul_mat_q<type, J, fallback, prec_src1, has_fusion, true><<<grid, block_dims, nbytes_shared, stream>>>
             (args.x, (const char *) args.fusion.gate, args.y, args.ids_dst, args.tile_spec, args.dst, nullptr,
              args.y_scale, args.fusion.glu_op, args.fusion.glu_limit, (const float *) args.fusion.x_scale, (const float *) args.fusion.gate_scale,
              blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,

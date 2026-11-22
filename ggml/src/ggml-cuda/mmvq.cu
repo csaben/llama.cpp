@@ -2015,7 +2015,7 @@ static void ik_mmvq_mr_launch(
     // IK_MR_GROUPED=1: the grouped kernel (each distinct expert read once) instead of a warp per pair
     static const bool grouped = getenv("IK_MR_GROUPED") && atoi(getenv("IK_MR_GROUPED")) != 0;
     if constexpr (type == GGML_TYPE_IQ4_NL) {
-        if (!ids && !small_k && nwarps1 == 4 && nrows_x % 2 == 0 && (ncols_x == 2304 || ncols_x == 3072) && n_tok >= 2 && n_tok <= 4) {
+        if (!ids && !small_k && nwarps1 == 4 && nrows_x % 2 == 0 && (ncols_x == 2304 || ncols_x == 3072) && n_tok >= 2 && n_tok <= 7) {
             const dim3 grid((nrows_x + 7)/8), block(32, 4);
             auto launch = [&](auto cols) {
                 constexpr int nc = decltype(cols)::value;
@@ -2029,6 +2029,9 @@ static void ik_mmvq_mr_launch(
                 case 2: launch(std::integral_constant<int, 2>{}); break;
                 case 3: launch(std::integral_constant<int, 3>{}); break;
                 case 4: launch(std::integral_constant<int, 4>{}); break;
+                case 5: launch(std::integral_constant<int, 5>{}); break;
+                case 6: launch(std::integral_constant<int, 6>{}); break;
+                case 7: launch(std::integral_constant<int, 7>{}); break;
             }
             return;
         }
