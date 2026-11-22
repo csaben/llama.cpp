@@ -1782,3 +1782,18 @@ The 128-query dispatch cutoff failed the two-sequence frozen-logit check. With 4
 Revision `c3068f43` uses the same Q8_0 tile loader at every eligible query count and passes the original MMA query-width selection through to it (8, 16, 32 or 64 columns). This also covers short prompt tails. The two-sequence reference then matched byte for byte, and the prototype measured 3,477 / 3,181 / 2,861 tok/s at 4K / 16K / 32K. The decode-specific fused kernel remains selected as before. [Short-query prefill and decode](p9/tails/).
 
 The seven short and long kernel cases in `c3068f43` passed CUDA memcheck and synccheck. All 432 original full-vocabulary rows matched. A new interleaved test then cycled through 7, 15, 31, 47, 127, 129 and 512 query rows. Against frozen, the first differing batch was the second 15-row batch after an 875-token prefix. The difference reproduced with one sequence and with two, including when the original allocator was restored. At 16 columns the Q8_0 kernel used 164 registers per thread and F16 used 190. The launcher's occupancy query changed the Stream-K partition and hence the reduction order. Revision `72fd097e` queries the matching F16 kernel for the partition and continues executing the Q8_0 kernel. The mixed-width check is now part of Phase 9 verification. [Width-transition test](p9/verify.sh), [interleaved driver](p7l3/logits.cpp), [preceding revision's measurements](p9/tails/integrated/).
+
+### Final GPU1 runtime
+
+Source `72fd097e` (`p9-runtime`) includes all three upstream fixes, the direct Q8_0 loader at all eligible query widths, and the reference Stream-K partition. The rebuilt binary matched 432 full-vocabulary FP32 rows under the original test, another 128 mixed-width interleaved rows (default and MR), and all 45 single-sequence / 90 two-sequence batch and decode rows from a traced replay. Seven backend cases passed ordinary execution, memcheck and synccheck. [Full-vocabulary pairs](p9/checks/full-logits.txt), [mixed-width pairs](p9/checks/interleave-mixed.txt), [batch trace checksums](p9/checks/mixed-batches.txt), [CUDA cases](p9/checks/q8-tiles.txt).
+
+| GPU1 measurement | Frozen P8m | Phase 9 |
+|---|---:|---:|
+| Q8_0 prefill 4K / 16K / 32K in the final bracket, tok/s | 3,457.2 / 3,145.1 / 2,819.2 | 3,464.3 / 3,169.8 / 2,862.1 |
+| Default tg128 at 0 / 4K / 16K / 32K, tok/s | 240.78 / 221.07 / 206.83 / 190.90 | 240.0 / 220.2 / 207.0 / 190.9 |
+| 16K uncached TTFT, plain / cap 6, s | 5.742 / 5.869 | 5.673 / 5.796 |
+| Near-full 64K cap 6 TTFT / minimum free VRAM | 30.100 s / 7,880 MiB | 29.232 s / 8,142 MiB |
+| Prefill PPL | 3.0530 | 3.0530 |
+| Whole-cache Q8_0-to-F16 launches at 16K | 3,072 | 0 |
+
+The final bracket changed prefill by +0.20% / +0.79% / +1.52%; short prefill is within the variation between the two frozen controls. The independent first Q8_0 sweep reached 3,486.9 / 3,185.5 / 2,864.7 tok/s and F16 reached 3,493.7 / 3,186.6 / 2,861.7. The final Q8_0 compute buffers were 520 / 952 / 1,816 MiB at 16K / 32K / 64K. Warm target-only process memory was 10,660 / 11,364 / 12,772 MiB. At 64K this saves 262 MiB over frozen Q8_0 and 1,072 MiB over frozen F16 process memory. [Release measurements](p9/release/), [frozen before](p9/final-frozen-before/), [release repeat](p9/release-repeat/), [frozen after](p9/final-frozen-after/).
