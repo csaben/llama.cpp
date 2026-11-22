@@ -299,6 +299,101 @@ static __device__ __forceinline__ float ik_reduce_moments(const float (&v)[n], i
     }
 }
 
+template<int ns, int threads, bool qr, bool repeat>
+static __device__ __forceinline__ void ik_mix_by_warp(const float4 * query, ik_state_ptrs st, void * dst, const float4 * nw,
+        float eps, float scale, float norm_eps) {
+    constexpr int slots = (576+threads-1)/threads;
+    const int t = threadIdx.x, lane = t%32;
+    __shared__ float red[18][2*ns], rms[ns], prob[ns], partial[18];
+    float4 xs[slots][ns], y[slots];
+#pragma unroll
+    for (int j = 0; j < slots; ++j) {
+        const int k = j*threads+t;
+        if (k < 576) {
+            const float4 q = query ? query[k] : make_float4(0,0,0,0);
+            float acc[2*ns];
+#pragma unroll
+            for (int i=0; i<ns; ++i) {
+                const float4 v = ((const float4 *)st.p[i])[k];
+                xs[j][i] = v;
+                acc[2*i] = v.x*v.x+v.y*v.y+v.z*v.z+v.w*v.w;
+                acc[2*i+1] = v.x*q.x+v.y*q.y+v.z*q.z+v.w*q.w;
+            }
+            if (query) {
+                const float val = ik_reduce_moments(acc,lane);
+                const int moment = __brev(lane)>>27;
+                if (moment < 2*ns) { red[k/32][moment] = val; }
+            }
+        }
+    }
+    __syncthreads();
+    float r=1, p=1;
+    if (query && (repeat || t<32)) {
+        float ss=0,dt=0;
+        if (lane<ns) {
+#pragma unroll
+            for (int w=0; w<18; ++w) {
+                ss += red[w][2*lane]; dt += red[w][2*lane+1];
+            }
+        }
+        r=rsqrtf(ss/2304+eps);
+        float sc=lane<ns ? dt*r*scale : -INFINITY;
+        const float mx=warp_reduce_max(sc);
+        sc=lane<ns ? expf(sc-mx) : 0;
+        p=sc/warp_reduce_sum(sc);
+        if (!repeat && lane < ns) { rms[lane]=r; prob[lane]=p; }
+    }
+    if constexpr (!repeat) { __syncthreads(); }
+    float factors[ns], probs[ns];
+#pragma unroll
+    for (int i=0; i<ns; ++i) {
+        factors[i]=query ? (repeat ? __shfl_sync(0xffffffff,r,i) : rms[i]) : 1.0f;
+        probs[i]=query ? (repeat ? __shfl_sync(0xffffffff,p,i) : prob[i]) : float(i==0);
+    }
+#pragma unroll
+    for (int j=0; j<slots; ++j) {
+        const int k=j*threads+t;
+        if (k<576) {
+            float4 v=make_float4(0,0,0,0);
+#pragma unroll
+            for (int i=0; i<ns; ++i) {
+                v.x += (xs[j][i].x*factors[i])*probs[i];
+                v.y += (xs[j][i].y*factors[i])*probs[i];
+                v.z += (xs[j][i].z*factors[i])*probs[i];
+                v.w += (xs[j][i].w*factors[i])*probs[i];
+            }
+            y[j]=v;
+            if (nw) {
+                const float ss = warp_reduce_sum(v.x*v.x+v.y*v.y+v.z*v.z+v.w*v.w);
+                if (!lane) { partial[k/32]=ss; }
+            }
+        }
+    }
+    float norm=1;
+    if (nw) {
+        __syncthreads();
+        norm=rsqrtf(warp_reduce_sum(lane<18 ? partial[lane] : 0.0f)/2304+norm_eps);
+    }
+#pragma unroll
+    for (int j=0; j<slots; ++j) {
+        const int k=j*threads+t;
+        if (k<576) {
+            float4 v=y[j];
+            if (nw) { const float4 w=nw[k]; v=make_float4(norm*v.x*w.x,norm*v.y*w.y,norm*v.z*w.z,norm*v.w*w.w); }
+            if constexpr (qr) { ik_store_q8_1_vec4(v,(block_q8_1 *)dst,k,true); }
+            else { ((float4 *)dst)[k]=v; }
+        }
+    }
+}
+
+template<int ns, int threads, bool q8, bool repeat>
+static __global__ void __launch_bounds__(threads) ik_res_mix_warps(const float4 * q, ik_state_ptrs st, void * dst,
+        int64_t qstride, float eps, float scale, ik_res_mix_norm norm) {
+    const int b=blockIdx.y;
+    ik_mix_by_warp<ns,threads,q8,repeat>(q ? q+b*qstride : nullptr,st,(char *)dst+b*(q8 ? 72*sizeof(block_q8_1) : 2304*sizeof(float)),
+            norm.nw ? (const float4 *)((const char *)norm.nw+b*norm.nw_nb1) : nullptr,eps,scale,norm.eps);
+}
+
 static int ik_moments_mode() {
     static const int mode = getenv("IK_MOMENTS") ? atoi(getenv("IK_MOMENTS")) : 0;
     return mode;
@@ -519,6 +614,22 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                 auto launch_mix = [&](auto state_count) {
                     constexpr int ns = decltype(state_count)::value;
                     if constexpr (ns != 0) {
+                        static const int tiled=getenv("IK_RES_WARPS") ? atoi(getenv("IK_RES_WARPS")) : 0;
+                        if (tiled && n_tok==1 && n_embd4==576 && ik_dependency_fusion(ctx)) {
+                            auto run=[&](auto width,auto rep) {
+                                constexpr int n=decltype(width)::value;
+                                ik_res_mix_warps<ns,n,kQ8,decltype(rep)::value><<<grid,n,0,stream>>>((const float4 *)q_d,st,dst->data,q_nb1/16,eps,scale,norm);
+                            };
+                            auto choose=[&](auto rep) {
+                                if ((tiled & 15)==1) { run(std::integral_constant<int,128>{},rep); return; }
+                                if ((tiled & 15)==2) { run(std::integral_constant<int,256>{},rep); return; }
+                                if ((tiled & 15)==3) { run(std::integral_constant<int,384>{},rep); return; }
+                                if ((tiled & 15)==4) { run(std::integral_constant<int,576>{},rep); return; }
+                                run(std::integral_constant<int,640>{},rep);
+                            };
+                            if (tiled&16) { choose(std::true_type{}); } else { choose(std::false_type{}); }
+                            return;
+                        }
                         if ((ik_moments_mode() & 4) && ik_dependency_fusion(ctx) && n_tok == 1) {
                             res_mix_f32_vec4<640, kQ8, ns, true><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
                                     n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
@@ -1027,6 +1138,44 @@ struct ik_mix_ctrl_args {
     float eps, scale, ctrl_eps;
 };
 
+template<int ns, int threads, int ranks, bool repeat>
+static __global__ void __launch_bounds__(threads) ik_down_warps(ik_mix_ctrl_args a) {
+    const int b=blockIdx.y, t=threadIdx.x, col=a.cols==1 ? 0 : b;
+    __shared__ __align__(16) float mixed[2304];
+    ik_mix_by_warp<ns,threads,false,repeat>(a.query+col*a.q_stride,a.st,mixed,nullptr,a.eps,a.scale,0);
+    __syncthreads();
+    if (blockIdx.x==0 && b==col) {
+        for (int i=t;i<576;i+=threads) { ((float4 *)a.mixed)[col*576+i]=((float4 *)mixed)[i]; }
+    }
+    __shared__ float mat[ranks*8][4];
+    for (int i=t; i<ranks*256; i+=threads) {
+        const int rank=ranks*blockIdx.x+i/256, k=i%256;
+        const half * w=a.weights+(b*64+rank)*4608;
+        float u[4]{};
+#pragma unroll
+        for (int j=0;j<9;++j) {
+            const int k0=k+256*j;
+            const float x=mixed[k0], v=a.msg[b*a.msg_stride+k0];
+            u[0]+=x*x; u[1]+=x*__half2float(w[k0]);
+            u[2]+=v*v; u[3]+=v*__half2float(w[2304+k0]);
+        }
+        const float val=ik_reduce_moments(u,t%32);
+        const int m=__brev(t%32)>>27;
+        if (m<4) { mat[i/32][m]=val; }
+    }
+    __syncthreads();
+    if (t<ranks*4) {
+        const int rank=t/4,m=t%4;
+        float f=0;
+#pragma unroll
+        for (int i=0;i<8;++i) { f+=mat[rank*8+i][m]; }
+        const unsigned mask=__activemask();
+        const float sa=__shfl_sync(mask,f,0,4), da=__shfl_sync(mask,f,1,4);
+        const float sb=__shfl_sync(mask,f,2,4), db=__shfl_sync(mask,f,3,4);
+        if (!m) { a.down[b*64+ranks*blockIdx.x+rank]=da*rsqrtf(sa/2304+a.ctrl_eps)+db*rsqrtf(sb/2304+a.ctrl_eps); }
+    }
+}
+
 template <int ns, bool compact = false, int ranks = 2, bool stage = false, bool split = false>
 static __global__ void __launch_bounds__(640) ik_mix_down(ik_mix_ctrl_args a) {
     const int b = blockIdx.y, t = threadIdx.x, k = t%256;
@@ -1164,6 +1313,25 @@ bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml
     }
     auto launch = [&](auto count) {
         constexpr int n = decltype(count)::value;
+        static const int tiled=getenv("IK_DOWN_WARPS") ? atoi(getenv("IK_DOWN_WARPS")) : 0;
+        if (tiled) {
+            auto run=[&](auto width, auto size, auto rep){
+                constexpr int nt=decltype(width)::value, nr=decltype(size)::value;
+                ik_down_warps<n,nt,nr,decltype(rep)::value><<<dim3(64/nr,down->ne[2]),nt,0,ctx.stream()>>>(a);
+            };
+            auto choose=[&](auto rep) {
+                if ((tiled&15)==1) { run(std::integral_constant<int,128>{},std::integral_constant<int,1>{},rep); return; }
+                if ((tiled&15)==2) { run(std::integral_constant<int,256>{},std::integral_constant<int,1>{},rep); return; }
+                if ((tiled&15)==3) { run(std::integral_constant<int,256>{},std::integral_constant<int,2>{},rep); return; }
+                if ((tiled&15)==4) { run(std::integral_constant<int,384>{},std::integral_constant<int,2>{},rep); return; }
+                if ((tiled&15)==5) { run(std::integral_constant<int,576>{},std::integral_constant<int,2>{},rep); return; }
+                if ((tiled&15)==6) { run(std::integral_constant<int,576>{},std::integral_constant<int,4>{},rep); return; }
+                if ((tiled&15)==7) { run(std::integral_constant<int,640>{},std::integral_constant<int,2>{},rep); return; }
+                if ((tiled&15)==8) { run(std::integral_constant<int,256>{},std::integral_constant<int,4>{},rep); return; }
+            };
+            if (tiled&16) { choose(std::true_type{}); } else { choose(std::false_type{}); }
+            return;
+        }
         static const int stage = getenv("IK_DOWN_TILE") ? atoi(getenv("IK_DOWN_TILE")) : 0;
         if (stage == 1) {
             ik_mix_down<n,true,2,true><<<dim3(32,down->ne[2]),640,0,ctx.stream()>>>(a);
