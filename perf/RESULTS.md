@@ -1367,8 +1367,116 @@ The entries are median decode tok/s over three independent 384-token requests pe
 
 ### Request-local policy
 
-The cached, single-sequence DSpark path starts each request with empty timing and acceptance statistics. It measures the time between draft calls and derives the number of accepted tokens from the committed target position. A new graph's first timing is discarded. The short-window cost priors on GPU1, in units of a plain step, are 1.00 for plain, 1.20 for a draft with no proposed tokens, and 1.57 / 1.89 / 2.22 / 2.64 for verifying one through four proposals. Measurements update the costs for the current request. A few plain steps supply the local time scale during warm-up and as the context grows.
+The cached, single-sequence DSpark path starts each request with empty timing and acceptance statistics. It measures the time between draft calls and derives the number of accepted tokens from the committed target position. A new graph's first timing is discarded. The short-window cost priors on GPU1, in units of a plain step, are 1.00 for plain, 1.20 for a draft with no proposed tokens, and 1.57 / 1.89 / 2.22 / 2.64 for verifying one through four proposals. Measurements update the costs for the current request. A few plain steps supply the local time scale during warm-up and as the context grows. The first plain sample is due after sixteen rounds. During warm-up the policy can try up to three proposals when all their margins reach 2.0. Once it has observed at least four paid rounds and the smoothed gain falls below 1.22, normal cost-based width selection takes over.
 
-The policy reads the current draft's token IDs and top-two logit margins together. It estimates conditional acceptance in eight confidence bins, decays the observations by 0.92 per paid draft round, and counts only the prefix tested through the first rejection. It scores each candidate width by expected committed tokens divided by window time. A top-two margin below 0.4 ends the candidate prefix. Opening a window wider than the packed four-row verifier requires sustained gains and an incremental rate advantage. After a paid draft offers no useful prefix and recent verified throughput falls below plain, the next steps use plain decode. Repeated weak windows extend the interval up to eight steps, then the policy probes again. The target verifies and commits every output token.
+The policy reads the current draft's token IDs and top-two logit margins together. It estimates conditional acceptance in eight confidence bins, decays the observations by 0.92 per paid draft round, and counts only the prefix tested through the first rejection. It scores each candidate width by expected committed tokens divided by window time. A top-two margin below 0.4 ends the candidate prefix. The cached model head scores up to three positions, or a larger explicitly requested minimum. This avoids paying for a fourth prediction on every round at cap 4. History copies can use the configured cap after at least two measured history windows with 85% acceptance. After a paid draft offers no useful prefix and recent verified throughput falls below plain, the next steps use plain decode. Repeated low-confidence windows extend standby up to eight steps. Six successive verified proposal windows that each deliver less than 0.98 times the plain rate trigger four to 64 plain steps, even if the model keeps reporting high confidence. A new probe can switch drafting back on. The target verifies and commits every output token.
 
-For a repeated eight-token suffix, the existing history matcher can supply a continuation before the GPU drafter runs. If fewer than half the proposed history tokens were accepted over at least two completed history windows, the matcher requires twelve matching tokens. The measured cost and acceptance of history guesses are kept out of the model-draft bins. This matters on edits that reproduce parts of the input. The final preset uses the original folded 32K shortlist. [Implementation](../common/speculative.cpp), [history matcher](../common/ngram-map.cpp), [policy trials](p7b/policy-trials/).
+For a repeated twelve-token suffix, the existing history matcher can supply a continuation before the GPU drafter runs. If fewer than half the proposed history tokens were accepted over at least two completed history windows, the matcher requires sixteen matching tokens. History matches have their own acceptance counts. They do not contribute to the paid model window timings or confidence bins. This matters on edits that reproduce parts of the input. A diagnostic forced token ID 1 and a margin of 16 at every paid model position. Sustained-loss backoff increased plain steps from 5 to 362 over a 384-token reply while preserving all output IDs. The two measured rates were 111.9 and 198.5 tok/s with the deliberately perturbed drafter. The final preset uses the original folded 32K shortlist. [Rejection control](p7b/policy-trials/rejection-control.txt). [Implementation](../common/speculative.cpp), [history matcher](../common/ngram-map.cpp), [policy trials](p7b/policy-trials/).
+
+### Staged policy performance
+
+Build `a9cdc61` uses the same target and folded 32K drafter as Phase 7. With the release flags, caps 2, 3 and 4 all use the guard. `LLAMA_DSPARK_POLICY=1` activates it even with the older `LLAMA_DSPARK_ADAPTIVE=0` preset. Adaptive mode 2 still forces plain steps for measurement. Each bare-cap row and each explicit adaptive row came from a fresh server. Requests disabled prompt caching, used greedy sampling, and suppressed EOS to compare equal output lengths. Some requests returned the same visible message across output lengths, including the gardener letter. The recorded IDs capture the full forced decode. The two tables report server decode tok/s. The first shows medians of three runs, the second one run per cell. All 120 drafted replies, including reasoning content and all 124,560 generated IDs, matched same-flags plain. Both plain references also matched the frozen Phase 7 outputs. [384-token outputs](p7b/release/384/), [3,000-token outputs](p7b/release/3000/).
+
+**384 output tokens**
+
+| Configuration | Code | Edit | Prose | Edit at 16K | Edit at 32K |
+|---|---:|---:|---:|---:|---:|
+| Plain MR/MMA | 210.6 | 200.1 | 209.2 | 183.1 | 170.9 |
+| Cap 2 | 246.1 | 310.1 | 215.8 | 258.2 | 233.1 |
+| Cap 3 | 247.5 | 332.6 | 214.8 | 285.4 | 252.9 |
+| Cap 4 | 246.4 | 337.3 | 216.8 | 286.6 | 238.0 |
+| Explicit adaptive 2 | 246.4 | 306.9 | 216.7 | 257.4 | 237.4 |
+| Explicit adaptive 3 (staged preset) | 247.7 | 339.8 | 212.9 | 286.7 | 249.9 |
+| Explicit adaptive 4 | 238.6 | 337.7 | 217.3 | 286.5 | 240.6 |
+
+**3,000 output tokens**
+
+| Configuration | Code | Edit | Prose | Edit at 16K | Edit at 32K |
+|---|---:|---:|---:|---:|---:|
+| Plain MR/MMA | 201.4 | 197.0 | 200.5 | 182.3 | 169.2 |
+| Cap 2 | 255.8 | 278.3 | 270.6 | 266.9 | 264.5 |
+| Cap 3 | 267.6 | 296.8 | 288.0 | 288.6 | 290.2 |
+| Cap 4 | 265.2 | 291.2 | 284.7 | 283.9 | 280.2 |
+| Explicit adaptive 2 | 252.2 | 274.7 | 269.7 | 264.7 | 263.6 |
+| Explicit adaptive 3 (staged preset) | 266.4 | 294.3 | 286.6 | 289.7 | 294.0 |
+| Explicit adaptive 4 | 267.8 | 293.6 | 285.7 | 287.9 | 281.6 |
+
+All sixty guarded prompt/length/configuration comparisons exceeded plain. The smallest gains were 1.8% at 384 tokens (`n3-adapt`, prose) and 25.2% at 3,000 (`n2-adapt`, code). Phase 7's 324 tok/s short-edit baseline used cap 3 on the 1,025-token edit input. At the same cap the staged policy reached 339.8 tok/s. Cap 2 and the longer edit inputs have separate rates in the tables. A previous candidate yielded 210.1 tok/s on cap-3 short prose against 210.7 plain, despite matching every output. Its complete short matrix is retained. A second candidate passed that matrix but lost 1.1 tok/s on the 384-token gardener letter at cap 4. [First candidate](p7b/policy-trials/edb40f8-384/), [second candidate](p7b/policy-trials/36ecab1/prose/).
+
+**Forced fixed-width controls, 3,000 output tokens**
+
+Setting `LLAMA_DSPARK_POLICY=0` with adaptive mode unset disables the guard for the control experiment. The final binary produced the same full messages and IDs at both lengths, with 45 short and 15 long drafted replies. The table shows the long controls. [Final short controls](p7b/release/fixed-384/), [final long controls](p7b/release/fixed-3000/).
+
+| Configuration | Code | Edit | Prose | Edit at 16K | Edit at 32K |
+|---|---:|---:|---:|---:|---:|
+| Plain MR/MMA | 201.4 | 197.0 | 200.5 | 182.3 | 169.2 |
+| Forced 2 | 253.4 | 269.5 | 243.0 | 254.2 | 249.3 |
+| Forced 3 | 259.8 | 287.7 | 238.8 | 274.4 | 274.3 |
+| Forced 4 | 238.1 | 272.9 | 217.3 | 260.9 | 267.5 |
+
+**Additional 384-token prose, median of five**
+
+| Configuration | Gardener's letter | Moon explanation | Station mystery | Cafe review | Piano dialogue |
+|---|---:|---:|---:|---:|---:|
+| Plain MR/MMA | 211.7 | 211.2 | 210.5 | 210.4 | 210.3 |
+| Explicit adaptive 2 | 217.8 | 235.1 | 221.1 | 217.2 | 216.9 |
+| Explicit adaptive 3 (staged preset) | 214.5 | 236.1 | 220.3 | 217.4 | 213.6 |
+| Explicit adaptive 4 | 213.1 | 231.9 | 221.2 | 216.0 | 214.9 |
+
+**Additional 3,000-token prose**
+
+| Configuration | Gardener's letter | Moon explanation | Station mystery | Cafe review | Piano dialogue |
+|---|---:|---:|---:|---:|---:|
+| Plain MR/MMA | 201.0 | 200.2 | 200.8 | 200.7 | 200.2 |
+| Explicit adaptive 2 | 304.0 | 309.0 | 244.5 | 294.7 | 261.8 |
+| Explicit adaptive 3 (staged preset) | 336.5 | 342.0 | 254.1 | 321.8 | 276.9 |
+| Explicit adaptive 4 | 339.3 | 345.0 | 253.9 | 323.0 | 272.7 |
+
+All 90 additional drafted replies matched same-flags plain in both message and token IDs. The smallest gains across the five extra prompts were 0.7% at 384 tokens and 21.8% at 3,000. The cafe review and piano dialogue were reserved until the release run. Runtime depends on the output and GPU timing. These floors describe configuration medians on the short fixtures. Individual repeats varied. The staged cap-3 lighthouse runs were 195, 213 and 218 tok/s. The cap-4 letter runs ranged from 207 to 216 tok/s. [Prompt text](p7b/prose-prompts.json), [short repeats](p7b/release/prose/), [long runs](p7b/release/prose-3000/).
+
+On the original short prose prompt, a separate cap-3 diagnostic counted 38 plain steps, 76 paid draft rounds with zero proposals, and 2 history windows (6/6 tokens accepted). On the short edit it counted 3 plain steps and 78 history windows (229/234 accepted). Policy timing, decay and backoff operate on the current request. [Prose trace](p7b/release/policy/prose.txt), [edit trace](p7b/release/policy/edit.txt).
+
+### Release checks and staging
+
+The final binary repeated the logit trace, padding, SWA rollback and mixed-width checks under defaults and the release environment. Both runs had zero differing rows out of 2,714, six matching greedy outputs and 1,108 passing backend cases. Both packing layouts agreed with single-token decode in 1,024 additional rows at four depths. A further 88 full-vocabulary FP32 rows were byte-identical to frozen Phase 7. Prefill PPL was 3.0530, default decode PPL 4.1979 and MR/MMA decode PPL 4.2038, matching the saved Phase 7 precision. [Default battery](p7b/release/checks-default/), [release battery](p7b/release/checks/), [depth scan](p7b/release/depths.txt), [full logit hashes](p7b/release/full-logits.txt).
+
+| Final plain tg128, three repetitions | Depth 0 | 4K | 16K | 32K |
+|---|---:|---:|---:|---:|
+| Default | 230.06 | 210.43 | 197.81 | 182.99 |
+| Default environment, MR/MMA | 214.63 | 199.96 | 188.69 | 174.04 |
+| Release environment | 229.20 | 210.74 | 198.21 | 181.30 |
+| Release environment, MR/MMA | 214.05 | 199.79 | 188.18 | 174.52 |
+
+The single snapshot is `~/inkling-live-bin-p7b-a9cdc61` (local source tag `p7b-release-policy`, release tag `p7b-release`). All nine files passed SHA-256. The server resolves its eight project libraries inside the snapshot. An isolated server on port 8041 exercised the staged files in plain / policy with adaptive=0 / policy with adaptive=1 / plain order, with five repeats per prompt. Its full outputs matched the release matrix. The manual deploy script pins GPU1, one 64K slot and cap 3, checks the manifest before stopping the previous unit, and invokes `restore-p5.sh` if launch or health checking fails. Only its shell syntax and contents were checked. No live service or container was started or stopped. [Snapshot hashes](p7b/snapshot.sha256), [library resolution](p7b/snapshot-libraries.txt), [version](p7b/snapshot-version.txt), [snapshot probes](p7b/release/snapshot-probes/), [manual deploy script](live/deploy-p7b.sh).
+
+| Isolated snapshot, median of five | Edit | Prose |
+|---|---:|---:|
+| Plain, first | 201.9 | 209.9 |
+| Policy on, adaptive=0 | 337.0 | 216.9 |
+| Policy on, adaptive=1 | 338.8 | 216.0 |
+| Plain, last | 202.0 | 210.0 |
+
+**Reproduction on GPU1**
+
+From this checkout, build the source tag, then use the original target and drafter paths from `perf/p5env.sh` and `perf/p6/r4_spec.sh`. The matrix and correctness runners below launch isolated test processes. Use a fresh output directory.
+
+```bash
+source perf/p5env.sh
+export CUDA_DEVICE_ORDER=PCI_BUS_ID LD_LIBRARY_PATH="$PWD/build/bin"
+export LLAMA_DSPARK_DEV=1 LLAMA_DSPARK_ROUND=1 LLAMA_DSPARK_GRAPHS=1 LLAMA_DSPARK_POLICY=1
+export IK_WINDOW_COLS=1 IK_QUEUE_INPUTS=1 GGML_CUDA_GRAPH_CHUNK_SIZE=0
+export LLAMA_ARG_OVERRIDE_TENSOR='token_embd.weight=CUDA0'
+export LLAMA_ARG_SPEC_DRAFT_OVERRIDE_TENSOR='mask_embd.weight=CUDA0'
+export SPEC_CTX=65536 SPEC_REQUIRE_IDS=1 SPEC_KINDS=code,edit,prose,edit@16K,edit@32K
+rows=(plain-mr n2 n3 n4 n2-adapt n3-adapt n4-adapt)
+out=$(mktemp -d)
+for budget in 384 3000; do
+    reps=1
+    if [[ $budget == 384 ]]; then reps=3; fi
+    SPEC_MAXT=$budget SPEC_REPS=$reps bash perf/p6/r4_spec.sh "$out/$budget" "${rows[@]}"
+    python3 perf/p6/r4_cmp.py "$out/$budget" "${rows[@]}"
+done
+CHECKS_OUT="$out/checks" bash perf/p6/r4_checks.sh
+```
+
+For the default battery, use a fresh shell with only `perf/p5env.sh` and `CUDA_DEVICE_ORDER=PCI_BUS_ID`. The bytewise cross-build reference driver is `perf/p7l3/logits.cpp`. Compile it against `build/bin` and select frozen or release libraries with `LD_LIBRARY_PATH`. Pass `"$Q2" perf/ppl.txt PREFIX ROWS`, using 200/64, 4096/8, 16384/8 and 32768/8. The depth scan used two consecutive copies of `perf/ppl.txt`, `mr_check` with 32 windows, `IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=4 MR_SIZES=4 MR_ROLLBACK=0 MR_CTX=34816`, and both settings of `IK_WINDOW_COLS`.
