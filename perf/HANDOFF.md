@@ -1,5 +1,36 @@
 # Phase 6 hand-off (keep current; newest status first)
 
+## Round 2 status (2026-11-21, in flight)
+
+Brief: "Round 2" at the end of `perf/PHASE6_BRIEF.md`. New flag **`IK_MMA`** (off by default; `IK_MMA=3` is the setting to use,
+together with `IK_MR=1`). Folded drafter file: `~/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-Q2K.gguf` (`$DRAFT_FOLD`).
+
+Done (commits on `inkling-3090` after `929ef5f`):
+- `ik_mma_moe` (`mmvq.cu`): expert matvecs on tensor cores, `mma.sync m16n8k32` s8, tokens as the 8 columns, expert dedup by
+  ballot over the ids (layout after ingine `moe_up_kernel`, Apache-2.0, credited in the file header and `NOTICE.inkling`).
+  `IK_MMA=1`: Q2_K and Q2_0 experts. Correct to 1e-6 against the dp4a kernels (`IK_MMA_CHECK=1` prints the difference).
+- Exactness: a different fp32 order changes logits by up to 3.7 (the model amplifies 1e-7 through routing and Q8_1
+  re-quantization), so the single-token path takes the same kernels (`ggml_cuda_ik_mma_moe_ok`, `ggml-cuda.cu` MUL_MAT_ID).
+  Windows are again bit-identical to single-token decode (`mr_check`: 0 rows differ).
+- `ik_q2k_moe` (`IK_MMA=3`, bit 2): Q2_K experts on CUDA cores with exact block sums (one fp32 multiply-add per Q8_1 block,
+  activation sums from a prologue, weights unpacked once for all tokens of the expert). Faster than the mma kernel on this
+  card at 1 token (19.2 vs 20.9 us; dp4a kernel 18.6) and equal at 4 (56 us for 20 experts). Q2_0 stays on tensor cores
+  (10.7 us at 1 token vs 11.25 dp4a; 29 us at 4).
+- Window dense matvecs (`ik_mmvq_mr`, `ik_segmented_projection_rows`): IQ4_NL weights looked up once for all columns
+  (`ik_iq4_nl_decode` / `ik_iq4_nl_dot` in `vecdotq.cuh`), bit-identical. Head 628 -> 388 us, 4300 rows 30 -> 22 us.
+- Window cost (`MR_SIZES=n MR_ROLLBACK=0 mr_check ... 300 16`, `IK_MMA=3 IK_MR=1`): 2 / 3 / 4 / 8 rows = 6.65 / 8.63 / 9.8 / 19.1 ms
+  (round 1: 8.92 / 11.02 / 13.13 / 22.88); single token 4.76 ms; plain `llama-bench` tg128 210.5 (IK_MMA=3) vs 210.9.
+- Drafter head fold: `perf/p6/dspark_fold.py TARGET DRAFTER OUT` writes `dspark_head_fold.{weight (Q8_0 [256, n_vocab]), bias}`;
+  `src/models/dspark.cpp` uses it when present (`LLAMA_DSPARK_FOLD=0` turns it off). Idea from basalt (MIT), no code copied.
+
+Not done / dropped (measured): a block that walks several experts (59.6-70 us vs 56), two rows per lane, 5 blocks per SM by
+`__launch_bounds__`, the min term as one f16 mma (no gain); tensor-core dense matvecs (the single-token dense kernels are at
+the DRAM floor and their fp32 order cannot be reproduced from 32-wide sums; a different order is not acceptable, see above).
+
+Next: re-run the measurement table (`perf/p6/r2_spec.sh`), plain regression + PPL with `IK_MMA=3`, RESULTS.md "round 2",
+`bash perf/live/restore-p5.sh`.
+
+
 Brief: `perf/PHASE6_BRIEF.md`. Environment: `. perf/p5env.sh` (GPU1 only, live flags, `$Q2`, `$DRAFT`). Raw outputs: `perf/p6/`.
 Everything new is behind **`IK_MR=1`** (off by default; plain decode and the old batched path are unchanged without it).
 The user's live server is stopped; at the very end run `bash perf/live/restore-p5.sh`.

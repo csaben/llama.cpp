@@ -5,3 +5,4 @@ export Q2="$HOME/models/inkling-2-mini/Inkling-2-Mini-experimental-Q2K-Q2_0-fit.
 export IQ4="$HOME/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL-dense-iq4nl.gguf"
 export Q6="$HOME/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL-dense-q6k.gguf"
 export DRAFT="$HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0.gguf"
+export DRAFT_FOLD="$HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-Q2K.gguf"

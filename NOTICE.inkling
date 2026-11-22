@@ -37,3 +37,22 @@ SOFTWARE.
 Phase 6 (window verify, perf/RESULTS.md "Phase 6") took ideas, and no code, from:
   ingine  https://github.com/satellitedown/inkling-2-mini-abliterated-ingine  (Apache-2.0)
   basalt  https://github.com/jesdga95/basalt                                    (MIT)
+
+--------------------------------------------------------------------------------
+Phase 6 round 2 (perf/RESULTS.md "Phase 6", "Round 2"):
+
+ggml/src/ggml-cuda/mmvq.cu, the kernels ik_mma_moe and ik_q2k_moe, adapt the kernel layout of ingine's
+native/src/kernels/moe/moe.cu (moe_up_kernel, slot_mask) and native/src/kernels/dense/gemv.cu (gemv_mma_kernel):
+16-row tiles with the tokens of a window as the 8 mma columns, lane (g, t) feeding rows g and g+8 and token g from its
+own loads, a fixed-order reduction of the warps' partial tiles through shared memory, and the ballot over the expert
+ids by which the first (token, slot) pair owns an expert. Changes: integer operands (mma.sync m16n8k32 s8) unpacked
+from GGUF Q2_K / Q2_0 blocks against Q8_1 activations instead of BF16 from NVFP4 / MXFP8, fp32 block scales applied
+after the integer sums, a CUDA-core variant with exact block sums, no programmatic dependent launch, no L2 hints.
+
+  Inkling-2-Mini abliterated - ingine
+  Copyright 2026 satellitedown
+  https://github.com/satellitedown/inkling-2-mini-abliterated-ingine
+  Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
+
+perf/p6/dspark_fold.py and the folded head in src/models/dspark.cpp take the idea of basalt's head fold
+(https://github.com/jesdga95/basalt, MIT, src/models/inkling2/dspark.hpp); no code was copied.
