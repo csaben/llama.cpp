@@ -1,0 +1,56 @@
+build/p6p/down.log:0
+build/p6p/down.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.78 ± 1.75 |
+build/p6p/down.log:2
+build/p6p/down.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.30 ± 2.12 |
+build/p6p/down.log:4
+build/p6p/down.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.49 ± 1.53 |
+build/p6p/down.log:8
+build/p6p/down.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.32 ± 1.69 |
+build/p6p/down.log:0
+build/p6p/down.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.04 ± 1.79 |
+build/p6p/attn.log:base
+build/p6p/attn.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        206.14 ± 1.87 |
+build/p6p/attn.log:fixed
+build/p6p/attn.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        208.45 ± 1.57 |
+build/p6p/attn.log:512
+build/p6p/attn.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        207.47 ± 1.65 |
+build/p6p/attn.log:2048
+build/p6p/attn.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        206.74 ± 1.40 |
+build/p6p/attn.log:4096
+build/p6p/attn.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        206.39 ± 1.61 |
+build/p6p/attn.log:base
+build/p6p/attn.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        204.99 ± 1.56 |
+build/p6p/attn.log:4096
+build/p6p/attn.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.91 ± 1.43 |
+build/p6p/attn.log:fixed
+build/p6p/attn.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        207.19 ± 1.30 |
+build/p6p/experts.log:0,0
+build/p6p/experts.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.80 ± 2.45 |
+build/p6p/experts.log:0,1
+build/p6p/experts.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        204.41 ± 2.46 |
+build/p6p/experts.log:0,2
+build/p6p/experts.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        207.78 ± 1.78 |
+build/p6p/experts.log:0,4
+build/p6p/experts.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.25 ± 1.65 |
+build/p6p/experts.log:1,0
+build/p6p/experts.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        202.96 ± 1.86 |
+build/p6p/experts.log:2,0
+build/p6p/experts.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        201.46 ± 1.98 |
+build/p6p/experts.log:4,0
+build/p6p/experts.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        200.40 ± 2.05 |
+build/p6p/experts.log:0,0
+build/p6p/experts.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        204.87 ± 1.74 |
+build/p6p/screen.log:control
+build/p6p/screen.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.56 ± 1.45 |
+build/p6p/screen.log:split1
+build/p6p/screen.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        205.31 ± 1.37 |
+build/p6p/screen.log:routerconv
+build/p6p/screen.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        201.42 ± 1.26 |
+build/p6p/screen.log:persistent
+build/p6p/screen.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        199.12 ± 1.41 |
+build/p6p/screen.log:ctrl_norm
+build/p6p/screen.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        202.28 ± 0.71 |
+build/p6p/screen.log:split1_again
+build/p6p/screen.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        204.23 ± 1.17 |
+build/p6p/screen.log:control2
+build/p6p/screen.log:| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        204.39 ± 1.21 |
