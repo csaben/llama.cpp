@@ -806,6 +806,17 @@ mixed use (+3% / +29% / -12% / +19%). Command: the round 1 deploy command below 
 `--setenv=IK_MMA=3` added, `--setenv=LLAMA_DSPARK_ADAPTIVE=1` removed, and
 `--spec-draft-model $HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-Q2K.gguf`. Not run at 64K context.
 
+## Round 4 - long-reply exactness (GPU1, RTX 3090)
+
+Rounds 1-3 saved `message.content`. At 384 tokens these replies contained only reasoning, so equality between the saved zero-byte files provided no evidence of exactness. The Round 4 probe saves canonical JSON for the entire message and checks generated token IDs as well. With EOS suppressed, the chat parser can finish the visible answer before generation reaches 3000. The token check covers the remaining positions.
+
+The first edit discrepancy is **generated token 1689** (index 1688, absolute position 2713 after a 1025-token prompt). The existing backend-sampling plain run chose ID 159542 (` scripts`), ahead of 155282 (` separate`) by 0.03136 logit. The old n=3 run ranked them in the opposite order, with a 0.04667 margin. The replay saw the first different logit row at input position **2561**, well before the text diverged at character 4843.
+
+- A wrapped SWA cache still had 1536 occupied cells (1024 visible-history limit plus 512 batch slack). Its current physical write index was 1025. The window kernel treated the fully masked high cells as unallocated and chose a smaller padded extent. That changed the grouping of the attention sums. With the cache's actual pre-window extent and each row's writes, the saved failing trace went from **163/1699** different kept rows (max absolute logit error 8.97) to **0/1699**, bit-for-bit. Fix `dca9008`.
+- A separate five-row test rejected cells 1535, 0 and 1. Restarting the search at the lowest physical index misplaced the next token. The Inkling window path now rewinds the ring to the freed cell with the earliest token position. At prefixes 1533 and 3069, **70/73** and **71/73** differing rows became **0/73**. At prefix 4500 all 73 rows matched both before and after. Fix `06d9abb`. This commit also fixes an uninitialized taps flag in the generic window KV kernel; the measured specialized kernels already supplied that flag at compile time.
+
+Measurement in progress. The live deployment recommendation for this round follows the finished checks. Commands and status are in `perf/HANDOFF.md`.
+
 ## Round 3 (2026-11-21, `1c46feb`; flags `IK_MMA=3 IK_MR=1`, drafter file with fold + shortlist head)
 
 Goal: 300 tok/s on the edit prompts with DSpark, new code and prose never slower than plain. Raw outputs:

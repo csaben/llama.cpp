@@ -1,0 +1,16 @@
+Before the padded KV extent fix (3aea16a + trace harness)
+greedy check: 2 of the server's tokens are not the argmax of the single-token logits (first: the token at position 2713, generated token 1688, its logit is 0.03136 below the best)
+pos 2561 (row 0 of a 4-row step, trace event 868): 200053 logits differ, max |diff| 0.29; events before: D[2556..2559] rm>=2560 D[2560..2563] rm>=2561 D[2561..2564]
+pos 2562 (row 1 of a 4-row step, trace event 868): 200040 logits differ, max |diff| 0.305; events before: D[2556..2559] rm>=2560 D[2560..2563] rm>=2561 D[2561..2564]
+pos 2563 (row 2 of a 4-row step, trace event 868): 200054 logits differ, max |diff| 0.754; events before: D[2556..2559] rm>=2560 D[2560..2563] rm>=2561 D[2561..2564]
+pos 2564 (row 3 of a 4-row step, trace event 868): 200055 logits differ, max |diff| 0.689; events before: D[2556..2559] rm>=2560 D[2560..2563] rm>=2561 D[2561..2564]
+pos 2565 (row 0 of a 4-row step, trace event 870): 200054 logits differ, max |diff| 0.554; events before: D[2560..2563] rm>=2561 D[2561..2564] rm>=2565 D[2565..2568]
+pos 2566 (row 1 of a 4-row step, trace event 870): 200048 logits differ, max |diff| 0.722; events before: D[2560..2563] rm>=2561 D[2561..2564] rm>=2565 D[2565..2568]
+pos 2567 (row 2 of a 4-row step, trace event 870): 200054 logits differ, max |diff| 0.797; events before: D[2560..2563] rm>=2561 D[2561..2564] rm>=2565 D[2565..2568]
+pos 2568 (row 3 of a 4-row step, trace event 870): 200038 logits differ, max |diff| 0.301; events before: D[2560..2563] rm>=2561 D[2561..2564] rm>=2565 D[2565..2568]
+replay of n3.trace: prompt 1025 tokens, 1699 output rows up to position 2723 (rows by step size: 1:1 2:0 3:0 4:1698 5+:0): 163 rows differ from single-token decode, max |logit diff| 8.97
+
+Before the ring rewind fix (dca9008)
+73 rows in 24 steps (positions 1533..1605) after a 1533-token prefix: 70 rows differ from single-token decode, max |logit diff| 5.94
+73 rows in 24 steps (positions 3069..3141) after a 3069-token prefix: 71 rows differ from single-token decode, max |logit diff| 1.52
+73 rows in 24 steps (positions 4500..4572) after a 4500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
