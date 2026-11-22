@@ -25,3 +25,5 @@ The 384-token main matrix passed all 42 drafted cells (three identical repeats e
 The additional short prose suite passed every byte and ID in all 100 drafted requests. The last review/dialogue cells ran below the initial plain control. GPU 0 reached 86 C and reported changing clocks during these rows. Paired runs bracket both implementations and repeat the same prompt order. [Additional short prose](p8bc/matrix/prose-384.txt).
 
 All 280 short drafted requests (107,520 emitted IDs) now match same-flags plain, including the forced-width controls. The 3,000-token matrix is in progress. [Fixed-width 384](p8bc/matrix/fixed-384.txt).
+
+All 42 guarded 3,000-token main cells match the full plain messages and 126,000 IDs. The cap-6 agent cell measured 270.9 tok/s after the long-context cells in this matrix. Rates depend on thermal state and prompt order, so the paired comparison remains the throughput reference. [Long main matrix](p8bc/matrix/main-3000.txt).

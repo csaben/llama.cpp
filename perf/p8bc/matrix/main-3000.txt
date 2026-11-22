@@ -1,0 +1,48 @@
+plain          code      prompt     47  3000 tok   195.3 tok/s    9296 chars
+plain          edit      prompt   1025  3000 tok   189.7 tok/s    9009 chars
+plain          prose     prompt     36  3000 tok   179.1 tok/s   10905 chars
+plain          edit@16K  prompt  16044  3000 tok   162.5 tok/s    4508 chars
+plain          edit@32K  prompt  32045  3000 tok   152.5 tok/s    2271 chars
+plain          agent     prompt   2025  3000 tok   174.0 tok/s    6154 chars
+n2             code      prompt     47  3000 tok   252.2 tok/s    9296 chars  accepted/proposed 1637/1886
+n2             edit      prompt   1025  3000 tok   273.1 tok/s    9009 chars  accepted/proposed 1803/1932
+n2             prose     prompt     36  3000 tok   266.7 tok/s   10905 chars  accepted/proposed 1665/1863
+n2             edit@16K  prompt  16044  3000 tok   263.7 tok/s    4508 chars  accepted/proposed 1843/1977
+n2             edit@32K  prompt  32045  3000 tok   250.6 tok/s    2271 chars  accepted/proposed 1917/2000
+n2             agent     prompt   2025  3000 tok   277.9 tok/s    6154 chars  accepted/proposed 1928/1987
+n3             code      prompt     47  3000 tok   264.7 tok/s    9296 chars  accepted/proposed 1800/2075
+n3             edit      prompt   1025  3000 tok   290.7 tok/s    9009 chars  accepted/proposed 1988/2142
+n3             prose     prompt     36  3000 tok   283.8 tok/s   10905 chars  accepted/proposed 1841/2060
+n3             edit@16K  prompt  16044  3000 tok   262.9 tok/s    4508 chars  accepted/proposed 2051/2222
+n3             edit@32K  prompt  32045  3000 tok   230.9 tok/s    2271 chars  accepted/proposed 2141/2236
+n3             agent     prompt   2025  3000 tok   258.0 tok/s    6154 chars  accepted/proposed 2148/2216
+n4             code      prompt     47  3000 tok   263.8 tok/s    9296 chars  accepted/proposed 1802/2084
+n4             edit      prompt   1025  3000 tok   289.6 tok/s    9009 chars  accepted/proposed 1982/2133
+n4             prose     prompt     36  3000 tok   282.4 tok/s   10905 chars  accepted/proposed 1841/2056
+n4             edit@16K  prompt  16044  3000 tok   199.0 tok/s    4508 chars  accepted/proposed 2107/2266
+n4             edit@32K  prompt  32045  3000 tok   244.8 tok/s    2271 chars  accepted/proposed 2147/2247
+n4             agent     prompt   2025  3000 tok   279.3 tok/s    6154 chars  accepted/proposed 2147/2220
+n2-adapt       code      prompt     47  3000 tok   250.8 tok/s    9296 chars  accepted/proposed 1638/1887
+n2-adapt       edit      prompt   1025  3000 tok   271.1 tok/s    9009 chars  accepted/proposed 1805/1925
+n2-adapt       prose     prompt     36  3000 tok   266.4 tok/s   10905 chars  accepted/proposed 1660/1855
+n2-adapt       edit@16K  prompt  16044  3000 tok   233.1 tok/s    4508 chars  accepted/proposed 1839/1975
+n2-adapt       edit@32K  prompt  32045  3000 tok   229.2 tok/s    2271 chars  accepted/proposed 1917/1999
+n2-adapt       agent     prompt   2025  3000 tok   255.1 tok/s    6154 chars  accepted/proposed 1921/1980
+n3-adapt       code      prompt     47  3000 tok   263.9 tok/s    9296 chars  accepted/proposed 1803/2086
+n3-adapt       edit      prompt   1025  3000 tok   291.7 tok/s    9009 chars  accepted/proposed 1994/2142
+n3-adapt       prose     prompt     36  3000 tok   275.3 tok/s   10905 chars  accepted/proposed 1842/2054
+n3-adapt       edit@16K  prompt  16044  3000 tok   243.7 tok/s    4508 chars  accepted/proposed 2045/2211
+n3-adapt       edit@32K  prompt  32045  3000 tok   245.8 tok/s    2271 chars  accepted/proposed 2144/2246
+n3-adapt       agent     prompt   2025  3000 tok   268.6 tok/s    6154 chars  accepted/proposed 2148/2216
+n4-adapt       code      prompt     47  3000 tok   263.9 tok/s    9296 chars  accepted/proposed 1801/2083
+n4-adapt       edit      prompt   1025  3000 tok   290.7 tok/s    9009 chars  accepted/proposed 1988/2135
+n4-adapt       prose     prompt     36  3000 tok   281.0 tok/s   10905 chars  accepted/proposed 1844/2056
+n4-adapt       edit@16K  prompt  16044  3000 tok   231.5 tok/s    4508 chars  accepted/proposed 2089/2268
+n4-adapt       edit@32K  prompt  32045  3000 tok   234.3 tok/s    2271 chars  accepted/proposed 2147/2240
+n4-adapt       agent     prompt   2025  3000 tok   271.7 tok/s    6154 chars  accepted/proposed 2148/2221
+n6-adapt       code      prompt     47  3000 tok   263.0 tok/s    9296 chars  accepted/proposed 1804/2092
+n6-adapt       edit      prompt   1025  3000 tok   294.0 tok/s    9009 chars  accepted/proposed 2074/2239
+n6-adapt       prose     prompt     36  3000 tok   289.9 tok/s   10905 chars  accepted/proposed 2014/2282
+n6-adapt       edit@16K  prompt  16044  3000 tok   267.6 tok/s    4508 chars  accepted/proposed 2153/2326
+n6-adapt       edit@32K  prompt  32045  3000 tok   242.4 tok/s    2271 chars  accepted/proposed 2321/2497
+n6-adapt       agent     prompt   2025  3000 tok   270.9 tok/s    6154 chars  accepted/proposed 2205/2307
