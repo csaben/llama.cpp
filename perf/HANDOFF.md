@@ -1,3 +1,7 @@
+# Phase 7b hand-off
+
+Merging the lever 3 round 2 tag into Phase 7 on GPU1. The four-row verifier and single-row overlapped gate share the attention tile. Combined validation and release staging are pending.
+
 # Phase 7 hand-off
 
 The staged build is `59c71a9`, local tag `p7-release-edit-324tok`, on branch `inkling-3090`. All measurements used physical GPU1 (RTX 3090). The release uses a fixed three-token draft, four-row MMA verification, a folded 32K shortlist, GPU-resident embedding tables and one 64K slot.

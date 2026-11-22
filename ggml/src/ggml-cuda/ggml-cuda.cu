@@ -4578,6 +4578,50 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
     return false;
 }
 
+// The short convolution consumes one IQ4_NL projection and writes the recurrent state for this token.
+static int ik_projection_conv_end(ggml_backend_cuda_context & ctx, const ggml_cgraph * graph, int i) {
+    const ggml_tensor * mm = graph->nodes[i];
+    static const bool enabled = ggml_cuda_env_int("IK_PROJ_CONV", 1) != 0 && !ggml_cuda_env_flag("IK_MR");
+    if (!enabled || mm->op != GGML_OP_MUL_MAT || !ggml_is_vector(mm) || mm->type != GGML_TYPE_F32 ||
+            mm->src[1]->op != GGML_OP_INKLING_ATTN || mm->src[1]->type != GGML_TYPE_Q8_1 ||
+            mm->src[0]->type != GGML_TYPE_IQ4_NL || mm->src[0]->ne[0] != 3072 || mm->ne[0] != 2304 ||
+            ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X || !ggml_node_has_n_uses(graph, i, 1)) {
+        return i;
+    }
+    int j = i + 1;
+    while (j < graph->n_nodes && ggml_cuda_is_view_or_noop(graph->nodes[j])) {
+        ++j;
+    }
+    if (j == graph->n_nodes) {
+        return i;
+    }
+    const ggml_tensor * conv = graph->nodes[j];
+    return conv->op == GGML_OP_SHORTCONV_RES && conv->src[2] == mm && (conv->flags & GGML_TENSOR_FLAG_COMPUTE) ? j : i;
+}
+
+static int ik_attention_projection_end(ggml_backend_cuda_context & ctx, const ggml_cgraph * graph, int i) {
+    static const int mode = ggml_cuda_env_int("IK_DENSE_VISIT", -1);
+    static const bool mr = ggml_cuda_env_flag("IK_MR");
+    const ggml_tensor * mm = graph->nodes[i];
+    if (mode == 0 || mr || mm->op != GGML_OP_MUL_MAT || mm->type != GGML_TYPE_F32 || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
+            mm->src[0]->type != GGML_TYPE_IQ4_NL || mm->src[0]->ne[0] != 2304 || !ggml_is_matrix(mm->src[0]) ||
+            !ggml_is_contiguous(mm->src[0]) || mm->src[1]->type != GGML_TYPE_Q8_1 || !ggml_is_contiguous(mm->src[1]) ||
+            !ggml_is_matrix(mm) || (mm->ne[1] != 1 && mm->ne[1] != 3) || !ggml_is_contiguous(mm) ||
+            (mm->ne[0] != 8600 && mm->ne[0] != 8664) || !ggml_node_has_n_uses(graph, i, 1)) {
+        return i;
+    }
+    const auto & dev = ggml_cuda_info().devices[ctx.device];
+    if (dev.cc != GGML_CUDA_CC_AMPERE_GA10X || (mode < 0 && dev.nsm != 82)) {
+        return i;
+    }
+    int j = i + 1;
+    while (j < graph->n_nodes && ggml_cuda_is_view_or_noop(graph->nodes[j])) { ++j; }
+    if (j == graph->n_nodes) { return i; }
+    const ggml_tensor * attn = graph->nodes[j];
+    return attn->op == GGML_OP_INKLING_ATTN && attn->src[0] == mm && attn->type == GGML_TYPE_Q8_1 &&
+           attn->ne[0] == 3072 && ggml_is_vector(attn) && ggml_is_contiguous(attn) && (attn->flags & GGML_TENSOR_FLAG_COMPUTE) ? j : i;
+}
+
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
@@ -4586,6 +4630,17 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     }
 
     ggml_tensor * node = cgraph->nodes[i];
+
+    if (node->op == GGML_OP_MUL_MAT && cuda_ctx->stream_context().concurrent_events.empty()) {
+        const int attn = ik_attention_projection_end(*cuda_ctx, cgraph, i);
+        if (attn > i && ggml_cuda_inkling_project_attention(*cuda_ctx, cgraph->nodes[attn])) {
+            return attn - i;
+        }
+        const int j = ik_projection_conv_end(*cuda_ctx, cgraph, i);
+        if (j > i && ggml_cuda_inkling_projection_conv(*cuda_ctx, node, cgraph->nodes[j])) {
+            return j - i;
+        }
+    }
 
     static const bool segmented_iq4 = ggml_cuda_env_flag("IK_SEGMENTED_IQ4");
     static const bool segmented_q6 = ggml_cuda_env_flag("IK_SEGMENTED_Q6");
@@ -5812,6 +5867,16 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
         // add alloc deps for performance positive fusions. This may increase the overall compute buffer size.
         // TODO: consolidate fusion paths in graph_optimize and graph_compute
         ggml_cuda_set_device(cuda_ctx->device);
+        for (int i = 0; i < cgraph->n_nodes; ++i) {
+            const int attn = ik_attention_projection_end(*cuda_ctx, cgraph, i);
+            if (attn > i) {
+                params->add_alloc_dep(params->user_data, cgraph->nodes[i]->src[1], cgraph->nodes[attn]);
+            }
+            const int j = ik_projection_conv_end(*cuda_ctx, cgraph, i);
+            if (j > i) {
+                params->add_alloc_dep(params->user_data, cgraph->nodes[i]->src[1], cgraph->nodes[j]);
+            }
+        }
         for (int i = 0; i + 5 < cgraph->n_nodes; ++i) {
             if (cgraph->nodes[i]->op != GGML_OP_MUL_MAT_ID) {
                 continue;

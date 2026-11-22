@@ -1,0 +1,23 @@
+kernel, calls/token, us/call, ms/token
+mul_mat_vec_q[576,8], 48.00, 19.097, 0.9167
+ik_segmented_projection, 28.00, 16.055, 0.4495
+inkling_attn2_kernel, 48.00, 9.126, 0.4380
+ik_q2_down_rows, 44.00, 9.865, 0.4341
+inkling_router2_kernel, 48.00, 7.302, 0.3505
+mul_mat_vec_q[1152,1], 48.00, 6.585, 0.3161
+res_mix_f32_vec4, 75.00, 4.122, 0.3091
+mul_mat_vec_q[4300,1], 20.00, 14.951, 0.2990
+mul_mat_vec_q[100512,1], 1.00, 298.577, 0.2986
+loop_ctrl_down_f32, 48.00, 4.045, 0.1942
+ik_ctrl_apply8, 48.00, 3.151, 0.1513
+mul_mat_vec_q[1152,8], 4.00, 30.168, 0.1207
+inkling_moe_sum_conv_kernel, 48.00, 2.095, 0.1005
+shortconv_res_f32, 48.00, 2.031, 0.0975
+rms_norm_mul_inplace_f32, 24.00, 3.868, 0.0928
+ik_situ_prefetch, 48.00, 1.852, 0.0889
+rms_norm_f32, 1.00, 3.206, 0.0032
+softcap_f32, 0.99, 2.622, 0.0026
+k_get_rows_float, 1.00, 1.719, 0.0017
+quantize_q8_1, 1.00, 1.405, 0.0014
+head-to-head ms/token: 4.9231
+mul_mat_vec_q to shortconv_res_f32 inclusive, 48.00 pairs/token, 8.784 us/pair

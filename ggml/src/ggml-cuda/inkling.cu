@@ -2463,8 +2463,17 @@ static __global__ void inkling_window_scan(ik_attn_args a, float * parts) {
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
 #endif
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false, bool STAGED = false, bool ROW_COLS = false>
-static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, const float * scan, const int row, const char * tile) {
+template<bool subset>
+static __device__ __forceinline__ void ik_scan_sync() {
+    if constexpr (subset) {
+        asm volatile("bar.sync 1, 256;" ::: "memory");
+    } else {
+        __syncthreads();
+    }
+}
+
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool SHARED_SCAN = false, bool STAGED = false, bool ROW_COLS = false, bool ungated = false, bool warp_split = false>
+static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, const float * scan, const int row, const char * tile, int g = MR ? blockIdx.y : blockIdx.x, int split = MR ? blockIdx.z : blockIdx.y, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
@@ -2507,9 +2516,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
     }
     const ik_attn_args & args = MR || HAS_TAPS >= 0 ? args_m : args_in;
 
-    const int g     = MR ? blockIdx.y : blockIdx.x;
     const int part_g = ROW_COLS ? 3*g + blockIdx.x%4 : g;
-    const int split = MR ? blockIdx.z : blockIdx.y;
     const int tid   = threadIdx.x;
     const int lane  = tid % WARP_SIZE;
     const int warp  = tid / WARP_SIZE;
@@ -2571,7 +2578,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         qv[hh] = gate_v[hh] = rv[hh] = sink_v[hh] = 0.0f;
         if (tid < HD) {
             qv[hh]     = prh[(int64_t) h*HD + tid]*args.consts[(int64_t) h*HD + tid];
-            gate_v[hh] = prh[args.off_gate + (int64_t) h*HD + tid];
+            if constexpr (!warp_split && !ungated) { gate_v[hh] = prh[args.off_gate + (int64_t) h*HD + tid]; }
         } else if (warp == 4) {
             if (lane < args.n_rel) {
                 rv[hh] = prh[args.off_rel + (int64_t) h*args.n_rel + lane]*args.consts[args.c_relclip + (int64_t) h*args.n_rel + lane];
@@ -2636,7 +2643,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             s_ssq[hh][warp] = v;
         }
     }
-    __syncthreads();
+    ik_scan_sync<warp_split>();
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
         float tau_h = tau;
@@ -2659,7 +2666,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             }
         }
     }
-    __syncthreads();
+    ik_scan_sync<warp_split>();
     IK_DBG_T(2);
 
     // ===== the attention over the cells of this warp (online softmax per head, a lane holds 4 dims), the current
@@ -2868,7 +2875,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         if (lane == 0) {
             s_red[which][warp % 4] = ss;
         }
-        __syncthreads();
+        ik_scan_sync<warp_split>();
         const float sst = s_red[which][0] + s_red[which][1] + s_red[which][2] + s_red[which][3];
         float factor;
         if (which == 0) {
@@ -2903,7 +2910,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         }
         (which ? s_v : s_k)[ci] = yq;
     }
-    __syncthreads();
+    ik_scan_sync<warp_split>();
 
     // ===== the current token's cell, by the warp whose range holds it =====
     if constexpr (MMA) {
@@ -3011,7 +3018,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             }
         }
     }
-    __syncthreads();
+    ik_scan_sync<warp_split>();
     IK_DBG_T(5);
 
     float M[G], L[G], A[G];
@@ -3047,11 +3054,11 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
                 }
             }
         }
-        __syncthreads();
+        ik_scan_sync<warp_split>();
         if (tid == 0) {
             s_last = args.ext_scan ? 1 : ik_atomic_add_acq_rel(&args.counters[part_g], 1) == args.n_split - 1;
         }
-        __syncthreads();
+        ik_scan_sync<warp_split>();
         IK_DBG_T(6);
         if (!s_last) {
             return;
@@ -3110,6 +3117,17 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
         }
     }
 
+    if constexpr (warp_split) {
+        if (tid == 0) {
+            while (ik_ld_acquire(ready) != producers) {}
+            ik_st_relaxed(ready, 0);
+        }
+        ik_scan_sync<warp_split>();
+        if (tid < HD) {
+#pragma unroll
+            for (int hh = 0; hh < G; ++hh) { gate_v[hh] = pr0[args.off_gate + (g*G + hh)*HD + tid]; }
+        }
+    }
     // ===== the zero sink logit, the normalization and the sigmoid gate; threads 0..127 write the heads =====
     if (tid < HD) {
 #pragma unroll
@@ -3118,7 +3136,7 @@ static __device__ __forceinline__ void ik_attn2(const ik_attn_args & args_in, co
             const float m_new = fmaxf(M[hh], 0.0f);
             const float corr  = expf(M[hh] - m_new);
             const float Lf    = L[hh]*corr + expf(0.0f - m_new);
-            const float o     = A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate_v[hh])));
+            const float o     = ungated ? A[hh]*corr/Lf : A[hh]*corr/Lf * (1.0f/(1.0f + expf(-gate_v[hh])));
             if constexpr (q8_out) {
                 ik_warp_store_q8_1(o, (block_q8_1 *) ((char *) args.dst + (ROW_COLS ? hh*args.mr_dst_rs : 0)) + ((int64_t) h*HD)/QK8_1 + warp, lane, true);
             } else {
@@ -3163,6 +3181,8 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, 1) inkling_attn_window_til
         __syncthreads();
     }
 }
+
+#include "inkling-visit.cuh"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // inkling_attn_scan: the scan of a long Q8_0 cache as its own launch. A (cell, kv head) row is 136 bytes, so it lies
@@ -3391,7 +3411,7 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
     }
 }
 
-void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor * dst, bool project_gates) {
     const ggml_tensor * proj    = dst->src[0];
     const ggml_tensor * consts  = dst->src[1];
     ggml_tensor       * state   = dst->src[2];
@@ -3529,7 +3549,6 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
 
     cudaStream_t stream = ctx.stream();
     const int gqa = a.n_head/a.n_head_kv;
-
     ggml_cuda_pool_alloc<float> part(ctx.pool());
     a.part = nullptr; a.counters = nullptr;
     if (a.n_split > 1) {
@@ -3537,6 +3556,24 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         part.alloc((size_t) a.mr_part_rs*n_rows);
         a.part     = part.get();
         a.counters = ext ? nullptr : n_rows > 1 ? ik_counters(ctx, 64, a.n_head_kv*n_rows) : ik_counters(ctx, 0, a.n_head_kv); // self-resetting arrival counters
+    }
+
+    if (project_gates) {
+        if (!fixed || n_rows != 1 || ik_mr_enabled() || (!short_scan && a.n_kv <= 256) ||
+                proj->ne[0] != (a.has_taps ? 8664 : 8600)) {
+            return false;
+        }
+        const auto * x = proj->src[1];
+        const uintptr_t first = uintptr_t(x->data), last = first + ggml_nbytes(x);
+        if (first < uintptr_t(dst->data) + ggml_nbytes(dst) && uintptr_t(dst->data) < last) {
+            return false;
+        }
+        if (a.has_taps) {
+            ik_launch_gate_projection<1>(ctx, a, proj, short_scan);
+        } else {
+            ik_launch_gate_projection<0>(ctx, a, proj, short_scan);
+        }
+        return true;
     }
 
     const bool q8 = dst->type == GGML_TYPE_Q8_1;
@@ -3588,14 +3625,14 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
                 if (q8) { inkling_attn2_launch<block_q8_0, true, false, true>(a, grid_mr, stream); } else { inkling_attn2_launch<block_q8_0, false, false, true>(a, grid_mr, stream); }
             }
         }
-        return;
+        return true;
     }
     if (ext) {
         inkling_attn_scan_launch(a, n_ext, stream);
         a.ext_scan = 1;
         const dim3 grid1(a.n_head_kv, 1, 1);
         if (q8) { inkling_attn2_launch<block_q8_0, true>(a, grid1, stream); } else { inkling_attn2_launch<block_q8_0, false>(a, grid1, stream); }
-        return;
+        return true;
     }
     const dim3 grid(a.n_head_kv, a.n_split, 1);
     if (fixed) {
@@ -3606,7 +3643,7 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 1><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
             else            { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 0><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
         }
-        return;
+        return true;
     }
     if (!v1) {
         if (k_cache->type == GGML_TYPE_F16) {
@@ -3618,7 +3655,7 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
                 if (q8) { inkling_attn2_launch<block_q8_0, true>(a, grid, stream); } else { inkling_attn2_launch<block_q8_0, false>(a, grid, stream); }
             }
         }
-        return;
+        return true;
     }
     if (k_cache->type == GGML_TYPE_F16) {
         if (q8) {
@@ -3633,6 +3670,15 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             inkling_attn_kernel<block_q8_0, false><<<grid, IK_ATTN_BLOCK, 0, stream>>>(a);
         }
     }
+    return true;
+}
+
+void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    ik_dispatch_attention(ctx, dst, false);
+}
+
+bool ggml_cuda_inkling_project_attention(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    return ik_dispatch_attention(ctx, dst, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

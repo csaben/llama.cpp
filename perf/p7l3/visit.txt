@@ -1,0 +1,11 @@
+enabled=0 mode=0 rows=16 blocks=1024
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        215.99 ± 2.41 |
+enabled=1 mode=0 rows=16 blocks=1024
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        212.36 ± 1.78 |
+enabled=1 mode=2 rows=16 blocks=1024
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        210.14 ± 1.89 |
+enabled=1 mode=1 rows=8 blocks=1024
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        209.11 ± 2.00 |
+enabled=1 mode=1 rows=16 blocks=1024
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        207.01 ± 2.17 |
+enabled=1 mode=1 rows=24 blocks=1024

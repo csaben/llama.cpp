@@ -1,0 +1,16 @@
+mode=20
+dense + direct router  24 visits/token  46.570 us/visit
+expert down + sum/conv  44 visits/token  12.099 us/visit
+d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  /home/arelius/llama.cpp-lever3/build/p7l3r2/resident-tune-20.bin
+mode=22
+dense + direct router  24 visits/token  45.084 us/visit
+expert down + sum/conv  44 visits/token  12.123 us/visit
+d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  /home/arelius/llama.cpp-lever3/build/p7l3r2/resident-tune-22.bin
+mode=23
+dense + direct router  24 visits/token  53.965 us/visit
+expert down + sum/conv  44 visits/token  12.079 us/visit
+d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  /home/arelius/llama.cpp-lever3/build/p7l3r2/resident-tune-23.bin
+mode=24
+dense + direct router  24 visits/token  46.611 us/visit
+expert down + sum/conv  44 visits/token  12.056 us/visit
+d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  /home/arelius/llama.cpp-lever3/build/p7l3r2/resident-tune-24.bin

@@ -1,0 +1,10 @@
+kernel, calls/token, us/call, ms/token
+mul_mat_vec_q[576,8], 48.00, 19.580, 0.9398
+ik_q2_down_rows, 44.00, 10.747, 0.4729
+ik_segmented_projection, 28.00, 16.239, 0.4547
+mul_mat_vec_q[1152,1], 48.00, 6.872, 0.3299
+mul_mat_vec_q[4300,1], 20.00, 15.993, 0.3199
+mul_mat_vec_q[100512,1], 1.00, 299.095, 0.2991
+mul_mat_vec_q[1152,8], 4.00, 30.416, 0.1217
+ik_replay_inputs, 1.00, 1.501, 0.0015
+head-to-head ms/token: 3.1181

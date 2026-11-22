@@ -1,0 +1,18 @@
+mask=0 KiB=0 warps=0 retain=0
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        213.73 ± 1.38 |
+mask=511 KiB=64 warps=4 retain=1
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        208.71 ± 1.07 |
+mask=511 KiB=256 warps=4 retain=0
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        208.21 ± 0.58 |
+mask=511 KiB=256 warps=4 retain=1
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        207.29 ± 1.25 |
+mask=511 KiB=1024 warps=4 retain=1
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        204.47 ± 0.99 |
+mask=511 KiB=3072 warps=8 retain=1
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        198.51 ± 1.07 |
+mask=2 KiB=256 warps=4 retain=1
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        211.73 ± 0.90 |
+mask=64 KiB=256 warps=4 retain=1
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        211.34 ± 0.73 |
+mask=0 KiB=0 warps=0 retain=0
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        212.39 ± 0.56 |

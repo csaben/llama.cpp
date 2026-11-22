@@ -1,0 +1,5 @@
+head-to-head 4.73833 ms
+staged scan+gate    48.0 visits/token    12.356 us/visit
+staged output       48.0 visits/token     6.953 us/visit
+three-stage visit   48.0 visits/token    30.134 us/visit
+staged qkv          48.0 visits/token    10.885 us/visit

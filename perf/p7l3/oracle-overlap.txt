@@ -1,0 +1,7 @@
+mean of 119 warmed token intervals
+matvec calls: 193.0000
+glue calls: 441.0000
+matvec busy ms: 3.1490
+glue busy ms: 2.2089
+concurrent ms: 1.2633
+interval ms: 4.5562

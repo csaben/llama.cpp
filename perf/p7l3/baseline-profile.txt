@@ -1,0 +1,22 @@
+mul_mat_vec_q 10 (576, 8)                      44.0 calls/tok   19.41 us/call   0.854 ms/tok
+ik_segmented_projection                        28.0 calls/tok   16.19 us/call   0.453 ms/tok
+ik_q2_down_rows                                44.0 calls/tok   10.06 us/call   0.443 ms/tok
+inkling_attn2_kernel                           48.0 calls/tok    9.09 us/call   0.436 ms/tok
+inkling_router2_kernel                         48.0 calls/tok    7.26 us/call   0.349 ms/tok
+mul_mat_vec_q 20 (4300, 1)                     20.0 calls/tok   15.80 us/call   0.316 ms/tok
+mul_mat_vec_q 20 (1152, 1)                     48.0 calls/tok    6.56 us/call   0.315 ms/tok
+mul_mat_vec_q 20 (100512, 1)                    1.0 calls/tok  298.57 us/call   0.299 ms/tok
+res_mix_f32_vec4                               75.0 calls/tok    3.79 us/call   0.284 ms/tok
+loop_ctrl_down_f32                             48.0 calls/tok    4.10 us/call   0.197 ms/tok
+ik_ctrl_apply8                                 48.0 calls/tok    3.09 us/call   0.148 ms/tok
+mul_mat_vec_q 20 (1152, 8)                      4.0 calls/tok   30.20 us/call   0.121 ms/tok
+inkling_moe_sum_conv_kernel                    48.0 calls/tok    2.03 us/call   0.098 ms/tok
+rms_norm_mul_inplace_f32                       24.0 calls/tok    3.85 us/call   0.092 ms/tok
+shortconv_res_f32                              48.0 calls/tok    1.88 us/call   0.090 ms/tok
+situ_q8_1_kernel                               48.0 calls/tok    1.85 us/call   0.089 ms/tok
+mul_mat_vec_q 20 (576, 8)                       4.0 calls/tok   15.89 us/call   0.064 ms/tok
+rms_norm_f32                                    1.0 calls/tok    3.34 us/call   0.003 ms/tok
+softcap_f32                                     1.0 calls/tok    2.57 us/call   0.003 ms/tok
+k_get_rows_float                                1.0 calls/tok    1.71 us/call   0.002 ms/tok
+quantize_q8_1                                   1.0 calls/tok    1.39 us/call   0.001 ms/tok
+head-to-head 4.939 ms/tok
