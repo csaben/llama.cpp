@@ -76,3 +76,24 @@ kernels lost; a synthetic replay of all 193 matvecs with inputs up front and con
    (contiguous per-visit weight packing at load time, interleaving the experts a visit will read), then re-measure.
 Same rules as above (GPU0 only; never touch ~/llama.cpp-fast or GPU1; commit with tags `p7l3r2-*`; cite sources;
 keep HANDOFF_LEVER3.md current; DSpark exactness preserved). Stop and report by 09:00 local time at the latest.
+
+## Round 3 (after tag `p7l3r2-final-223tok`, `e03d993`)
+
+Round 2 facts: one persistent kernel streams the token's 193 real matvecs in 2.692 ms (2.775 ms with production
+rounding, bit-identical) vs 2.935–2.948 ms in the production graph; plain decode 223.07 tok/s (4.48 ms). So ~1.6 ms per
+token is the dependent chain between matvecs (glue, attention, router), each step paying a kernel boundary. A fused
+dense+router visit prototype was slower (45.08 vs 40.80 µs).
+
+Round 3: attack the cost per dependency.
+1. **Measure the dependency cost directly**: an empty chain of N dependent kernels in a CUDA graph on this GPU
+   (µs per edge), vs a persistent kernel passing N dependencies through (a) grid-wide cooperative sync, (b) per-task
+   flag/counter waits in global memory with `__threadfence`/acquire-release, (c) a single-block glue task with the
+   other blocks spinning on a flag. That gives the floor each design can reach for ~48×k dependencies per token.
+2. Rank the dependent chain by measured cost per visit (which edges, which glue ops), and remove edges in order:
+   fold small glue into the previous matvec's epilogue or next one's prologue where the data fits (the round 2
+   gate/attention overlap is one example); run independent branches (controllers vs attention vs SWA vs router)
+   concurrently as graph branches; shrink the glue kernels' own latency (fewer blocks, fewer passes, warp-level).
+3. If (1) shows flag-based sync is much cheaper than a graph edge, build the visit-level persistent kernel on round 2's
+   2.775 ms streaming kernel, glue tasks inline with counters, one visit first, then the token.
+Same rules (GPU0 only; never touch ~/llama.cpp-fast or GPU1; exactness or PPL gate; DSpark rows exact; tags
+`p7l3r3-*`; cite sources; keep HANDOFF_LEVER3.md current). Stop and report by 08:45 local at the latest.
