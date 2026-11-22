@@ -1315,9 +1315,8 @@ static void loop_ctrl_apply2_launch(ggml_backend_cuda_context & ctx, const float
 
 // Four rank-64 output rows per warp. Each eight-lane group loads two
 // contiguous four-element vectors per lane, keeping the full-warp sum order.
-static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, const float * d,
-        const half * wg, const half * wf, float * y, int n, size_t cur_stride, size_t msg_stride) {
-    const int i = blockIdx.x*32 + threadIdx.x/8;
+static __device__ __forceinline__ float ik_apply8_value(const float * cur, const float * msg, const float * d,
+        const half * wg, const half * wf, int i, int n, size_t cur_stride, size_t msg_stride) {
     const int lane = threadIdx.x % 8;
     const int b = blockIdx.y;
     const int row = b*n + i;
@@ -1340,7 +1339,69 @@ static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, cons
         const float c = cur[b*cur_stride+i], m = msg[b*msg_stride+i];
         const float gain = tanhf((gv[0]+gv[2])+(gv[1]+gv[3]));
         const float forget = tanhf((fv[0]+fv[2])+(fv[1]+fv[3]));
-        y[row] = (c-forget*c) + gain*m;
+        return (c-forget*c) + gain*m;
+    }
+    return 0.0f;
+}
+
+static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, const float * d,
+        const half * wg, const half * wf, float * y, int n, size_t cur_stride, size_t msg_stride) {
+    const int i = blockIdx.x*32 + threadIdx.x/8;
+    const float v = ik_apply8_value(cur, msg, d, wg, wf, i, n, cur_stride, msg_stride);
+    if (threadIdx.x%8 == 0) { y[blockIdx.y*n + i] = v; }
+}
+
+static __global__ void ik_ctrl_norm_visit(const float * cur, const float * msg, const float * d, const half * wg, const half * wf,
+        const float * nw, size_t cur_stride, size_t msg_stride, size_t nw_stride, float eps, block_q8_1 * out, float * partial, int * signals) {
+    const int ib = blockIdx.y;
+    const int base = blockIdx.x*32;
+    const int channel = base + threadIdx.x/8;
+    const int lane = threadIdx.x%WARP_SIZE;
+    __shared__ float values[3][32];
+    __shared__ float squares[32];
+    __shared__ int last;
+    float ss = 0.0f;
+#pragma unroll
+    for (int group = 0; group < 3; ++group) {
+        int i = channel + 1024*group;
+        if (i < 2304) {
+            const float y = ik_apply8_value(cur, msg, d, wg, wf, i, 2304, cur_stride, msg_stride);
+            if (threadIdx.x%8 == 0) {
+                values[group][threadIdx.x/8] = y;
+                ss = __fmaf_rn(y, y, ss);
+            }
+        }
+    }
+    if (threadIdx.x%8 == 0) { squares[threadIdx.x/8] = ss; }
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        const float v = warp_reduce_sum(squares[lane]);
+        if (lane == 0) { partial[32*ib + blockIdx.x] = v; }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        ik_atomic_add_acq_rel(signals + 2*ib, 1);
+        while (ik_ld_acquire(signals + 2*ib) != 32) { __nanosleep(32); }
+    }
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        const float total = warp_reduce_sum(partial[32*ib + lane]);
+        const float scale = rsqrtf(total/2304.0f + eps);
+#pragma unroll
+        for (int group = 0; group < 3; ++group) {
+            int i = base + 1024*group + lane;
+            if (i < 2304) {
+                ik_warp_store_q8_1(values[group][lane]*scale*nw[ib*nw_stride + i], out + (ib*2304 + i)/32, lane, true);
+            }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        last = ik_atomic_add_acq_rel(signals + 2*ib + 1, 1) == 31;
+        if (last) {
+            signals[2*ib] = 0;
+            signals[2*ib + 1] = 0;
+        }
     }
 }
 
@@ -1436,6 +1497,25 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
             nw ? (const float *) nw->data : nullptr, nw_nb1, dst->data, eps, counters)
     static const bool group8 = getenv("IK_CTRL_APPLY8") && atoi(getenv("IK_CTRL_APPLY8"));
     const bool mr_rows = ik_mr_enabled() && n_tok > 1 && n_tok <= 8;
+    static const bool norm_visit = getenv("IK_CTRL_NORM_VISIT") && atoi(getenv("IK_CTRL_NORM_VISIT"));
+    if (norm_visit && group8 && q8 && nw && !ik_mr_enabled() && n_tok == 1 && n == 2304 && B > 0 && B <= 3 &&
+            rank == 64 && wg->type == GGML_TYPE_F16 && wf->type == GGML_TYPE_F16 && ((uintptr_t) d->data % 16) == 0 &&
+            ((uintptr_t) wg->data % 8) == 0 && ((uintptr_t) wf->data % 8) == 0 &&
+            ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X && ggml_cuda_info().devices[ctx.device].supports_cooperative_launch) {
+        ggml_cuda_pool_alloc<float> part(ctx.pool(), 32*B);
+        float * partial = part.get();
+        int * signals = ik_counters(ctx, 232, 2*B);
+        size_t cs = cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float), ms = msg->nb[2]/sizeof(float);
+        size_t ns = ggml_nrows(nw) == 1 ? 0 : nw->nb[1]/sizeof(float);
+        const void * cv = cur->data, * mv = msg->data, * dv = d->data, * gv = wg->data, * fv = wf->data, * nv = nw->data;
+        void * args[] = {&cv, &mv, &dv, &gv, &fv, &nv, &cs, &ms, &ns, &eps, &dst->data, &partial, &signals};
+        int active;
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, ik_ctrl_norm_visit, 256, 0));
+        if (active*ggml_cuda_info().devices[ctx.device].nsm >= 32*B) {
+            CUDA_CHECK(cudaLaunchCooperativeKernel((void *) ik_ctrl_norm_visit, dim3(32, B), dim3(256), args, 0, ctx.stream()));
+            return;
+        }
+    }
     if (mr_rows && group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n % 32 == 0 &&
             (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 && (uintptr_t) wf->data % 8 == 0) {
         ik_ctrl_apply8_rows<<<dim3(n/32, B, n_tok), 256, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
