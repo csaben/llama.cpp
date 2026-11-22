@@ -1,0 +1,4 @@
+cap3           code      prompt     47   384 tok   243.7 tok/s    1320 chars  accepted/proposed 189/243  runs 243/244/245
+cap3           edit      prompt   1025   384 tok   337.2 tok/s    1115 chars  accepted/proposed 275/278  runs 337/337/338
+cap3           prose     prompt     36   384 tok   211.2 tok/s    1474 chars  accepted/proposed 128/194  runs 210/211/212
+cap3           agent     prompt   2025   384 tok   288.2 tok/s    1284 chars  accepted/proposed 255/281  runs 288/288/288

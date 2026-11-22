@@ -26,3 +26,17 @@ Decode tok/s, 384 / 3,000 emitted tokens. All six drafted messages and ID stream
 | Agent | 191.8 / 192.1 | 280.0 / 308.8 |
 
 [384-token captures](p8bc/baseline/384/), [3,000-token captures](p8bc/baseline/3000/), [GPU and driver](p8bc/baseline/device.csv).
+
+## Draft selection trials
+
+The three-token minimum tried too many weak matches on short prose. With a five-token minimum, the policy estimates continuation success in three suffix-length bands. A rejection contributes one failed trial because the target never evaluates the remaining suffix against the corrected history. Width selection uses estimated committed tokens per measured millisecond, including plain/model alternatives and a limited probe of a longer copy. A shorter suffix can corroborate a paid DSpark prediction. On the long prose trace, the model's margin between 2 and 3 yielded 85/136 correct without history agreement and 14/15 with agreement. The rule raises the estimated confidence only along the agreeing prefix and leaves candidate IDs and target sampling intact. Counts use emitted history for offline analysis. [Margin counts](p8bc/trials/model-confidence.txt), [three-token trial](p8bc/trials/three-token-min.txt), [selection code](../common/speculative.cpp).
+
+| 384 tokens, code / edit / prose / agent | tok/s |
+|---|---|
+| Three-token minimum, cap 3 | 242.3 / 334.0 / 205.3 / 280.2 |
+| Five-token minimum with measured costs, cap 3 | 243.7 / 337.2 / 211.2 / 288.2 |
+| Five-token minimum with measured costs, cap 6 | 242.7 / 325.9 / 211.5 / 290.3 |
+| Cap 6 with five-to-seven-row IQ4 projections | 244.6 / 335.0 / 211.2 / 288.8 |
+| Cap 6 plus DSpark/history agreement, five repeats | 244.0 / 338.6 / 214.1 / 290.5 |
+
+The final trial measured 263.4 / 293.3 / 288.7 / 314.6 tok/s at 3,000 tokens. All eight messages and their IDs matched frozen plain. Each variant uses its own live run, so small differences include timing variation. [Trial captures](p8bc/trials/), [exact verifier costs](p8bc/windows/).

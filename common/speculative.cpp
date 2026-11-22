@@ -1552,6 +1552,10 @@ protected:
         bool   warmup = false;
         bool   from_history = false;
         int    history_steps = 0, history_accepted = 0, history_proposed = 0;
+        int    history_bin = 0;
+        int    history_widths[ADAPT_T_MAX] = {};
+        double history_ms[ADAPT_T_MAX] = {};
+        double history_ok[3] = {}, history_tested[3] = {};
         int    losing_rounds = 0;
         int    weak_windows = 0;             // consecutive windows below the required rate
         double cost[ADAPT_T_MAX + 1] = {};   // ms of a step by kind (decayed mean)
@@ -1643,9 +1647,18 @@ protected:
             adapt.n_on     = 0;
             adapt.was_off  = false;
         } else if (adapt.from_history) {
+            const int k = adapt.last_n;
+            if (++adapt.history_widths[k] >= 2) {
+                const double ms = (now - adapt.last_us)/1000.0;
+                adapt.history_ms[k] = adapt.history_widths[k] == 2 ? ms : 0.85*adapt.history_ms[k] + 0.15*ms;
+            }
             adapt.history_steps++;
             adapt.history_proposed += adapt.last_n;
-            adapt.history_accepted += (int) (pos0 - adapt.last_pos0) - 1;
+            const int kept = (int) (pos0 - adapt.last_pos0) - 1;
+            adapt.history_accepted += kept;
+            const int b = adapt.history_bin;
+            adapt.history_ok[b] = 0.9*adapt.history_ok[b] + kept;
+            adapt.history_tested[b] = 0.9*adapt.history_tested[b] + kept + (kept < adapt.last_n);
         } else {
             const int    t  = std::min(adapt.last_t, ADAPT_T_MAX);
             const double ms = (double) (now - adapt.last_us)/1000.0;
@@ -1716,6 +1729,87 @@ protected:
             adapt.steps[0]++;
             return false;
         }
+        return true;
+    }
+
+    bool draft_history(common_speculative_draft_params & dp, bool model_on, llama_token agreement[3]) {
+        const auto & tokens = *dp.prompt;
+        const int n = (int) tokens.size();
+        int best = 1;
+        int end = -1;
+        int hits = 0;
+        for (int i = n - 1; i >= 1 && hits < 64; --i) {
+            if (tokens[i] != dp.id_last) {
+                continue;
+            }
+            ++hits;
+            int len = 1;
+            while (len <= i && len < 16 && tokens[i - len] == tokens[n - len]) {
+                ++len;
+            }
+            if (len > best) {
+                best = len;
+                end = i;
+                if (best == 16) {
+                    break;
+                }
+            }
+        }
+        if (end < 0) {
+            return false;
+        }
+
+        const int period = n - end;
+        // An overlapping suffix repeats through the sampled anchor.
+        const auto continuation = [&](int offset) {
+            const int src = end + 1 + offset % period;
+            return src == n ? dp.id_last : tokens[src];
+        };
+        for (int i = 0; i < 3; ++i) {
+            agreement[i] = continuation(i);
+        }
+        if (best < 5) {
+            return false;
+        }
+
+        const int b = best < 8 ? 0 : best < 12 ? 1 : 2;
+        static constexpr double prior[] = { 0.70, 0.87, 0.97 };
+        const double q = (8*prior[b] + adapt.history_ok[b])/(8 + adapt.history_tested[b]);
+        const int limit = dp.n_max > 0 ? std::min(dp.n_max, params.n_max) : params.n_max;
+        const double plain_ms = adaptive_cost(0);
+        double best_rate = model_on ? std::clamp(adapt.gain, 1.0, 1.8) : 1.0;
+        double expected = 1.0;
+        double prefix = 1.0;
+        int width = 0;
+        for (int k = 1; k <= std::min(limit, ADAPT_T_MAX - 1); ++k) {
+            if (k > std::max(3, params.n_min) && (best < 9 || q < 0.90 || adapt.history_steps < 2)) {
+                break;
+            }
+            prefix *= q;
+            expected += prefix;
+            // History skips the draft model but still pays for target verification.
+            const double prior_cost = adaptive_cost(k + 1) - 0.20*plain_ms;
+            const double cost = adapt.history_widths[k] >= 3 ? std::clamp(adapt.history_ms[k], 0.8*prior_cost, 1.3*prior_cost) : prior_cost;
+            const double rate = expected*plain_ms/cost;
+            if (k >= params.n_min && rate > best_rate) {
+                best_rate = rate;
+                width = k;
+            }
+        }
+        const int probe = std::min(limit, 6);
+        if (best == 16 && probe > 3 && probe >= params.n_min && q > 0.95 && adapt.history_steps >= 4 && adapt.history_widths[probe] < 3) {
+            width = probe;
+        }
+        if (width == 0) {
+            return false;
+        }
+
+        for (int i = 0; i < width; ++i) {
+            dp.result->push_back(continuation(i));
+        }
+        adapt.last_n = width;
+        adapt.from_history = true;
+        adapt.history_bin = b;
         return true;
     }
 
@@ -1871,9 +1965,20 @@ protected:
 
 public:
 
+    void log_history() const {
+        if (cached_policy && adapt.last_valid && getenv("LLAMA_DSPARK_ADAPTIVE_LOG")) {
+            fprintf(stderr, "dspark history: %d windows, %d/%d accepted, windows by width:", adapt.history_steps, adapt.history_accepted, adapt.history_proposed);
+            for (int k = 1; k < ADAPT_T_MAX; ++k) {
+                fprintf(stderr, " %d", adapt.history_widths[k]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
         common_speculative_impl_draft_dflash::begin(seq_id, prompt);
         if (seq_id == 0 && cached_policy) {
+            log_history();
             const bool never = adapt.never;
             adapt = {};
             adapt.on = true;
@@ -1904,29 +2009,20 @@ public:
     void draft(common_speculative_draft_params_vec & dparams) override {
         auto & ctx_dft = params.ctx_dft;
 
+        llama_token agreement[3] = { LLAMA_TOKEN_NULL, LLAMA_TOKEN_NULL, LLAMA_TOKEN_NULL };
         batch.clear();
 
         if (adapt.on && n_seq == 1 && dparams[0].drafting) {
-            if (adapt.never || !adaptive_begin(dparams[0].pos0)) {
-                return; // a plain step
-            }
             auto & dp = dparams[0];
-            if (cached_policy && dp.allow_device_draft && dp.prompt) {
-                // A repeated prefix can supply a verified window without running the model drafter.
-                const uint16_t match = adapt.history_steps >= 2 && adapt.history_accepted < 0.5*adapt.history_proposed ? 16 : 12;
-                auto continuation = common_ngram_simple_draft({ match, match }, *dp.prompt, dp.id_last);
-                const int limit = dp.n_max > 0 ? std::min(dp.n_max, params.n_max) : params.n_max;
-                int width = std::min(limit, (int) continuation.size());
-                if (adapt.history_steps < 2 || adapt.history_accepted < 0.85*adapt.history_proposed) {
-                    width = std::min(width, std::max(3, params.n_min));
-                }
-                if (width > 0 && width >= params.n_min) {
-                    continuation.resize(width);
-                    *dp.result = std::move(continuation);
-                    adapt.last_n = width;
-                    adapt.from_history = true;
-                    return;
-                }
+            if (adapt.never) {
+                return;
+            }
+            const bool model_on = adaptive_begin(dp.pos0);
+            if (cached_policy && dp.allow_device_draft && dp.prompt && draft_history(dp, model_on, agreement)) {
+                return;
+            }
+            if (!model_on) {
+                return;
             }
             const int64_t t_prof = common_spec_prof_on() ? ggml_time_us() : 0;
             if (!flush_pending(dparams[0].pos0)) {
@@ -2095,6 +2191,11 @@ public:
                 if (cached_policy && dp.n_max > 0) {
                     n = std::min(n, dp.n_max);
                 }
+                for (int i = 0; i < std::min(n, 3) && result[i] == agreement[i]; ++i) {
+                    if (margins[i] >= 1.0f) {
+                        margins[i] += 1.25f;
+                    }
+                }
                 result.resize(adaptive_window(margins, n));
             }
 
@@ -2114,9 +2215,7 @@ public:
             llama_set_embeddings_layer_inp_dev(params.ctx_tgt, false);
         }
         if (adapt.on && getenv("LLAMA_DSPARK_ADAPTIVE_LOG")) {
-            if (cached_policy) {
-                fprintf(stderr, "dspark history: %d windows, %d/%d accepted\n", adapt.history_steps, adapt.history_accepted, adapt.history_proposed);
-            }
+            log_history();
             fprintf(stderr, "dspark policy: gain %.2f, steps by kind:", adapt.gain);
             for (int t = 0; t <= ADAPT_T_MAX; ++t) { fprintf(stderr, " %d", adapt.steps[t]); }
             fprintf(stderr, "\n  cost ms:");
