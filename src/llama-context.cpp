@@ -1670,7 +1670,8 @@ bool llama_context::set_ctx_state_src(llama_context * ctx_src) {
 
 bool llama_context::supports_state_row() const {
     // the MTP graphs read the rows, see llm_graph_context::build_inp_embd_state()
-    if (cparams.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+    const bool dspark = model.hparams.dflash_variant == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2 && cparams.ctx_state_src == this;
+    if (!dspark && cparams.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
         return false;
     }
 
@@ -2366,7 +2367,11 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         if (inject_backend) {
             // wait on the host: a device-side wait would stall our queue for the whole target batch,
             // which trips the Metal command buffer timeout on long prompts
-            ggml_backend_event_synchronize(inject_src->ev_layer_inp_written.get());
+            if (cparams.ctx_state_src == this && n_tokens_all <= 16) {
+                ggml_backend_event_wait(inject_backend, inject_src->ev_layer_inp_written.get());
+            } else {
+                ggml_backend_event_synchronize(inject_src->ev_layer_inp_written.get());
+            }
         } else {
             inject_src->synchronize();
         }
@@ -2382,12 +2387,16 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     if (state_src) {
         state_backend = backend_from_dev(state_src->h_nextn_dev_dev);
         if (state_src->ev_h_nextn_written_recorded) {
-            ggml_backend_event_synchronize(state_src->ev_h_nextn_written.get());
+            if (state_src == this && state_backend) {
+                ggml_backend_event_wait(state_backend, state_src->ev_h_nextn_written.get());
+            } else {
+                ggml_backend_event_synchronize(state_src->ev_h_nextn_written.get());
+            }
         } else {
             state_src->synchronize();
         }
     }
-    const bool write_h_nextn = cparams.embeddings_nextn_dev && h_nextn_dev != nullptr;
+    const bool write_h_nextn = cparams.embeddings_nextn_dev && h_nextn_dev != nullptr && !(model.hparams.dflash_variant == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2 && batch_inp.tokens.front().id != LLAMA_TOKEN_NULL);
     if (write_h_nextn && ev_h_nextn_read_recorded) {
         ggml_backend_event_wait(h_nextn_backend, ev_h_nextn_read.get());
     }

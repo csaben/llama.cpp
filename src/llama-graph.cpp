@@ -4737,7 +4737,7 @@ void llm_graph_context::build_layer_inp_dev() const {
 
 void llm_graph_context::build_h_nextn_dev() const {
     ggml_tensor * src = res->t_h_nextn;
-    if (h_nextn_dev == nullptr || src == nullptr) {
+    if (h_nextn_dev == nullptr || src == nullptr || (hparams.dflash_variant == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2 && ubatch.token)) {
         return;
     }
 
