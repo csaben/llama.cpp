@@ -10,6 +10,8 @@ Local merge `f7f505c` (`p8m-merged`) combines stream A with `p8c-final`. Git mer
 
 - Main at 3000 tokens: 42 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/main/3000/).
 
+- Prose at 3000 tokens: 20 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/prose/3000/).
+
 # Phase 8
 
 **Staged and verified on GPU1.** Source `66eadaf` (`p8a-runtime`), local release tag `p8a-release`, snapshot `~/inkling-live-bin-p8-66eadaf`. All nine hashes passed and all eight project libraries resolved inside the snapshot. The manual deploy script was syntax-checked and left unexecuted. It uses guarded adaptive cap 3, the folded 32K drafter and one 64K slot on GPU1, with Phase 5 fallback. [Manual deploy](live/deploy-p8.sh), [SHA-256 manifest](p8/snapshot.sha256), [results and reproduction](RESULTS.md#phase-8).
