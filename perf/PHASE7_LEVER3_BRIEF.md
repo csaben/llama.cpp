@@ -54,3 +54,25 @@ must stay exact and working; if you change single-token kernels, run `perf/p6/r4
 - Never push; never open PRs/issues/comments upstream. Commit in small steps, tags `p7l3-<what>-<N>tok`.
 - New paths behind env flags until proven; cite every source in RESULTS_LEVER3.md.
 - Finish with a results section and a concise report; don't touch the live server.
+
+## Round 2 (after tag `p7l3-final-219tok`)
+
+Round 1: conv folded into the projection (+0.7–1.6%, exact); prefetch across 9 glue gaps lost; per-visit persistent
+kernels lost; a synthetic replay of all 193 matvecs with inputs up front and concurrent glue took 4.09 ms vs the
+3.33 ms budget. Round 2 must first answer the deciding question, then act on it:
+
+1. **The streaming floor of this token's exact layout.** One persistent kernel that reads every weight byte one token
+   touches (the 193 matvecs' real tensors in their real order and sizes, experts as the actual 8-of-128 per visit),
+   continuously, with all SMs, no per-matrix launch, ramp or tail, and does the real dot products with dummy inputs.
+   Report ms/token. Also the same with the 193 separate launches inside one CUDA graph. The gap between the two is
+   what a whole-token megakernel could win.
+2. If the single-kernel floor is well under 3.3 ms: build the **whole-token decode megakernel** incrementally
+   (Hazy Research "Look Ma, No Bubbles!"; Mirage persistent kernel / MPK, arXiv:2512.22219 if relevant; ThunderKittens
+   megakernels): an instruction stream of (matvec tile, glue op) tasks executed by resident blocks with
+   per-task dependency counters, weights for task k+1..k+n prefetched while glue runs. Start with the dense chain of
+   one visit, prove it beats the graph, then extend. Keep exactness or the PPL gate.
+3. If the floor is not under 3.3 ms: find what limits it (DRAM page/bank behaviour for many small matrices, L2
+   thrash, warps in flight per SM, the Q2_K/IQ4 decode cost) and try layout changes that keep the same bits
+   (contiguous per-visit weight packing at load time, interleaving the experts a visit will read), then re-measure.
+Same rules as above (GPU0 only; never touch ~/llama.cpp-fast or GPU1; commit with tags `p7l3r2-*`; cite sources;
+keep HANDOFF_LEVER3.md current; DSpark exactness preserved). Stop and report by 09:00 local time at the latest.
