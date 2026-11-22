@@ -1,0 +1,3 @@
+plain8         code      prompt     47   384 tok   254.6 tok/s    1320 chars  accepted/proposed 190/243  runs 254/255/255/257/257
+plain8         edit      prompt   1025   384 tok   350.6 tok/s    1115 chars  accepted/proposed 274/281  runs 350/350/351/351/352
+plain8         prose     prompt     36   384 tok   221.1 tok/s    1474 chars  accepted/proposed 130/191  runs 219/220/221/221/222

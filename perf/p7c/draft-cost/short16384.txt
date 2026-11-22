@@ -1,0 +1,1 @@
+short16384     code      prompt     47   384 tok   241.6 tok/s    1320 chars  accepted/proposed 224/472

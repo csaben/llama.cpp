@@ -1,8 +1,8 @@
 # Phase 7c hand-off
 
-06:54 EST, physical GPU1. Local tag `p7c-verify-windows` (`69443c6`) specializes the dense and segmented IQ4_NL verifier. On 384-token replies, the clean build reached 254.0-255.0 / 348.8-349.6 / 220.1 tok/s on code / edit / prose. Both halves of the frozen-candidate crossover improved on all five prompts at both lengths. All full messages and IDs matched same-flags plain and the frozen Phase 7b reference. [Part A tables and captures](RESULTS.md#phase-7c).
+07:08 EST, physical GPU1. Local tag `p7c-verify-windows` (`69443c6`) specializes the dense and segmented IQ4_NL verifier. On 384-token replies, the clean build reached 254.0-255.0 / 348.8-349.6 / 220.1 tok/s on code / edit / prose. Both halves of the frozen-candidate crossover improved on all five prompts at both lengths. All full messages and IDs matched same-flags plain and the frozen Phase 7b reference. [Part A tables and captures](RESULTS.md#phase-7c).
 
-Lever 3 is active. Phase 7b remains staged. Additional probes are measuring request-local confidence calibration, expert tiling and draft shortlist costs. Part B starts when the unit becomes inactive. The release decision is due at 08:50 and the report at 09:00.
+Lever 3 is active. Phase 7b remains staged. The verifier passed the 2,714-row rollback/boundary battery, six greedy probes, PPL and 1,108 CUDA operator cases. Calibration, expert tiling, narrower shortlists and shortened mask blocks yielded no consistent additional served gain. A separate draft-head reduction trial is running. Part B starts when the unit becomes inactive. The release decision is due at 08:50 and the report at 09:00.
 
 # Phase 7b hand-off
 

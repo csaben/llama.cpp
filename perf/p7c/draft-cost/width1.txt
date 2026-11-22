@@ -1,0 +1,1 @@
+width1         code      prompt     47   384 tok   245.1 tok/s    1320 chars  accepted/proposed 227/463

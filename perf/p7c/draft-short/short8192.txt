@@ -1,0 +1,3 @@
+short8192      code      prompt     47   384 tok   241.2 tok/s    1320 chars  accepted/proposed 176/260  runs 241/241/241/242/244
+short8192      edit      prompt   1025   384 tok   344.0 tok/s    1115 chars  accepted/proposed 272/287  runs 344/344/344/345/346
+short8192      prose     prompt     36   384 tok   212.5 tok/s    1474 chars  accepted/proposed 120/212  runs 212/212/213/213/213

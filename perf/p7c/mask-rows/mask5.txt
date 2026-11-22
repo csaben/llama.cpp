@@ -1,0 +1,3 @@
+mask5          code      prompt     47   384 tok   256.5 tok/s    1320 chars  accepted/proposed 189/238  runs 256/256/256/257/258
+mask5          edit      prompt   1025   384 tok   350.5 tok/s    1115 chars  accepted/proposed 274/281  runs 350/350/350/351/351
+mask5          prose     prompt     36   384 tok   221.3 tok/s    1474 chars  accepted/proposed 129/191  runs 218/221/221/221/221
