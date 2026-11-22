@@ -1,0 +1,4 @@
+r3-control.sqlite           us/token total, kernel work, host boundary, other signed gaps: 4850.047 4503.337 331.615 15.094
+r3-selected-final.sqlite    us/token total, kernel work, host boundary, other signed gaps: 4680.812 4441.223 231.941 7.647
+r3-match-3.sqlite           us/token total, kernel work, host boundary, other signed gaps: 4906.936 4672.538 221.156 13.242
+r3-layer-3.sqlite           us/token total, kernel work, host boundary, other signed gaps: 5223.378 5022.790 182.134 18.454
