@@ -1626,8 +1626,15 @@ static __global__ void __launch_bounds__(threads) ik_ctrl_apply_pack(const float
             partial[b*32 + tile] = ss;
         }
     }
+    const int c = (t/32)*1024 + 32*tile + t%32;
+    const float weight = compact && t < 96 && c < 2304 ? nw[b*nw_stride+c] : 0.0f;
     cooperative_groups::this_grid().sync();
-    if (t < 32) {
+    if constexpr (compact) {
+        if (t < 96 && c < 2304) {
+            const float scale = rsqrtf(warp_reduce_sum(partial[32*b+t%32])/2304 + eps);
+            ik_warp_store_q8_1(y[t/32][t%32]*scale*weight, out+b*72+c/32, t%32, true);
+        }
+    } else if (t < 32) {
         const float scale = rsqrtf(warp_reduce_sum(partial[32*b+t])/2304 + eps);
 #pragma unroll
         for (int j = 0; j < 3; ++j) {
