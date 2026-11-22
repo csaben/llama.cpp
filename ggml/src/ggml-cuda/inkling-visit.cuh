@@ -28,28 +28,33 @@ static __global__ void ik_dense_scan_inputs(ik_attn_args a, const block_iq4_nl *
     ik_project_row(w, x + col*(2304/QK8_1), (float *) a.proj, row);
 }
 
-template<int taps, bool fast = false>
-static __global__ void __launch_bounds__(fast ? 384 : 256) ik_dense_gate_scan(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x,
+template<int taps, bool fast = false, bool split_scan = false>
+static __global__ void __launch_bounds__(fast && !split_scan ? 384 : 256) ik_dense_gate_scan(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x,
         float * values, int * counters) {
-    constexpr int gates = fast ? 6 : 12;
-    constexpr int warps = fast ? 12 : 8;
+    constexpr int gates = split_scan ? 8 : fast ? 6 : 12;
+    constexpr int warps = fast && !split_scan ? 12 : 8;
     const int tid = threadIdx.x;
-    const int head = blockIdx.x < 8 ? blockIdx.x : (blockIdx.x - 8)/gates;
+    // Each MR split keeps its original warp ranges. The last arrival applies the gate.
+    const int splits = split_scan ? a.n_split : 1;
+    const int scan_blocks = 8*splits;
+    const int head = blockIdx.x < scan_blocks ? blockIdx.x%8 : (blockIdx.x - scan_blocks)/gates;
     block_q8_1 * dst = (block_q8_1 *) a.dst;
-    if (blockIdx.x < 8) {
+    if (blockIdx.x < scan_blocks) {
         a.proj_ncols = 1;
         a.dst = values;
-        if (tid < 256) {
+        if constexpr (split_scan) {
+            ik_attn2<block_q8_0, false, 3, true, false, taps, false, false, false, false, true, false, fast>(a, nullptr, 0, nullptr, head, blockIdx.x/8);
+        } else if (tid < 256) {
             ik_attn2<block_q8_0, false, 3, true, false, taps, true, false, false, false, true, false, fast>(a, nullptr, 0, nullptr, head, 0);
         }
     } else {
-        for (int i = ((blockIdx.x - 8)%gates)*warps + tid/32; i < 384; i += warps*gates) {
+        for (int i = ((blockIdx.x - scan_blocks)%gates)*warps + tid/32; i < 384; i += warps*gates) {
             ik_project_row(w, x, (float *) a.proj, a.off_gate + head*384 + i);
         }
     }
     __shared__ int last;
     __syncthreads();
-    if (tid == 0) { last = ik_atomic_add_acq_rel(counters + head, 1) == gates; }
+    if (tid == 0) { last = ik_atomic_add_acq_rel(counters + head, 1) == gates + splits - 1; }
     __syncthreads();
     if (last) {
         if (tid == 0) { ik_st_relaxed(counters + head, 0); }
@@ -77,15 +82,19 @@ static __global__ void __launch_bounds__(384) ik_dense_warp_roles(ik_attn_args a
 }
 
 template<int taps>
-static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
+static bool ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
     const auto * x = (const block_q8_1 *) proj->src[1]->data;
+    const bool fast = ggml_cuda_inkling_fast_glue(ctx) && a.n_rel == 16 && a.n_extent == 1024 && (uintptr_t) (a.consts + a.c_table) % 16 == 0;
+    const bool split_scan = ik_mr_enabled() && a.n_split < 8;
+    if (split_scan && !fast) { return false; }
     int * counters = ik_counters(ctx, 192, 8);
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
-    const bool fast = ggml_cuda_inkling_fast_glue(ctx) && a.n_rel == 16 && a.n_extent == 1024 && (uintptr_t) (a.consts + a.c_table) % 16 == 0;
-    if (short_scan) {
+    if (short_scan || split_scan) {
         ggml_cuda_pool_alloc<float> values(ctx.pool(), 3072);
-        if (fast) {
+        if (split_scan) {
+            ik_dense_gate_scan<taps, true, true><<<8*(a.n_split + 8), 256, 0, ctx.stream()>>>(a, w, x, values.get(), counters);
+        } else if (fast) {
             ik_dense_gate_scan<taps, true><<<8*7, 384, 0, ctx.stream()>>>(a, w, x, values.get(), counters);
         } else {
             ik_dense_gate_scan<taps><<<8*13, 256, 0, ctx.stream()>>>(a, w, x, values.get(), counters);
@@ -95,4 +104,5 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
     } else {
         ik_dense_warp_roles<taps><<<dim3(8, a.n_split), 384, 0, ctx.stream()>>>(a, w, x, counters);
     }
+    return true;
 }

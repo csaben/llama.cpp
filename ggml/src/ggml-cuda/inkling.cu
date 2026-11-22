@@ -3887,7 +3887,7 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
     }
 
     if (project_gates) {
-        if (!fixed || n_rows != 1 || (!short_scan && a.n_kv <= 256) || (ik_mr_enabled() && a.n_split < 8) ||
+        if (!fixed || n_rows != 1 || (!ik_mr_enabled() && !short_scan && a.n_kv <= 256) ||
                 proj->ne[0] != (a.has_taps ? 8664 : 8600)) {
             return false;
         }
@@ -3897,11 +3897,9 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
             return false;
         }
         if (a.has_taps) {
-            ik_launch_gate_projection<1>(ctx, a, proj, short_scan);
-        } else {
-            ik_launch_gate_projection<0>(ctx, a, proj, short_scan);
+            return ik_launch_gate_projection<1>(ctx, a, proj, short_scan);
         }
-        return true;
+        return ik_launch_gate_projection<0>(ctx, a, proj, short_scan);
     }
 
     const bool q8 = dst->type == GGML_TYPE_Q8_1;
