@@ -68,6 +68,71 @@ void ggml_cuda_inkling_segmented_projection(ggml_backend_cuda_context & ctx, ggm
     }
 }
 
+// The rows of a window: the projection of each token's column of the row's group, per (row, token) the arithmetic of
+// ik_segmented_projection. x: [2304, n_tok, 3] Q8_1 (the token columns of a group are consecutive), out: [rows, 3*n_tok].
+template <bool q6>
+static __global__ void ik_segmented_projection_rows(const void * weights, const block_q8_1 * x, float * out,
+        int rows, int q_rows, int k_rows, int n_tok) {
+    constexpr int qk = q6 ? QK_K : QK4_NL;
+    constexpr int blocks = 2304/qk;
+    constexpr int vdr = q6 ? VDR_Q6_K_Q8_1_MMVQ : VDR_IQ4_NL_Q8_1_MMVQ;
+    constexpr int lanes = (q6 ? QI6_K : QI4_NL)/vdr;
+    const int row = blockIdx.x*blockDim.y + threadIdx.y;
+    if (row >= rows) {
+        return;
+    }
+    const int col = row < q_rows ? 0 : row < q_rows + k_rows ? 1 : 2;
+    constexpr int stride = WARP_SIZE/lanes;
+    float partial[8][4] = {};
+#pragma unroll
+    for (int base = 0; base < blocks; base += 4*stride) {
+#pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            const int k = base + w*stride + threadIdx.x/lanes;
+            if (k < blocks) {
+                const int iqs = (threadIdx.x % lanes)*vdr;
+#pragma unroll
+                for (int t = 0; t < 8; ++t) {
+                    if (t < n_tok) {
+                        const block_q8_1 * y = x + (col*n_tok + t)*(2304/QK8_1) + k*(qk/QK8_1);
+                        if constexpr (q6) {
+                            partial[t][w] += vec_dot_q6_K_q8_1(weights, y, row*blocks + k, iqs);
+                        } else {
+                            partial[t][w] += vec_dot_iq4_nl_q8_1(weights, y, row*blocks + k, iqs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int t = 0; t < 8; ++t) {
+        if (t < n_tok) {
+            const float sum = warp_reduce_sum(((partial[t][0] + partial[t][1]) + partial[t][2]) + partial[t][3]);
+            if (threadIdx.x == (row % 2)) {
+                out[(col*n_tok + t)*rows + row] = sum;
+            }
+        }
+    }
+}
+
+bool ggml_cuda_inkling_segmented_projection_rows(ggml_backend_cuda_context & ctx, ggml_tensor * projection, int q_rows, int n_tok) {
+    const ggml_tensor * w = projection->src[0];
+    const ggml_tensor * x = projection->src[1];
+    if ((w->type != GGML_TYPE_Q6_K && w->type != GGML_TYPE_IQ4_NL) || x->type != GGML_TYPE_Q8_1 || w->ne[0] != 2304 || n_tok < 1 || n_tok > 8 ||
+            projection->ne[1] != 3*n_tok || !ggml_is_contiguous(w) || !ggml_is_contiguous(x) || !ggml_is_contiguous(projection)) {
+        return false;
+    }
+    const int rows = projection->ne[0];
+    const dim3 grid((rows + 3)/4), threads(WARP_SIZE, 4);
+    if (w->type == GGML_TYPE_Q6_K) {
+        ik_segmented_projection_rows<true><<<grid, threads, 0, ctx.stream()>>>(w->data, (const block_q8_1 *) x->data, (float *) projection->data, rows, q_rows, (rows - q_rows)/2, n_tok);
+    } else {
+        ik_segmented_projection_rows<false><<<grid, threads, 0, ctx.stream()>>>(w->data, (const block_q8_1 *) x->data, (float *) projection->data, rows, q_rows, (rows - q_rows)/2, n_tok);
+    }
+    return true;
+}
+
 #define IK_FMV_BLOCK      128
 #define IK_FMV_WARPS      (IK_FMV_BLOCK/WARP_SIZE)
 #ifndef IK_FMV_MIN_BLOCKS

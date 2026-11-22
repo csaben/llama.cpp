@@ -1,3 +1,73 @@
+# Phase 6 hand-off (keep current; newest status first)
+
+Brief: `perf/PHASE6_BRIEF.md`. Environment: `. perf/p5env.sh` (GPU1 only, live flags, `$Q2`, `$DRAFT`). Raw outputs: `perf/p6/`.
+Everything new is behind **`IK_MR=1`** (off by default; plain decode and the old batched path are unchanged without it).
+The user's live server is stopped; at the very end run `bash perf/live/restore-p5.sh`.
+
+## Design (implemented, WIP)
+
+A "window" = a ubatch of 2..8 tokens of one sequence (a DSpark verify step). With `IK_MR=1` the graph
+(`src/models/inkling2.cpp`, member `mr`, set in `init_fused()`) sends the window through the single-token fused ops, each
+of which now takes the rows of the window; per row the arithmetic is the single-token kernel's, so logits are bit-identical
+to decoding the tokens one at a time (checked with `perf/p6/mr_check.cpp`).
+
+- **Dense matvecs** (`ggml/src/ggml-cuda/mmvq.cu`, `ik_mmvq_mr` / `ggml_cuda_ik_mmvq_mr`): up to 8 activation columns with
+  the warps / blocks-per-thread / reduction order of `mul_mat_vec_q<type, 1>`; the weight block is read once for all columns.
+  Requested per node with `op_params[15] == GGML_IK_MR_MAGIC` (set by `graph::mr_mark()`), dispatched at the top of
+  `ggml_cuda_mul_mat` / `ggml_cuda_mul_mat_id` and allowed in `supports_op`.
+- **Q|K|V projection of full-attention layers**: `ik_segmented_projection_rows` (`inkling-fmv.cu`), `op_params[14]` = rows
+  of the Q group, `[13]` = n_tok; activation `[2304, n_tok, 3]`, output columns `q*n_tok + t`.
+- **Grouped experts**: the same `ik_mmvq_mr` kernel with ids: grid y = (token, slot) pair; the first pair that selected an
+  expert owns it and computes the columns of every pair of the window with that expert; other pairs exit. So each distinct
+  expert of a visit is streamed once per window (gate|up Q2_K and down Q2_0).
+- **Attention** (`inkling.cu`): `inkling_attn_kv_rows_kernel` (one block per kv head, a thread per K/V channel walks the
+  rows: convolution over [state, rows so far], post-norm, Q8_0/F16 cache store, state rollback planes), then
+  `inkling_attn2_kernel<..., MR=true>` with grid z = row (own K/V read back from the cache, no conv/store/state; per-row
+  mask / rel_pos / kv_idx / part / counters offsets). A row whose mask shows nothing past `PAD(kv_idx+1, 256)` takes the
+  splits of that smaller cache (so its partial sums group as in single-token decode) -- **this last bit is in flight**, see below.
+- **Router**: `inkling_router2_kernel<NS, 0, MR=true>`, grid y = row. **moe_sum_conv**: `inkling_moe_sum_conv_rows_kernel`.
+  **wo conv**: `shortconv_res_rows_f32` (a thread per channel walks the rows; used when `ids && n_t > 1`).
+  **Controllers**: `ik_ctrl_apply8_rows`; no GEMM path and NS-specialized res_mix for windows when `IK_MR=1` (`ik_mr_enabled()`).
+- **Recurrent (conv) state rollback**: row r of an n-row window writes plane `k = n-1-r` (cell `write_cell + k*plane_cells`)
+  when `k < min(n, n_rs_seq+1)`, the layout of `build_conv_state_view`; attn op_params [14]/[15], moe_sum_conv [3]/[4].
+- CPU references: window wrappers in `ggml/src/ggml-cpu/ops.cpp` (attn, router: row loop on shallow tensor copies;
+  moe_sum_conv: row loop). ggml constructors take windows by shape (`ggml.c`: n_tok = mask->ne[1] / a->ne[2] / states->ne[1]).
+- Debug: `IK_DBG_TAP=<tensor name>` (e.g. `l_out-9`) returns that tensor as the logits (graph ends there).
+
+## Status
+
+### Done / measured
+- Baseline at d43d1d0: `perf/p6/base_decode.txt` (211.1 / 195.9 / 183.9 / 169.5 tok/s at depth 0/4K/16K/32K),
+  `perf/p6/base_ppN.txt` (old batched step: pp2 8.45 ms, pp3 9.9, pp4 11.8, pp6 15.3, pp8 19.7 ms; plain token 4.74 ms).
+- Profile of the old 4-token step (`perf/p6/prof.sh pp4 40 -p 4 -n 0 -r 20`): experts 4.9 ms (mul_mat_vec_q_moe, no
+  dedup), dense ~2.3 ms, glue ~4.6 ms in 1,637 launches. A DSpark request (`perf/p6/prof_server.sh`): 19.5 ms wall per
+  verify step; target head + drafter head matvecs (201K rows) 932 launches x 356 us = 3.2 ms per step: the drafter runs
+  ~6 full-vocab correction matvecs + pool1d/argmax per step (`src/models/dspark.cpp` `build_inkling2_head` loop over the
+  whole block, even with `--spec-draft-n-max 3`), then host sampling of the logits.
+- `mr_check` (build line in the file header): **240 rows in 48 windows (sizes 2..8, with partial rollbacks) after a
+  300-token prefix: 0 rows differ** from single-token decode; also exact at prefixes 250 / 1010 / 1270 / 2040.
+
+### In flight
+- Windows that cross a 256-cell pad boundary of the full-attention cache at n_kv >= 1536 (prefix 1525 / 1530 / 1786,
+  `MR_SIZES=8 MR_ROLLBACK=0`) differed from single-token decode from layer 9 (first full-attention layer; found with
+  `IK_DBG_TAP=l_out-9`). Fix being tested: per-row n_kv / splits in the MR attention kernel (the `cand` block at the top
+  of `inkling_attn2_kernel`). If it still differs, compare `l_out-9` per row and look at how the tile grouping of
+  `ik_mma_step` changes with `kv_per_split`.
+
+### Next
+1. Finish the boundary case above; run `mr_check` at prefixes 300 (48 windows), 1500 (36), 4000.
+2. test-backend-ops cases for the window ops (INKLING_ATTN / INKLING_ROUTER / INKLING_MOE_SUM_CONV with n_tok > 1,
+   MUL_MAT / MUL_MAT_ID with the magic) + existing cases still pass (`-o INKLING_ATTN`, `INKLING_ROUTER`,
+   `INKLING_MOE_SUM_CONV`, `SHORTCONV_RES`, `LOOP_CTRL_APPLY`, `RES_MIX`, `MUL_MAT`, `MUL_MAT_ID`).
+3. Measure: `IK_MR=1 build/bin/llama-bench -m $Q2 -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 2,3,4,6,8 -n 0 -r 20` against
+   `perf/p6/base_ppN.txt`; `perf/p6/prof.sh` for the window profile; count distinct experts per window.
+4. Server: `IK_MR=1 MODEL=$Q2 python3 perf/spec_probe.py dspark -- --backend-sampling --spec-type draft-dspark
+   --spec-draft-model $DRAFT --spec-draft-n-max 3 --spec-draft-p-min 0`; compare the text with the plain run token for token.
+5. Drafter (workstream 4): stop the Markov-head loop at n_max, fold `target.output x dspark_hidden_out` into one
+   201K x rank matrix (basalt, MIT) or use a shortlist (ingine, Apache-2.0), one fused first-max argmax, return ids only.
+6. Window policy (workstream 5), then RESULTS.md phase 6 section, plain-decode regression bench, PPL, greedy checks.
+7. `bash perf/live/restore-p5.sh`.
+
 # Phase 5 hand-off (keep current; newest status first)
 
 Branch `inkling-3090`. Environment for every command: `. perf/p5env.sh` (GPU1, live flags, `$Q2`/`$IQ4`/`$Q6`/`$DRAFT`).

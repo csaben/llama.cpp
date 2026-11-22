@@ -2552,6 +2552,16 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     const bool bad_padding_clear = ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE
         && ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) && src0->view_src;
 
+    // a window of an Inkling decode (see GGML_IK_MR_MAGIC): kernels with the per-row arithmetic of the single-token path
+    if (ggml_get_op_params_i32(dst, 15) == GGML_IK_MR_MAGIC && !bad_padding_clear && ggml_is_quantized(src0->type)) {
+        const int q_rows = ggml_get_op_params_i32(dst, 14);
+        if (q_rows > 0 ? ggml_cuda_inkling_segmented_projection_rows(ctx, dst, q_rows, ggml_get_op_params_i32(dst, 13)) :
+                         ggml_cuda_ik_mmvq_mr(ctx, src0, src1, nullptr, dst)) {
+            return;
+        }
+        GGML_ASSERT(q_rows == 0 && "window projection: unsupported weights");
+    }
+
     // a Q8_1 src1 is an activation quantized by its producer: only the quantized matvec kernel reads it
     if (!bad_padding_clear && src1->type == GGML_TYPE_Q8_1 && dst->type == GGML_TYPE_F32 && ggml_is_quantized(src0->type)) {
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
@@ -2666,6 +2676,10 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     const int cc        = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
     const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
+
+    if (ggml_get_op_params_i32(dst, 15) == GGML_IK_MR_MAGIC && ggml_is_quantized(src0->type) && ggml_cuda_ik_mmvq_mr(ctx, src0, src1, ids, dst)) {
+        return;
+    }
 
     // a Q8_1 src1 is an activation quantized by its producer: only the quantized matvec kernel reads it
     if (src1->type == GGML_TYPE_Q8_1) {
@@ -4552,6 +4566,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     static const bool segmented_q6 = ggml_cuda_env_flag("IK_SEGMENTED_Q6");
     if ((segmented_iq4 || segmented_q6) && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X &&
             cuda_ctx->stream_context().concurrent_events.empty() && node->op == GGML_OP_MUL_MAT &&
+            ggml_get_op_params_i32(node, 15) != GGML_IK_MR_MAGIC && // a window has its own projection kernels (3 columns: 3 tokens)
             ((segmented_iq4 && node->src[0]->type == GGML_TYPE_IQ4_NL) ||
              (segmented_q6 && node->src[0]->type == GGML_TYPE_Q6_K)) && node->src[1]->type == GGML_TYPE_Q8_1 &&
             node->src[0]->buffer && ggml_backend_buffer_get_type(node->src[0]->buffer) == ggml_backend_cuda_buffer_type(cuda_ctx->device) &&
@@ -6520,6 +6535,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return false;
                 }
                 const int cc_dev = ggml_cuda_info().devices[dev_ctx->device].cc;
+                if (ggml_get_op_params_i32(op, 15) == GGML_IK_MR_MAGIC && ggml_is_quantized(a->type) && op->type == GGML_TYPE_F32 &&
+                        (b->type == GGML_TYPE_Q8_1 || b->type == GGML_TYPE_F32) && b->ne[0] % QK8_1 == 0 && a->type != GGML_TYPE_NVFP4) {
+                    return true; // a window of an Inkling decode: the row-exact kernels (ggml_cuda_ik_mmvq_mr and the segmented projection)
+                }
                 if (b->type == GGML_TYPE_Q8_1) {
                     // an activation quantized by its producer, for the quantized matvec kernel (few columns, whole blocks per row)
                     const int64_t ncols = op->op == GGML_OP_MUL_MAT_ID ? op->ne[2] : b->ne[1];

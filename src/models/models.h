@@ -2614,6 +2614,12 @@ struct llama_model_inkling2 : public llama_model_base {
         int64_t       sinks_n_head = 0;
         // the cells read by the convolutions of the current layer when they read the recurrent state directly (else nullptr)
         ggml_tensor * rs_ids = nullptr;
+        // a window of 2..8 tokens of one sequence through the single-token fused ops, row by row inside each kernel
+        // (IK_MR=1): per row the arithmetic of single-token decode, the dense weights and each distinct expert read once
+        bool mr = false;
+        int  mr_planes = 1;      // rollback planes of the recurrent state written by the window
+        int  mr_plane_cells = 0; // cells per plane
+        ggml_tensor * mr_mark(ggml_tensor * t, int q_rows = 0);
 
         // the inputs and the token embeddings
         ggml_tensor * build_inputs();

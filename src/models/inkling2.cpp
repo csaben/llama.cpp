@@ -523,6 +523,39 @@ void llama_model_inkling2::graph::init_fused() {
         return env != nullptr && atoi(env) != 0;
     }();
     proj_op = fused && attn_op && proj_op_enabled;
+
+    // windows (speculative verify): every fused op of the single-token path takes the rows of the window
+    static const bool mr_enabled = [] {
+        const char * env = getenv("IK_MR");
+        return env != nullptr && atoi(env) != 0;
+    }();
+    mr = mr_enabled && fused && q8_act && attn_op && router_op && moe_op == 3 && !proj_op && n_tokens >= 2 && n_tokens <= 8 &&
+        ubatch.n_seqs == 1 && ubatch.n_seq_tokens == (uint32_t) n_tokens && cparams.flash_attn && !cparams.moe_random_routing &&
+        n_embd == 2304 && hparams.n_shortconv_l_cache == 4;
+    if (mr) {
+        const auto & m = static_cast<const llama_model_inkling2 &>(model);
+        for (const auto & fa : m.fused_attn) {
+            // the projections with a row-exact window kernel
+            mr = mr && (fa.w == nullptr || fa.w->type == GGML_TYPE_IQ4_NL || fa.w->type == GGML_TYPE_Q6_K);
+        }
+        for (size_t il = 0; il < model.layers.size() && il < (size_t) hparams.n_layer(); ++il) {
+            mr = mr && model.layers[il].attn_post_conv != nullptr && model.layers[il].ffn_post_conv != nullptr;
+        }
+    }
+}
+
+static void ik_set_param(ggml_tensor * t, int i, int32_t v) {
+    t->op_params[i] = v;
+}
+
+// mark a matmul of a window for the row-exact kernels of the backend (see GGML_IK_MR_MAGIC)
+ggml_tensor * llama_model_inkling2::graph::mr_mark(ggml_tensor * t, int q_rows) {
+    if (mr && (t->op == GGML_OP_MUL_MAT || t->op == GGML_OP_MUL_MAT_ID)) {
+        ik_set_param(t, 13, (int32_t) n_tokens);
+        ik_set_param(t, 14, q_rows);
+        ik_set_param(t, 15, GGML_IK_MR_MAGIC);
+    }
+    return t;
 }
 
 // the attention-output convolution can be folded into the router op of this layer: single-token decode, the fused
@@ -557,7 +590,7 @@ void llama_model_inkling2::graph::flush_pending() {
 ggml_type llama_model_inkling2::graph::act_type(int il) const {
     // only the matvec path consumes Q8_1 activations: at most 8 columns, and the attention projection of the three
     // inputs of a full-attention or looped layer takes 3*n_tokens columns
-    if (!q8_act || 3*n_tokens > 8) {
+    if (!q8_act || (3*n_tokens > 8 && !mr)) {
         return GGML_TYPE_F32;
     }
     ggml_backend_dev_t dev = model.dev_layer(il);
@@ -792,7 +825,11 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
     ggml_tensor * state   = recr->mctx->get_r_l(il);
     ggml_tensor * history = nullptr;
     rs_ids = nullptr;
-    if (fused && ubatch.n_seq_tokens == 1) {
+    if (mr) {
+        mr_planes      = cparams.n_rs_seq == 0 ? 1 : (int) std::min<int64_t>(n_tokens, (int64_t) cparams.n_rs_seq + 1);
+        mr_plane_cells = (int) recr->mctx->get_size();
+    }
+    if (fused && (ubatch.n_seq_tokens == 1 || mr)) {
         // single-token sequences: the fused convolutions read the cells of the state straight from the cache (by s_copy)
         // and write the new cells; with more tokens the readers and the writers of a channel differ, so the state is gathered
         auto get_rows = [&](ggml_context * ctx, ggml_tensor * states, ggml_tensor * ids) {
@@ -942,14 +979,14 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                     out_v = ggml_view_2d(ctx0, proj, fa.n_v, n_tokens, proj->nb[1], 2*proj->nb[1] + (fa.n_q + fa.n_k)*sizeof(float));
                 }
             } else if (inputs[0] == inputs[1] && inputs[0] == inputs[2]) {
-                out_q = ggml_mul_mat(ctx0, fa.w, inputs[0]);
+                out_q = mr_mark(ggml_mul_mat(ctx0, fa.w, inputs[0]));
                 out_k = ggml_view_2d(ctx0, out_q, fa.n_k, n_tokens, out_q->nb[1], fa.n_q*sizeof(float));
                 out_v = ggml_view_2d(ctx0, out_q, fa.n_v, n_tokens, out_q->nb[1], (fa.n_q + fa.n_k)*sizeof(float));
                 proj  = out_q;
-            } else if (inputs3 != nullptr && n_tokens <= 4) {
+            } else if (inputs3 != nullptr && (n_tokens <= 4 || mr)) {
                 // few tokens: one matmul over the three inputs reads the weights once; the groups take their own columns
                 ggml_tensor * x3  = ggml_reshape_2d(ctx0, inputs3, n_embd, 3*n_tokens);
-                ggml_tensor * out = ggml_mul_mat(ctx0, fa.w, x3); // [n_q + n_k + n_v, 3*n_tokens]
+                ggml_tensor * out = mr_mark(ggml_mul_mat(ctx0, fa.w, x3), (int) fa.n_q); // [n_q + n_k + n_v, 3*n_tokens]
                 proj  = out;
                 out_q = ggml_view_2d(ctx0, out, fa.n_q, n_tokens, out->nb[1], 0);
                 out_k = ggml_view_2d(ctx0, out, fa.n_k, n_tokens, out->nb[1], 1*n_tokens*out->nb[1] + fa.n_q*sizeof(float));
@@ -964,7 +1001,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
             // single-token decode: the whole attention block (K/V convolutions and stores, clips, bias, attention, gate) in one op
             ggml_tensor * consts = static_cast<const llama_model_inkling2 &>(model).attn_consts[ip];
             ggml_tensor * mask_raw = is_swa ? attn->self_attn_mask_swa.raw : attn->self_attn_mask.raw;
-            if (attn_op && proj != nullptr && consts != nullptr && rs_ids != nullptr && n_tokens == 1 && ubatch.n_seqs == 1 &&
+            if (attn_op && proj != nullptr && consts != nullptr && rs_ids != nullptr && (n_tokens == 1 || mr) && ubatch.n_seqs == 1 &&
                     mask_raw->ne[3] == 1 && mask_raw->ne[2] == 1 && n_embd_head == 128 && cparams.flash_attn) {
                 const auto * mctx_cur = is_swa ? attn->mctx->get_swa() : attn->mctx->get_base();
                 ggml_tensor * k = mctx_cur->get_k(ctx0, il);
@@ -983,6 +1020,10 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                             n_head, n_head_kv, n_embd_head, hp.n_relative, hp.n_shortconv_l_cache, !is_swa, recr->mctx->get_head(),
                             hp.f_qk_clip, hp.f_relative_clip, hp.f_norm_rms_eps, hp.f_log_scale_alpha, (float) hp.n_log_scale_floor,
                             1.0f/sqrtf(n_embd_head), a_type);
+                    if (mr) {
+                        ik_set_param(cur, 14, mr_planes);
+                        ik_set_param(cur, 15, mr_plane_cells);
+                    }
                     cb(cur, "attn_gated", il);
                     // the V cell indices are set with the K ones: keep their input allocated
                     ggml_build_forward_expand(gf, is_swa ? attn->get_v_idxs_swa() : attn->get_v_idxs());
@@ -996,12 +1037,13 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                         cur = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd);
                         cb(cur, "attn_out_leaf", il);
                     } else {
-                        cur = convolve(build_lora_mm(layer.wo, cur), layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa, residual);
+                        cur = convolve(mr_mark(build_lora_mm(layer.wo, cur)), layer.attn_post_conv, nullptr, state, history, recr, 2*n_embd_k_gqa, residual);
                     }
                     cb(cur, "attn_out", il);
                     goto attn_done;
                 }
             }
+            GGML_ASSERT(!mr && "inkling2: a window needs the fused attention op");
 
             Qcur = ggml_view_3d(ctx0, out_q, n_embd_head, n_head, n_tokens, n_embd_head*sizeof(float), out_q->nb[1], 0);
             Rcur = ggml_view_3d(ctx0, out_q, hparams.n_relative, n_head, n_tokens, hparams.n_relative*sizeof(float), out_q->nb[1], fa.off_rel*sizeof(float));
@@ -1117,7 +1159,7 @@ attn_done:
     // Mode 3 dispatches each expert matrix separately. Its Q8_1 activation
     // requires a supported MMVQ for both weights on the same CUDA device.
     bool mixed_cuda_experts = false;
-    if (moe_op == 3 && n_tokens == 1 && a_type == GGML_TYPE_Q8_1 && gate_up && down &&
+    if (moe_op == 3 && (n_tokens == 1 || mr) && a_type == GGML_TYPE_Q8_1 && gate_up && down &&
             (gate_up->type == GGML_TYPE_Q2_K || gate_up->type == GGML_TYPE_Q3_K) &&
             (down->type == GGML_TYPE_Q2_0 || down->type == GGML_TYPE_Q4_0 || down->type == GGML_TYPE_IQ4_NL)) {
         const auto dev = model.dev_layer(il);
@@ -1127,7 +1169,7 @@ attn_done:
                                  ggml_backend_buffer_get_type(down->buffer) == buft;
         }
     }
-    const bool moe_fused = moe_op && n_tokens == 1 && ubatch.n_seqs == 1 && rs_ids != nullptr &&
+    const bool moe_fused = moe_op && (n_tokens == 1 || mr) && ubatch.n_seqs == 1 && rs_ids != nullptr &&
         !layer.ffn_up_exps_s && !layer.ffn_gate_exps_s && !layer.ffn_down_exps_s && n_expert_used <= 8 && !cparams.moe_random_routing &&
         (ordinary_experts || mixed_cuda_experts) && n_embd <= 4096;
     // the fused router op: the mix (or the controlled input), the FFN norm, the router and the top-k selection in one op
@@ -1139,10 +1181,10 @@ attn_done:
     ggml_tensor * weights          = nullptr; // [1, n_expert_used, 1] F32 (or the I32 bits of the fused router)
     ggml_tensor * x_q8             = nullptr; // the FFN input as the Q8_1 activation of the expert matmul
     if (router_fused) {
-        ggml_tensor * route = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 2*n_expert_used);
+        ggml_tensor * route = mr ? ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, 2*n_expert_used, n_tokens) : ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 2*n_expert_used);
         cb(route, "ffn_moe_route", il);
         if (a_type == GGML_TYPE_Q8_1) {
-            x_q8 = ggml_new_tensor_1d(ctx0, GGML_TYPE_Q8_1, n_embd);
+            x_q8 = mr ? ggml_new_tensor_2d(ctx0, GGML_TYPE_Q8_1, n_embd, n_tokens) : ggml_new_tensor_1d(ctx0, GGML_TYPE_Q8_1, n_embd);
             cb(x_q8, "ffn_norm_q8", il);
         }
         std::vector<ggml_tensor *> states;
@@ -1173,8 +1215,13 @@ attn_done:
         cb(cur, "ffn_norm", il);
         // the op writes route and x_q8 as side outputs: it must be in the graph even when its F32 result is not consumed
         ggml_build_forward_expand(gf, cur);
+        if (mr) {
+            selected_experts = ggml_view_2d(ctx0, route, n_expert_used, n_tokens, route->nb[1], 0);
+            weights          = ggml_view_3d(ctx0, route, 1, n_expert_used, n_tokens, route->nb[0], route->nb[1], route->nb[0]*n_expert_used);
+        } else {
         selected_experts = ggml_view_2d(ctx0, route, n_expert_used, 1, route->nb[0]*n_expert_used, 0);
         weights          = ggml_view_3d(ctx0, route, 1, n_expert_used, 1, route->nb[0], route->nb[0]*n_expert_used, route->nb[0]*n_expert_used);
+        }
     } else if (fused && !messages) {
         // the mix and the FFN norm in one op (F32: the router reads it too)
         cur = ggml_reshape_2d(ctx0, mix_norm(blocks, cur, layer.ffn_res_query, layer.ffn_norm, GGML_TYPE_F32), n_embd, n_tokens);
@@ -1220,6 +1267,7 @@ attn_done:
         }
         ggml_build_forward_expand(gf, weights);
     }
+    GGML_ASSERT(!mr || (moe_fused && router_fused && x_q8 != nullptr));
     if (moe_fused) {
 
         const float conv_scale = 1.0f/sqrtf(hparams.n_shortconv_l_cache + 1);
@@ -1232,11 +1280,11 @@ attn_done:
             ggml_tensor * gu   = layer.ffn_gate_up_exps;
             const int64_t n_ff = gu->ne[1]/2;
             // the expert activation: the router's quantized output when there is one
-            ggml_tensor * x3   = x_q8 ? ggml_reshape_3d(ctx0, x_q8, n_embd, 1, 1) : ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
+            ggml_tensor * x3   = x_q8 ? ggml_reshape_3d(ctx0, x_q8, n_embd, 1, mr ? n_tokens : 1) : ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
             ggml_tensor * h    = nullptr;
             if (moe_op == 3) {
                 // the merged gate|up matmul, then the activation on its two halves, quantized for the down matmul
-                ggml_tensor * gate_up = ggml_mul_mat_id(ctx0, gu, x3, selected_experts); // [2*n_ff, n_expert_used, 1]
+                ggml_tensor * gate_up = mr_mark(ggml_mul_mat_id(ctx0, gu, x3, selected_experts)); // [2*n_ff, n_expert_used, 1]
                 ggml_tensor * gate = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
                 ggml_tensor * up   = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], n_ff*gate_up->nb[0]);
                 h = ggml_situ_split_out(ctx0, gate, up, hparams.situ_beta, hparams.situ_linear_beta, n_ff % ggml_blck_size(GGML_TYPE_Q8_1) == 0 ? a_type : GGML_TYPE_F32);
@@ -1253,7 +1301,7 @@ attn_done:
                 h = ggml_situ_split(ctx0, gate, up, hparams.situ_beta, hparams.situ_linear_beta);
             }
             cb(h, "ffn_moe_situ", il);
-            ggml_tensor * d = ggml_mul_mat_id(ctx0, layer.ffn_down_exps, h, selected_experts); // [n_embd, n_expert_used, 1]
+            ggml_tensor * d = mr_mark(ggml_mul_mat_id(ctx0, layer.ffn_down_exps, h, selected_experts)); // [n_embd, n_expert_used, 1]
             cb(d, "ffn_moe_down", il);
             if (proj_op && router_fused) {
                 // the epilogue is deferred into the next layer's fused projection op (or flushed before any other consumer)
@@ -1267,6 +1315,10 @@ attn_done:
             } else {
                 cur = ggml_inkling_moe_sum_conv(ctx0, d, weights, layer.ffn_post_conv, state, rs_ids, ffn_inp,
                         recr->mctx->get_head(), 2*n_embd_k_gqa + n_embd, conv_scale);
+                if (mr) {
+                    ik_set_param(cur, 3, mr_planes);
+                    ik_set_param(cur, 4, mr_plane_cells);
+                }
             }
         }
         cb(cur, "l_out", il);
@@ -1315,6 +1367,9 @@ void llama_model_inkling2::graph::build_output(ggml_tensor * cur, const std::vec
 
     // lm_head
     cur = build_lora_mm(model.output, cur);
+    if (cur->ne[1] >= 2 && cur->ne[1] <= 8) {
+        mr_mark(cur);
+    }
     ggml_prec_set_acc(cur, GGML_PREC_F32);
 
     if (hparams.f_final_logit_softcapping != 0.0f) {
@@ -1328,6 +1383,17 @@ void llama_model_inkling2::graph::build_output(ggml_tensor * cur, const std::vec
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
+
+    // debugging: IK_DBG_TAP=<tensor name> (e.g. "l_out-7", "attn_out-20") returns that tensor, zero-padded to the
+    // vocabulary, as the logits; the graph ends there (perf/p6/mr_check.cpp compares windows against single tokens with it)
+    if (const char * tap = getenv("IK_DBG_TAP")) {
+        ggml_build_forward_expand(gf, cur);
+        ggml_tensor * t = ggml_graph_get_tensor(gf, tap);
+        if (t != nullptr && t->type == GGML_TYPE_F32 && t->ne[0] <= cur->ne[0] && t->ne[1] == cur->ne[1]) {
+            t = ggml_cont(ctx0, ggml_reshape_2d(ctx0, t, t->ne[0], t->ne[1]));
+            res->t_logits = t->ne[0] < cur->ne[0] ? ggml_pad(ctx0, t, (int) (cur->ne[0] - t->ne[0]), 0, 0, 0) : t;
+        }
+    }
 }
 
 llama_model_inkling2::graph::graph(const llm_graph_params & params) : llm_graph_context(params) {

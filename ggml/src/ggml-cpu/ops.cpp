@@ -13191,7 +13191,60 @@ static void ik_attn_load_row(const ggml_tensor * cache, const int64_t kv, const 
     }
 }
 
+static void ggml_compute_forward_inkling_attn_row(const ggml_compute_params * params, ggml_tensor * dst);
+
+// a window of tokens: the single-token op row by row on shallow copies of the tensors (the reference semantics: row r
+// sees the K/V cells and the convolution state left by the rows before it); the state goes through a scratch cell and
+// is copied to its rollback planes (slot k: the state k tokens before the end of the window)
 void ggml_compute_forward_inkling_attn(const ggml_compute_params * params, ggml_tensor * dst) {
+    const int64_t n_tok = dst->ne[1];
+    if (n_tok == 1) {
+        ggml_compute_forward_inkling_attn_row(params, dst);
+        return;
+    }
+    const ggml_tensor * state0 = dst->src[2];
+    const int n_planes    = ggml_get_op_params_i32(dst, 14) & 0xff;
+    const int plane_cells = ggml_get_op_params_i32(dst, 15);
+    const int write_cell  = ggml_get_op_params_i32(dst, 6);
+    const int n_conv      = ggml_get_op_params_i32(dst, 4);
+    const int64_t n_state = (int64_t) (n_conv - 1)*2*ggml_get_op_params_i32(dst, 2)*ggml_get_op_params_i32(dst, 1);
+    const int64_t n_cols  = dst->src[0]->ne[1]/n_tok;
+
+    std::vector<float> scratch(state0->ne[0], 0.0f);
+    int32_t cell0 = 0;
+    if (params->ith == 0) {
+        const int32_t read_cell = ((const int32_t *) dst->src[3]->data)[0];
+        memcpy(scratch.data(), (const char *) state0->data + read_cell*state0->nb[1], n_state*sizeof(float));
+    }
+    for (int64_t r = 0; r < n_tok; ++r) {
+        ggml_tensor d = *dst, proj = *dst->src[0], state = *state0, rs = *dst->src[3], kvi = *dst->src[6], rel = *dst->src[7], mask = *dst->src[8], pos;
+        proj.data  = (char *) proj.data + r*proj.nb[1];
+        proj.nb[1] = n_tok*proj.nb[1];
+        proj.ne[1] = n_cols;
+        state.data = scratch.data(); state.ne[1] = 1;
+        rs.data    = &cell0;
+        kvi.data   = (char *) kvi.data + r*sizeof(int64_t);
+        rel.data   = (char *) rel.data + r*rel.nb[1];
+        mask.data  = (char *) mask.data + r*mask.nb[1];
+        d.src[0] = &proj; d.src[2] = &state; d.src[3] = &rs; d.src[6] = &kvi; d.src[7] = &rel; d.src[8] = &mask;
+        if (dst->src[9]) {
+            pos = *dst->src[9];
+            pos.data = (char *) pos.data + r*sizeof(int32_t);
+            d.src[9] = &pos;
+        }
+        d.data  = (char *) dst->data + r*dst->nb[1];
+        d.ne[1] = 1;
+        ggml_set_op_params_i32(&d, 6, 0);
+        ggml_compute_forward_inkling_attn_row(params, &d);
+        ggml_barrier(params->threadpool);
+        const int64_t k = n_tok - 1 - r;
+        if (params->ith == 0 && k < n_planes) {
+            memcpy((char *) state0->data + ((int64_t) write_cell + k*plane_cells)*state0->nb[1], scratch.data(), n_state*sizeof(float));
+        }
+    }
+}
+
+static void ggml_compute_forward_inkling_attn_row(const ggml_compute_params * params, ggml_tensor * dst) {
     const ggml_tensor * proj    = dst->src[0];
     const ggml_tensor * consts_t = dst->src[1];
     ggml_tensor       * state   = dst->src[2];
@@ -13463,13 +13516,12 @@ void ggml_compute_forward_inkling_moe_sum_conv(const ggml_compute_params * param
     const int ith = params->ith;
     const int nth = params->nth;
 
+    // a window of tokens (dst [n_embd, n_tok]): the rows in order, slot k of the state is the state k tokens before the end
+    const int64_t n_tok       = dst->ne[1];
+    const int64_t n_planes    = n_tok > 1 ? ggml_get_op_params_i32(dst, 3) : 1;
+    const int64_t plane_cells = ggml_get_op_params_i32(dst, 4);
+
     for (int64_t c = ith; c < n_embd; c += nth) {
-        float sum = 0.0f;
-        for (int64_t e = 0; e < n_used; ++e) {
-            const float x  = *(const float *) ((const char *) a->data + c*sizeof(float) + e*a->nb[1]);
-            const float we = *(const float *) ((const char *) w->data + e*w->nb[1]);
-            sum += x*we;
-        }
         const int64_t ch = chan_offset + c;
         const float * past = (const float *) ((const char *) state->data + read_cell*state->nb[1]) + ch*(n_conv - 1);
         const float * cw   = (const float *) conv_w->data + c*n_conv;
@@ -13477,22 +13529,69 @@ void ggml_compute_forward_inkling_moe_sum_conv(const ggml_compute_params * param
         for (int64_t j = 0; j < n_conv - 1; ++j) {
             xs[j] = past[j];
         }
-        xs[n_conv - 1] = sum;
-        float out = 0.0f;
-        for (int64_t j = 0; j < n_conv; ++j) {
-            out += xs[j]*cw[j];
+        for (int64_t r = 0; r < n_tok; ++r) {
+            float sum = 0.0f;
+            for (int64_t e = 0; e < n_used; ++e) {
+                const float x  = *(const float *) ((const char *) a->data + c*sizeof(float) + e*a->nb[1] + r*a->nb[2]);
+                const float we = *(const float *) ((const char *) w->data + e*w->nb[1] + r*w->nb[2]);
+                sum += x*we;
+            }
+            xs[n_conv - 1] = sum;
+            float out = 0.0f;
+            for (int64_t j = 0; j < n_conv; ++j) {
+                out += xs[j]*cw[j];
+            }
+            const int64_t k = n_tok - 1 - r;
+            if (k < n_planes) {
+                float * st = (float *) ((char *) state->data + ((int64_t) write_cell + k*plane_cells)*state->nb[1]) + ch*(n_conv - 1);
+                for (int64_t j = 0; j < n_conv - 1; ++j) {
+                    st[j] = xs[j + 1];
+                }
+            }
+            *(float *) ((char *) dst->data + c*sizeof(float) + r*dst->nb[1]) =
+                *(const float *) ((const char *) residual->data + c*sizeof(float) + r*residual->nb[1]) + (sum + out)*scale;
+            for (int64_t j = 0; j < n_conv - 1; ++j) {
+                xs[j] = xs[j + 1];
+            }
         }
-        float * st = (float *) ((char *) state->data + (int64_t) write_cell*state->nb[1]) + ch*(n_conv - 1);
-        for (int64_t j = 0; j < n_conv - 1; ++j) {
-            st[j] = xs[j + 1];
-        }
-        ((float *) dst->data)[c] = ((const float *) residual->data)[c] + (sum + out)*scale;
     }
 }
 
 // ggml_compute_forward_inkling_router
 
+static void ggml_compute_forward_inkling_router_row(const ggml_compute_params * params, ggml_tensor * dst);
+
+// a window of tokens: the rows are independent, the single-token op on shallow copies of the tensors
 void ggml_compute_forward_inkling_router(const ggml_compute_params * params, ggml_tensor * dst) {
+    const int64_t n_tok = dst->ne[1];
+    if (n_tok == 1) {
+        ggml_compute_forward_inkling_router_row(params, dst);
+        return;
+    }
+    const int n_states = ggml_get_op_params_i32(dst, 6);
+    for (int64_t r = 0; r < n_tok; ++r) {
+        ggml_tensor d = *dst, st[GGML_MAX_SRC], route = *dst->src[3 + n_states], xq;
+        for (int i = 0; i < n_states; ++i) {
+            st[i] = *dst->src[1 + i];
+            st[i].data = (char *) st[i].data + r*st[i].nb[1];
+            st[i].ne[1] = 1;
+            d.src[1 + i] = &st[i];
+        }
+        route.data = (char *) route.data + r*route.nb[1];
+        d.src[3 + n_states] = &route;
+        if (dst->src[4 + n_states]) {
+            xq = *dst->src[4 + n_states];
+            xq.data = (char *) xq.data + r*xq.nb[1];
+            d.src[4 + n_states] = &xq;
+        }
+        d.data  = (char *) dst->data + r*dst->nb[1];
+        d.ne[1] = 1;
+        ggml_compute_forward_inkling_router_row(params, &d);
+        ggml_barrier(params->threadpool);
+    }
+}
+
+static void ggml_compute_forward_inkling_router_row(const ggml_compute_params * params, ggml_tensor * dst) {
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
     const ggml_tensor * consts   = dst->src[1 + n_states];

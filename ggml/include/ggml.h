@@ -2471,6 +2471,13 @@ extern "C" {
     // K and V are convolved (+ dynamic taps), K L2-clipped and V RMS-normalized per head, Q and R clipped per head, the relative
     // bias, the sink logit and the mask added to the scores, the attention output gated by sigmoid(gate); result [hd*n_head, 1]
     // in F32 or Q8_1
+    // Inkling multi-row windows (2..8 tokens of one sequence decoded together, e.g. a speculative verify step):
+    // op_params[15] == GGML_IK_MR_MAGIC on a MUL_MAT / MUL_MAT_ID node asks the backend for kernels whose result per
+    // token column is bit-identical to the single-column kernel (MUL_MAT_ID: each distinct expert is read once).
+    // MUL_MAT: op_params[14] > 0: the rows are the Q | K | V groups of an attention projection, [14] rows in the Q group,
+    // the activation is [n_embd, n_tok, 3] and each row needs its group's columns only; op_params[13]: n_tok.
+    #define GGML_IK_MR_MAGIC 0x494b4d52
+
     GGML_API struct ggml_tensor * ggml_inkling_attn(
             struct ggml_context * ctx,
             struct ggml_tensor  * proj,

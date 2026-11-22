@@ -6081,7 +6081,12 @@ struct ggml_tensor * ggml_inkling_attn(
     const int64_t n_taps  = has_taps ? n_conv*n_head_kv : 0;
     const int64_t n_proj  = hd*n_head + n_rel*n_head + n_head + hd*n_head + 2*(n_kv_ch + n_taps);
 
-    GGML_ASSERT(proj->type == GGML_TYPE_F32 && proj->ne[0] == n_proj && (proj->ne[1] == 1 || proj->ne[1] == 3) && proj->ne[2] == 1 && proj->ne[3] == 1);
+    // a window of n_tok tokens of one sequence (mask [n_kv, n_tok]): proj [n_proj, n_tok] or [n_proj, 3*n_tok] (the token columns
+    // of a group are consecutive), kv_idxs / pos [n_tok], rel_pos [n_kv, n_tok]; the result is [hd*n_head, n_tok].
+    // The caller sets op_params[14] (rollback planes of the state written, slot k: k tokens back) and [15] (cells per plane).
+    const int64_t n_tok = mask->ne[1];
+    GGML_ASSERT(n_tok >= 1 && n_tok <= 8 && mask->ne[2] == 1 && mask->ne[3] == 1);
+    GGML_ASSERT(proj->type == GGML_TYPE_F32 && proj->ne[0] == n_proj && (proj->ne[1] == n_tok || proj->ne[1] == 3*n_tok) && proj->ne[2] == 1 && proj->ne[3] == 1);
     GGML_ASSERT(proj->nb[0] == sizeof(float));
 
     const int64_t n_fixed = hd*n_head + n_rel*n_head + 2*n_conv*n_kv_ch;
@@ -6098,16 +6103,18 @@ struct ggml_tensor * ggml_inkling_attn(
     GGML_ASSERT(k_cache->nb[1] == ggml_row_size(k_cache->type, hd) && v_cache->nb[1] == ggml_row_size(v_cache->type, hd));
 
     const int64_t n_kv = k_cache->ne[2];
-    GGML_ASSERT(kv_idxs->type == GGML_TYPE_I64 && kv_idxs->ne[0] >= 1);
-    GGML_ASSERT(rel_pos->type == GGML_TYPE_I32 && rel_pos->ne[0] == n_kv);
+    GGML_ASSERT(kv_idxs->type == GGML_TYPE_I64 && kv_idxs->ne[0] >= n_tok);
+    GGML_ASSERT(rel_pos->type == GGML_TYPE_I32 && rel_pos->ne[0] == n_kv && rel_pos->ne[1] >= n_tok && (n_tok == 1 || ggml_is_contiguous(rel_pos)));
     GGML_ASSERT((mask->type == GGML_TYPE_F16 || mask->type == GGML_TYPE_F32) && mask->ne[0] == n_kv && ggml_is_contiguous(mask));
-    GGML_ASSERT(pos == NULL || (pos->type == GGML_TYPE_I32 && pos->ne[0] >= 1));
+    GGML_ASSERT(pos == NULL || (pos->type == GGML_TYPE_I32 && pos->ne[0] >= n_tok));
 
     GGML_ASSERT(out_type == GGML_TYPE_F32 || (out_type == GGML_TYPE_Q8_1 && (hd*n_head) % QK8_1 == 0));
 
-    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, out_type, hd*n_head, 1);
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, out_type, hd*n_head, n_tok);
 
-    int32_t params[14];
+    int32_t params[16];
+    params[14] = 1;
+    params[15] = 0;
     params[0] = n_head;
     params[1] = n_head_kv;
     params[2] = n_embd_head;
@@ -6241,16 +6248,21 @@ struct ggml_tensor * ggml_inkling_moe_sum_conv_into(
         int                   chan_offset,
         float                 scale) {
     const int64_t n_embd = a->ne[0];
-    GGML_ASSERT(a->type == GGML_TYPE_F32 && a->nb[0] == sizeof(float) && a->ne[2] == 1 && a->ne[3] == 1);
-    GGML_ASSERT((w->type == GGML_TYPE_F32 || w->type == GGML_TYPE_I32) && w->ne[0] == 1 && w->ne[1] == a->ne[1] && w->ne[2] == 1);
+    // a window: a [n_embd, n_used, n_tok], w [1, n_used, n_tok], residual [n_embd, n_tok]; the caller sets op_params[3]
+    // (rollback planes written) and [4] (cells per plane)
+    const int64_t n_tok = a->ne[2];
+    GGML_ASSERT(a->type == GGML_TYPE_F32 && a->nb[0] == sizeof(float) && n_tok >= 1 && n_tok <= 8 && a->ne[3] == 1);
+    GGML_ASSERT((w->type == GGML_TYPE_F32 || w->type == GGML_TYPE_I32) && w->ne[0] == 1 && w->ne[1] == a->ne[1] && w->ne[2] == n_tok);
     GGML_ASSERT(conv_w->type == GGML_TYPE_F32 && ggml_is_contiguous(conv_w) && conv_w->ne[1] == n_embd && conv_w->ne[0] >= 2 && conv_w->ne[0] <= 8);
     GGML_ASSERT(state->type == GGML_TYPE_F32 && state->nb[0] == sizeof(float));
     GGML_ASSERT(state->ne[0] >= (conv_w->ne[0] - 1)*(chan_offset + n_embd) && write_cell >= 0 && write_cell < state->ne[1]);
     GGML_ASSERT(rs_ids->type == GGML_TYPE_I32 && rs_ids->ne[0] >= 1);
-    GGML_ASSERT(residual->type == GGML_TYPE_F32 && residual->ne[0] == n_embd && residual->nb[0] == sizeof(float));
+    GGML_ASSERT(residual->type == GGML_TYPE_F32 && residual->ne[0] == n_embd && residual->nb[0] == sizeof(float) && residual->ne[1] == n_tok);
 
-    struct ggml_tensor * result = out ? ggml_view_tensor(ctx, out) : ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
-    GGML_ASSERT(out == NULL || (out->type == GGML_TYPE_F32 && ggml_is_contiguous(out) && ggml_nelements(out) == n_embd));
+    struct ggml_tensor * result = out ? ggml_view_tensor(ctx, out) : ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tok);
+    GGML_ASSERT(out == NULL || (n_tok == 1 && out->type == GGML_TYPE_F32 && ggml_is_contiguous(out) && ggml_nelements(out) == n_embd));
+    ggml_set_op_params_i32(result, 3, 1);
+    ggml_set_op_params_i32(result, 4, 0);
 
     ggml_set_op_params_i32(result, 0, write_cell);
     ggml_set_op_params_i32(result, 1, chan_offset);
@@ -6322,17 +6334,21 @@ struct ggml_tensor * ggml_inkling_router_conv(
 
     const int64_t n_embd   = states[0]->ne[0];
     const int64_t n_expert = gate_inp->ne[1];
+    // a window: states [n_embd, n_tok] (contiguous columns), route [2*n_used, n_tok], xq [n_embd, n_tok]; the result is [n_embd, n_tok]
+    const int64_t n_tok    = states[0]->ne[1];
+    GGML_ASSERT(n_tok >= 1 && n_tok <= 8 && (n_tok == 1 || !has_conv));
 
     if (query) {
         GGML_ASSERT(query->type == GGML_TYPE_F32 && ggml_is_contiguous(query) && query->ne[0] == n_embd && query->ne[1] == 1);
     }
     for (int i = 0; i < n_states; ++i) {
-        GGML_ASSERT(states[i]->type == GGML_TYPE_F32 && states[i]->ne[0] == n_embd && states[i]->ne[1] == 1 && states[i]->nb[0] == sizeof(float));
+        GGML_ASSERT(states[i]->type == GGML_TYPE_F32 && states[i]->ne[0] == n_embd && states[i]->ne[1] == n_tok && states[i]->nb[0] == sizeof(float));
+        GGML_ASSERT(n_tok == 1 || states[i]->nb[1] == (size_t) n_embd*sizeof(float));
     }
     GGML_ASSERT(consts->type == GGML_TYPE_F32 && ggml_is_contiguous(consts) && ggml_nelements(consts) == n_embd + n_expert);
     GGML_ASSERT(gate_inp->type == GGML_TYPE_F32 && ggml_is_contiguous(gate_inp) && gate_inp->ne[0] == n_embd && n_expert % 8 == 0 && n_expert <= 1024);
-    GGML_ASSERT(route->type == GGML_TYPE_I32 && ggml_is_contiguous(route) && ggml_nelements(route) == 2*n_used);
-    GGML_ASSERT(xq == NULL || (xq->type == GGML_TYPE_Q8_1 && ggml_is_contiguous(xq) && ggml_nelements(xq) == n_embd && n_embd % QK8_1 == 0));
+    GGML_ASSERT(route->type == GGML_TYPE_I32 && ggml_is_contiguous(route) && ggml_nelements(route) == 2*n_used*n_tok && (n_tok == 1 || route->ne[0] == 2*n_used));
+    GGML_ASSERT(xq == NULL || (xq->type == GGML_TYPE_Q8_1 && ggml_is_contiguous(xq) && ggml_nelements(xq) == n_embd*n_tok && n_embd % QK8_1 == 0 && (n_tok == 1 || xq->ne[0] == n_embd)));
     GGML_ASSERT(n_used >= 1 && n_used <= 8 && n_used <= n_expert);
     if (has_conv) {
         GGML_ASSERT(conv_w && state && rs_ids);
@@ -6346,7 +6362,7 @@ struct ggml_tensor * ggml_inkling_router_conv(
         GGML_ASSERT(!conv_w && !state && !rs_ids && !residual);
     }
 
-    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, 1);
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tok);
 
     ggml_set_op_params_f32(result, 0, eps);
     ggml_set_op_params_f32(result, 1, scale);

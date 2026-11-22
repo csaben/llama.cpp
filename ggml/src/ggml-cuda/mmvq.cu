@@ -1717,3 +1717,233 @@ void ggml_cuda_op_mul_mat_vec_q(
 
     GGML_UNUSED_VARS(src1, dst, src1_ddf_i, src1_ncols, src1_padded_row_size);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Inkling multi-row windows (IK_MR): a matvec for up to 8 activation columns whose result per column is bit-identical to
+// mul_mat_vec_q<type, 1>: the same warps, the same blocks per thread and the same order of the partial sums, with the
+// weight block of an iteration read once for all the columns.
+// With ids (MUL_MAT_ID over the tokens of a window) a block is a (token, slot) pair. The first pair that selected an
+// expert owns it and computes the columns of every pair of the window that selected it; the other pairs exit at once.
+// So each distinct expert of a layer visit is streamed once for the whole window.
+
+#define IK_MR_MAX_COLS 8
+
+template <ggml_type type, bool small_k>
+__launch_bounds__(calc_nwarps(type, 1, get_device_table_id(), small_k, false)*ggml_cuda_get_physical_warp_size(), 1)
+static __global__ void ik_mmvq_mr(
+        const void * GGML_CUDA_RESTRICT vx, const block_q8_1 * GGML_CUDA_RESTRICT vy, const int32_t * GGML_CUDA_RESTRICT ids,
+        float * GGML_CUDA_RESTRICT dst, const uint32_t ncols_x, const uint32_t nrows_x, const uint32_t stride_row_x,
+        const uint32_t stride_expert_x, const uint32_t n_tok, const uint32_t n_used, const uint32_t ids_stride,
+        const uint32_t y_stride_tok, const uint32_t y_stride_slot, const uint32_t dst_stride_tok, const uint32_t dst_stride_slot) {
+    constexpr int qk  = ggml_cuda_type_traits<type>::qk;
+    constexpr int qi  = ggml_cuda_type_traits<type>::qi;
+    constexpr int vdr = get_vdr_mmvq(type);
+    constexpr mmvq_parameter_table_id table_id = get_device_table_id();
+    constexpr int nwarps = calc_nwarps(type, 1, table_id, small_k, false);
+    constexpr int rows_per_cuda_block = calc_rows_per_block(type, 1, table_id, small_k, nwarps, false);
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+
+    constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+
+    const     int tid = warp_size*threadIdx.y + threadIdx.x;
+    const     int row0 = rows_per_cuda_block*blockIdx.x;
+    const     int blocks_per_row_x = ncols_x / qk;
+    constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
+
+    // the columns of this block: (activation, output) pairs
+    int ncol = 0;
+    uint32_t expert = 0;
+    const block_q8_1 * ys[IK_MR_MAX_COLS];
+    float            * ds[IK_MR_MAX_COLS];
+    if (ids) {
+        const uint32_t t0 = blockIdx.y / n_used;
+        const uint32_t k0 = blockIdx.y - t0*n_used;
+        expert = ids[k0 + t0*ids_stride];
+        for (uint32_t t = 0; t < t0; ++t) {
+            for (uint32_t k = 0; k < n_used; ++k) {
+                if ((uint32_t) ids[k + t*ids_stride] == expert) {
+                    return; // an earlier row owns the expert
+                }
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
+            ys[j] = vy; ds[j] = dst;
+        }
+        ys[0] = vy + t0*y_stride_tok + k0*y_stride_slot;
+        ds[0] = dst + t0*dst_stride_tok + k0*dst_stride_slot;
+        ncol  = 1;
+        for (uint32_t t = t0 + 1; t < n_tok; ++t) {
+            for (uint32_t k = 0; k < n_used; ++k) {
+                if ((uint32_t) ids[k + t*ids_stride] == expert) {
+#pragma unroll
+                    for (int j = 1; j < IK_MR_MAX_COLS; ++j) {
+                        if (j == ncol) {
+                            ys[j] = vy + t*y_stride_tok + k*y_stride_slot;
+                            ds[j] = dst + t*dst_stride_tok + k*dst_stride_slot;
+                        }
+                    }
+                    ++ncol;
+                }
+            }
+        }
+    } else {
+        ncol = n_tok;
+#pragma unroll
+        for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
+            ys[j] = vy + min((uint32_t) j, n_tok - 1)*y_stride_tok;
+            ds[j] = dst + min((uint32_t) j, n_tok - 1)*dst_stride_tok;
+        }
+    }
+
+    // partial sum for each thread
+    float tmp[IK_MR_MAX_COLS][rows_per_cuda_block] = {{0.0f}};
+
+    const int kbx_offset = expert*stride_expert_x + row0*stride_row_x;
+
+    for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+        const int kby = kbx * (qk/QK8_1); // y block index that aligns with kbx
+
+        // x block quant index when casting the quants to int
+        const int kqs = vdr * (tid % (qi/vdr));
+
+#pragma unroll
+        for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
+            if (j < ncol) {
+#pragma unroll
+                for (int i = 0; i < rows_per_cuda_block; ++i) {
+                    tmp[j][i] += vec_dot_q_cuda(vx, &ys[j][kby], kbx_offset + i*stride_row_x + kbx, kqs);
+                }
+            }
+        }
+    }
+
+    __shared__ float tmp_shared[nwarps-1 > 0 ? nwarps-1 : 1][IK_MR_MAX_COLS][rows_per_cuda_block][warp_size];
+
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
+#pragma unroll
+            for (int i = 0; i < rows_per_cuda_block; ++i) {
+                tmp_shared[threadIdx.y-1][j][i][threadIdx.x] = tmp[j][i];
+            }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) {
+        return;
+    }
+
+    // sum up partial sums and write back result
+#pragma unroll
+    for (int j = 0; j < IK_MR_MAX_COLS; ++j) {
+        if (j < ncol) {
+#pragma unroll
+            for (int i = 0; i < rows_per_cuda_block; ++i) {
+#pragma unroll
+                for (int l = 0; l < nwarps-1; ++l) {
+                    tmp[j][i] += tmp_shared[l][j][i][threadIdx.x];
+                }
+                tmp[j][i] = warp_reduce_sum<warp_size>(tmp[j][i]);
+
+                if (threadIdx.x == i && (rows_per_cuda_block == 1 || uint32_t(row0 + i) < nrows_x)) {
+                    ds[j][row0 + i] = tmp[j][i];
+                }
+            }
+        }
+    }
+}
+
+template <ggml_type type>
+static void ik_mmvq_mr_launch(
+        const void * vx, const block_q8_1 * vy, const int32_t * ids, float * dst, const uint32_t ncols_x, const uint32_t nrows_x,
+        const uint32_t stride_row_x, const uint32_t stride_expert_x, const uint32_t n_tok, const uint32_t n_used, const uint32_t ids_stride,
+        const uint32_t y_stride_tok, const uint32_t y_stride_slot, const uint32_t dst_stride_tok, const uint32_t dst_stride_slot,
+        const int warp_size, const mmvq_parameter_table_id table_id, cudaStream_t stream) {
+    constexpr int qk  = ggml_cuda_type_traits<type>::qk;
+    constexpr int qi  = ggml_cuda_type_traits<type>::qi;
+    constexpr int vdr = get_vdr_mmvq(type);
+    // the small-K decision of the single-column kernel (mul_mat_vec_q_switch_ncols_dst, NVIDIA Turing and later)
+    const int  nwarps1 = calc_nwarps(type, 1, table_id);
+    const bool small_k = nwarps1 > 1 && (int) (ncols_x/qk) < nwarps1*(vdr*warp_size/qi) && type != GGML_TYPE_IQ3_XXS && type != GGML_TYPE_IQ3_S;
+    const int  n_slots = ids ? n_tok*n_used : 1;
+    if (small_k) {
+        const int nwarps = calc_nwarps(type, 1, table_id, true, false);
+        const int rpb    = calc_rows_per_block(type, 1, table_id, true, nwarps, false);
+        ik_mmvq_mr<type, true><<<dim3((nrows_x + rpb - 1)/rpb, n_slots, 1), dim3(warp_size, nwarps, 1), 0, stream>>>(
+                vx, vy, ids, dst, ncols_x, nrows_x, stride_row_x, stride_expert_x, n_tok, n_used, ids_stride,
+                y_stride_tok, y_stride_slot, dst_stride_tok, dst_stride_slot);
+    } else {
+        const int nwarps = calc_nwarps(type, 1, table_id, false, false);
+        const int rpb    = calc_rows_per_block(type, 1, table_id, false, nwarps, false);
+        ik_mmvq_mr<type, false><<<dim3((nrows_x + rpb - 1)/rpb, n_slots, 1), dim3(warp_size, nwarps, 1), 0, stream>>>(
+                vx, vy, ids, dst, ncols_x, nrows_x, stride_row_x, stride_expert_x, n_tok, n_used, ids_stride,
+                y_stride_tok, y_stride_slot, dst_stride_tok, dst_stride_slot);
+    }
+}
+
+// MUL_MAT (ids == nullptr: dst [rows, n_tok]) or MUL_MAT_ID (dst [rows, n_used, n_tok]) of a window; false: not handled
+bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst) {
+    const int device = ggml_cuda_get_device();
+    const int cc     = ggml_cuda_info().devices[device].cc;
+    const mmvq_parameter_table_id table_id = get_device_table_id(cc);
+    const int64_t n_tok = ids ? dst->ne[2] : dst->ne[1];
+    if (!GGML_CUDA_CC_IS_NVIDIA(cc) || cc < GGML_CUDA_CC_TURING || table_id != MMVQ_PARAMETERS_GENERIC || n_tok < 1 || n_tok > IK_MR_MAX_COLS ||
+            dst->type != GGML_TYPE_F32 || (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_Q8_1) || src1->ne[0] % QK8_1 != 0 ||
+            src0->ne[3] != 1 || dst->ne[3] != 1 || (ids && ids->type != GGML_TYPE_I32) || (!ids && (src0->ne[2] != 1 || src1->ne[2] != 1))) {
+        return false;
+    }
+    switch (src0->type) {
+        case GGML_TYPE_Q2_0: case GGML_TYPE_Q4_0: case GGML_TYPE_Q8_0: case GGML_TYPE_Q2_K: case GGML_TYPE_Q3_K:
+        case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K: case GGML_TYPE_Q6_K: case GGML_TYPE_IQ4_NL:
+            break;
+        default:
+            return false;
+    }
+    cudaStream_t stream = ctx.stream();
+    const int warp_size = ggml_cuda_info().devices[device].warp_size;
+
+    const bool    src1_q8 = src1->type == GGML_TYPE_Q8_1;
+    const int64_t ne10    = src1->ne[0];
+    const size_t  ts1     = ggml_type_size(src1->type);
+    ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool());
+    const block_q8_1 * y = nullptr;
+    int64_t s11, s12; // strides of src1 dims 1 and 2 in Q8_1 blocks
+    if (src1_q8) {
+        y   = (const block_q8_1 *) src1->data;
+        s11 = src1->nb[1]/sizeof(block_q8_1);
+        s12 = src1->nb[2]/sizeof(block_q8_1);
+    } else {
+        const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
+        src1_q8_1.alloc(src1->ne[3]*src1->ne[2]*src1->ne[1]*ne10_padded*sizeof(block_q8_1)/QK8_1);
+        quantize_row_q8_1_cuda((const float *) src1->data, src1_q8_1.get(), ne10, src1->nb[1]/ts1, src1->nb[2]/ts1, src1->nb[3]/ts1,
+                ne10_padded, src1->ne[1], src1->ne[2], src1->ne[3], stream);
+        y   = (const block_q8_1 *) src1_q8_1.get();
+        s11 = ne10_padded/QK8_1;
+        s12 = src1->ne[1]*s11;
+    }
+    const size_t  ts0 = ggml_type_size(src0->type);
+    const int64_t s01 = src0->nb[1]/ts0;
+    const int64_t s02 = src0->nb[2]/ts0;
+    const int64_t d1  = dst->nb[1]/sizeof(float);
+    const int64_t d2  = dst->nb[2]/sizeof(float);
+
+    const int32_t * ids_d = ids ? (const int32_t *) ids->data : nullptr;
+    const uint32_t n_used     = ids ? dst->ne[1] : 1;
+    const uint32_t ids_stride = ids ? ids->nb[1]/sizeof(int32_t) : 0;
+    const uint32_t y_tok  = ids ? s12 : s11;
+    const uint32_t y_slot = ids && src1->ne[1] > 1 ? s11 : 0;
+    const uint32_t d_tok  = ids ? d2 : d1;
+    const uint32_t d_slot = ids ? d1 : 0;
+    GGML_ASSERT(!ids || (ids->ne[0] == n_used && ids->ne[1] == n_tok && (src1->ne[1] == 1 || src1->ne[1] == n_used) && src1->ne[2] == n_tok));
+
+#define IK_MR_CASE(T) case T: ik_mmvq_mr_launch<T>(src0->data, y, ids_d, (float *) dst->data, src0->ne[0], src0->ne[1], s01, s02, n_tok, n_used, \
+        ids_stride, y_tok, y_slot, d_tok, d_slot, warp_size, table_id, stream); break;
+    switch (src0->type) {
+        IK_MR_CASE(GGML_TYPE_Q2_0) IK_MR_CASE(GGML_TYPE_Q4_0) IK_MR_CASE(GGML_TYPE_Q8_0) IK_MR_CASE(GGML_TYPE_Q2_K) IK_MR_CASE(GGML_TYPE_Q3_K)
+        IK_MR_CASE(GGML_TYPE_Q4_K) IK_MR_CASE(GGML_TYPE_Q5_K) IK_MR_CASE(GGML_TYPE_Q6_K) IK_MR_CASE(GGML_TYPE_IQ4_NL)
+        default: GGML_ABORT("ik_mmvq_mr: unsupported type");
+    }
+#undef IK_MR_CASE
+    return true;
+}

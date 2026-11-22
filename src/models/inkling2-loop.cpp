@@ -193,7 +193,7 @@ llama_model_inkling2_loop::graph::graph(const llm_graph_params & params) : llama
             bank_out = cur;
             cur = prelude;
             blocks = prelude_blocks;
-            if (fused && n_tokens == 1 && m.core_msg_queries) {
+            if (fused && (n_tokens == 1 || mr) && m.core_msg_queries) {
                 flush_pending();
                 pass_messages = mix(bank, bank_out, m.core_msg_queries);
             }

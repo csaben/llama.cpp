@@ -8,6 +8,12 @@
 // ---------------------------------------------------------------------------------------------------------------------
 // l2_clip: y = x*b * min(1, threshold/(|x*b| + eps)), one warp per row
 
+// IK_MR=1: windows of 2..8 tokens take kernels whose per-row arithmetic is that of the single-token kernels
+static bool ik_mr_enabled() {
+    static const bool on = getenv("IK_MR") && atoi(getenv("IK_MR")) != 0;
+    return on;
+}
+
 template <int n_per_lane>
 static __global__ void l2_clip_f32(const float * __restrict__ x, const float * __restrict__ b, float * __restrict__ y,
         const int ne00, const int ne01, const int ne02, const int ne03,
@@ -463,7 +469,7 @@ void ggml_cuda_op_res_mix(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                     res_mix_f32_vec4<640, kQ8, ns><<<grid, 640, 0, stream>>>((const float4 *) q_d, st, dst->data,
                             n_embd4, n_tok, n_states, q_nb1, eps, scale, norm);
                 };
-                switch (specialize && n_tok == 1 ? n_states : 0) {
+                switch (specialize && (n_tok == 1 || (ik_mr_enabled() && n_tok <= 8)) ? n_states : 0) {
                     case 1: launch_mix(std::integral_constant<int, 1>{}); break;
                     case 2: launch_mix(std::integral_constant<int, 2>{}); break;
                     case 3: launch_mix(std::integral_constant<int, 3>{}); break;
@@ -591,6 +597,49 @@ static __global__ void shortconv_res_post_f32(const ik_shortconv_args args) {
     }
 }
 
+// the rows of a window whose state is read in place (ids): a thread per channel walks the tokens in order, so the
+// state it overwrites was read first; per token the statements of shortconv_res_one
+template <int d_conv>
+static __global__ void shortconv_res_rows_f32(const ik_shortconv_args args) {
+    const int c = blockIdx.x*blockDim.x + threadIdx.x;
+    if (c >= args.n_chan) {
+        return;
+    }
+    const float * ps = (const float *) ((const char *) args.past + c*args.past_nb1 + args.ids[0]*args.past_nb2);
+    const float * wc = (const float *) ((const char *) args.w + c*args.w_nb1);
+    float x[d_conv], w[d_conv];
+#pragma unroll
+    for (int j = 0; j < d_conv; ++j) {
+        x[j] = j < d_conv - 1 ? ps[j] : 0.0f;
+        w[j] = wc[j];
+    }
+    for (int t = 0; t < args.n_t; ++t) {
+        x[d_conv - 1] = *(const float *) ((const char *) args.cur + (int64_t) t*args.cur_nb1 + c*sizeof(float));
+        float out = 0.0f;
+#pragma unroll
+        for (int j = 0; j < d_conv; ++j) {
+            out += x[j]*w[j];
+        }
+        float y = (x[d_conv - 1] + out)*args.scale;
+        if (args.res) {
+            y += *(const float *) ((const char *) args.res + t*args.res_nb1 + c*sizeof(float));
+        }
+        const int k = args.n_t - 1 - t;
+        if (k < args.n_slots) {
+            float * st = (float *) ((char *) args.state + k*args.st_nb1 + c*args.st_nb2);
+#pragma unroll
+            for (int j = 0; j < d_conv - 1; ++j) {
+                st[j] = x[j + 1];
+            }
+        }
+        *(float *) ((char *) args.dst + t*args.dst_nb1 + c*sizeof(float)) = y;
+#pragma unroll
+        for (int j = 0; j < d_conv - 1; ++j) {
+            x[j] = x[j + 1];
+        }
+    }
+}
+
 void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * past  = dst->src[0];
     const ggml_tensor * w     = dst->src[1];
@@ -631,6 +680,13 @@ void ggml_cuda_op_shortconv_res(ggml_backend_cuda_context & ctx, ggml_tensor * d
 
     const int64_t n_tok = (int64_t) args.n_t*args.n_s;
     cudaStream_t stream = ctx.stream();
+
+    if (args.ids && args.n_t > 1) {
+        // a window over the state in place
+        GGML_ASSERT(args.n_s == 1 && !taps && !args.post && d_conv == 4 && state != nullptr);
+        shortconv_res_rows_f32<4><<<(args.n_chan + 255)/256, 256, 0, stream>>>(args);
+        return;
+    }
 
     auto launch = [&](auto DC, auto TAPS) {
         constexpr int  kDC   = decltype(DC)::value;
@@ -987,7 +1043,7 @@ void ggml_cuda_op_loop_ctrl_down(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int rank  = w->ne[1];
     const int B     = w->ne[2];
 
-    if (ik_ctrl_gemm_min() > 0 && n_tok >= ik_ctrl_gemm_min() && (w->type == GGML_TYPE_F32 || w->type == GGML_TYPE_F16)) {
+    if (ik_ctrl_gemm_min() > 0 && n_tok >= ik_ctrl_gemm_min() && !(ik_mr_enabled() && n_tok <= 8) && (w->type == GGML_TYPE_F32 || w->type == GGML_TYPE_F16)) {
         ggml_cuda_pool_alloc<float> x(ctx.pool(), (size_t) 2*n*n_tok*B);
         ggml_cuda_pool_alloc<float> wbuf(ctx.pool());
         ik_ctrl_stack_norm<<<dim3(n_tok, B), 256, 0, ctx.stream()>>>((const float *) a->data, (const float *) b->data, x.get(), n, n_tok,
@@ -1289,6 +1345,37 @@ static __global__ void ik_ctrl_apply8(const float * cur, const float * msg, cons
     }
 }
 
+// ik_ctrl_apply8 for the rows of a window (grid z: the row); the same arithmetic per element
+static __global__ void ik_ctrl_apply8_rows(const float * cur, const float * msg, const float * d,
+        const half * wg, const half * wf, float * y, int n, int n_tok, size_t cur_stride, size_t msg_stride, size_t cur_ts, size_t msg_ts) {
+    const int i = blockIdx.x*32 + threadIdx.x/8;
+    const int lane = threadIdx.x % 8;
+    const int b = blockIdx.y;
+    const int t = blockIdx.z;
+    const int row = b*n + i;
+    const float * dv = d + ((size_t) b*n_tok + t)*64 + lane*4;
+    float gv[4], fv[4];
+    const half * g = wg + row*64 + lane*4;
+    const half * f = wf + row*64 + lane*4;
+    float4 d0 = *(const float4 *) dv, d1 = *(const float4 *) (dv+32);
+    uint2 g0 = *(const uint2 *) g, g1 = *(const uint2 *) (g+32);
+    uint2 f0 = *(const uint2 *) f, f1 = *(const uint2 *) (f+32);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const float a = ((const float *) &d0)[j], z = ((const float *) &d1)[j];
+        gv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *) &g1)[j]), z,
+                __fmul_rn(__half2float(((const half *) &g0)[j]), a)));
+        fv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *) &f1)[j]), z,
+                __fmul_rn(__half2float(((const half *) &f0)[j]), a)));
+    }
+    if (lane == 0) {
+        const float c = cur[b*cur_stride + t*cur_ts + i], m = msg[b*msg_stride + t*msg_ts + i];
+        const float gain = tanhf((gv[0]+gv[2])+(gv[1]+gv[3]));
+        const float forget = tanhf((fv[0]+fv[2])+(fv[1]+fv[3]));
+        y[((size_t) b*n_tok + t)*n + i] = (c-forget*c) + gain*m;
+    }
+}
+
 void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * cur = dst->src[0];
     const ggml_tensor * msg = dst->src[1];
@@ -1349,7 +1436,13 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
             (const float *) d->data, (const wt_t *) wg->data, (const wt_t *) wf->data, y, n, n_tok, rank, cur->nb[1], cur->ne[2] == 1 ? 0 : cur->nb[2], msg->nb[1], msg->nb[2], \
             nw ? (const float *) nw->data : nullptr, nw_nb1, dst->data, eps, counters)
     static const bool group8 = getenv("IK_CTRL_APPLY8") && atoi(getenv("IK_CTRL_APPLY8"));
-    if (ik_ctrl_gemm_min() > 0 && n_tok >= ik_ctrl_gemm_min() && !fused && (wg->type == GGML_TYPE_F32 || wg->type == GGML_TYPE_F16) && wf->type == wg->type) {
+    const bool mr_rows = ik_mr_enabled() && n_tok > 1 && n_tok <= 8;
+    if (mr_rows && group8 && !fused && wg->type == GGML_TYPE_F16 && rank == 64 && n % 32 == 0 &&
+            (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 && (uintptr_t) wf->data % 8 == 0) {
+        ik_ctrl_apply8_rows<<<dim3(n/32, B, n_tok), 256, 0, ctx.stream()>>>((const float *) cur->data, (const float *) msg->data,
+                (const float *) d->data, (const half *) wg->data, (const half *) wf->data, y, n, n_tok,
+                cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float), msg->nb[2]/sizeof(float), cur->nb[1]/sizeof(float), msg->nb[1]/sizeof(float));
+    } else if (ik_ctrl_gemm_min() > 0 && n_tok >= ik_ctrl_gemm_min() && !mr_rows && !fused && (wg->type == GGML_TYPE_F32 || wg->type == GGML_TYPE_F16) && wf->type == wg->type) {
         // the batch: G = W_gain D and F = W_forget D as GEMMs, then the element-wise update
         ggml_cuda_pool_alloc<float> gbuf(ctx.pool(), (size_t) n*n_tok*B), fbuf(ctx.pool(), (size_t) n*n_tok*B);
         ggml_cuda_pool_alloc<float> wgbuf(ctx.pool()), wfbuf(ctx.pool());
@@ -1457,6 +1550,13 @@ struct ik_attn_args {
     int   * counters;
     int     ext_scan; // the cells were scanned by inkling_attn_scan_kernel (parts 0 .. n_split - 2); this kernel adds the current cell
     int     dbg_skip; // timing experiments only (IK_ATTN_SKIP): 1 bias table, 2 attention loop, 4 Q/R phase
+    // multi-row (speculative window) launches: row r of the window is blockIdx.z of the MR kernel
+    int     mr_rows;        // tokens of the window (1: the single-token kernel)
+    int     mr_planes;      // rollback planes of the recurrent state written by the window (slot k: the state k tokens back)
+    int     mr_plane_cells; // cells per plane
+    int64_t mr_dst_rs;      // bytes between the output rows
+    int64_t mr_part_rs;     // floats between the partial results of the rows
+    int     mr_mma, mr_mma_split, mr_mma_step, mr_cps, mr_medium; // the split rule of the launch, to redo it for a row's own n_kv
     long long * dbg_times; // timing experiments only (IK_ATTN_TIMING): clock64 at the phase boundaries of block (0, 0) / the last block
 };
 
@@ -2270,11 +2370,54 @@ static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float 
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
 #endif
-template <typename cache_t, bool q8_out, int G, bool MMA = false>
-static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args) {
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false>
+static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
+
+    // MR: the block serves row blockIdx.z of a window. Its K/V are in the caches already (inkling_attn_kv_rows_kernel,
+    // with the cells of the earlier rows), so this kernel neither convolves nor stores nor touches the recurrent state.
+    ik_attn_args args_m;
+    if constexpr (MR) {
+        const int row = blockIdx.z;
+        args_m = args_in;
+        args_m.proj    += (int64_t) row*args_in.proj_s1;
+        args_m.kv_idxs += row;
+        args_m.rel_pos += (int64_t) row*args_in.n_kv;
+        args_m.mask     = (const char *) args_in.mask + (int64_t) row*args_in.n_kv*(args_in.mask_f16 ? sizeof(half) : sizeof(float));
+        args_m.pos      = args_in.pos ? args_in.pos + row : nullptr;
+        args_m.dst      = (char *) args_in.dst + (int64_t) row*args_in.mr_dst_rs;
+        if (args_in.part) {
+            args_m.part     += (int64_t) row*args_in.mr_part_rs;
+            args_m.counters += row*args_in.n_head_kv;
+        }
+        // The cells the row would scan as a single token: the cache is padded to 256 cells past the last used one, and the
+        // later rows of the window may have pushed that pad up. When the row sees nothing in the extra pad, it takes the
+        // splits of the smaller cache, so its partial sums are grouped as in single-token decode.
+        const int cand = max(256, ((int) args_m.kv_idxs[0] + 256) & ~255);
+        if (cand < args_in.n_kv) {
+            int vis = 0;
+            for (int c = cand + (int) threadIdx.x; c < args_in.n_kv; c += IK_A2_BLOCK) {
+                const float mv = args_in.mask_f16 ? __half2float(((const half *) args_m.mask)[c]) : ((const float *) args_m.mask)[c];
+                vis |= mv != -INFINITY;
+            }
+            if (!__syncthreads_or(vis)) {
+                args_m.n_kv = cand;
+                if (args_in.mr_mma) {
+                    args_m.n_split = max(1, min(args_in.mr_mma_split, (cand + args_in.mr_mma_step - 1)/args_in.mr_mma_step));
+                } else {
+                    const int cps = args_in.mr_medium && cand > 512 && cand <= 2304 ? 128 : args_in.mr_cps;
+                    args_m.n_split = cand <= cps ? 1 : min(64, (cand + cps - 1)/cps);
+                }
+                args_m.kv_per_split = (cand + args_m.n_split - 1)/args_m.n_split;
+            }
+        }
+        if ((int) blockIdx.y >= args_m.n_split) {
+            return;
+        }
+    }
+    const ik_attn_args & args = MR ? args_m : args_in;
 
     const int g     = blockIdx.x;
     const int split = blockIdx.y;
@@ -2309,7 +2452,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     const int     n_conv = args.n_conv;
     const int64_t ch     = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
     float cur_in, w_c[8], taps[8];
-    {
+    if constexpr (!MR) {
         const int64_t off  = which ? args.off_v : args.off_k;
         const int64_t offt = which ? args.off_vtaps : args.off_ktaps;
         const int     col  = args.proj_ncols == 3 ? (which ? 2 : 1) : 0;
@@ -2378,7 +2521,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
 
     // ===== round 2: the past inputs of the convolution (after the cell id), consumed after the cell loop =====
     float x[8];
-    {
+    if constexpr (!MR) {
         const float * past = args.state + (int64_t) read_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -2551,7 +2694,18 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
 
     // ===== the K/V convolution of the token, the post-normalization, the cache store (split 0), the new state =====
     float x_new[7];
-    {
+    if constexpr (MR) {
+        const char * row = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
+        float yq;
+        if constexpr (std::is_same<cache_t, half>::value) {
+            yq = __half2float(((const half *) row)[ci]);
+        } else {
+            const block_q8_0 * b = (const block_q8_0 *) row + (warp % 4);
+            const int q = b->qs[lane];
+            yq = __half2float(b->d)*q;
+        }
+        (which ? s_v : s_k)[ci] = yq;
+    } else {
         const float scale = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
         float out = 0.0f;
 #pragma unroll
@@ -2783,7 +2937,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     }
 
     // ===== the new recurrent state of the K and V channels (every block has read the old state by now) =====
-    {
+    if constexpr (!MR) {
         float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 7; ++j) {
@@ -2924,13 +3078,117 @@ static void inkling_attn_scan_launch(const ik_attn_args & a, const int n_blocks,
     }
 }
 
-template <typename cache_t, bool q8_out, bool MMA = false>
+template <typename cache_t, bool q8_out, bool MMA = false, bool MR = false>
 static void inkling_attn2_launch(const ik_attn_args & a, const dim3 grid, cudaStream_t stream) {
     switch (a.n_head/a.n_head_kv) {
-        case 1: inkling_attn2_kernel<cache_t, q8_out, 1, MMA><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
-        case 2: inkling_attn2_kernel<cache_t, q8_out, 2, MMA><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
-        case 3: inkling_attn2_kernel<cache_t, q8_out, 3, MMA><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
-        default: inkling_attn2_kernel<cache_t, q8_out, 4, MMA><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        case 1: inkling_attn2_kernel<cache_t, q8_out, 1, MMA, MR><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        case 2: inkling_attn2_kernel<cache_t, q8_out, 2, MMA, MR><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        case 3: inkling_attn2_kernel<cache_t, q8_out, 3, MMA, MR><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+        default: inkling_attn2_kernel<cache_t, q8_out, 4, MMA, MR><<<grid, IK_A2_BLOCK, 0, stream>>>(a); break;
+    }
+}
+
+// The K and V of every row of a window: the convolution over [state, the rows so far], the post-normalization, the cache
+// store and the rollback planes of the recurrent state. One block per kv head, a thread per K or V channel walks the rows
+// in order, so each value is computed exactly as the single-token kernel computes it (same statements, same reductions).
+template <typename cache_t>
+static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kernel(const ik_attn_args args) {
+    constexpr int HD = IK_ATTN_HD;
+    const int g      = blockIdx.x;
+    const int tid    = threadIdx.x;
+    const int lane   = tid % WARP_SIZE;
+    const int warp   = tid / WARP_SIZE;
+    const int which  = tid/HD;    // 0: a K channel, 1: a V channel
+    const int ci     = tid % HD;
+    const int n_conv = args.n_conv;
+    __shared__ float s_red[2][IK_A2_WARPS];
+
+    const int64_t ch   = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
+    const int64_t off  = which ? args.off_v : args.off_k;
+    const int64_t offt = which ? args.off_vtaps : args.off_ktaps;
+    const int     col  = args.proj_ncols == 3 ? (which ? 2 : 1) : 0;
+    const float * w    = args.consts + (which ? args.c_vconv : args.c_kconv) + ((int64_t) g*HD + ci)*n_conv;
+    float w_c[8], x[8];
+    {
+        const float * past = args.state + (int64_t) args.rs_ids[0]*args.state_s1 + ch*(n_conv - 1);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            w_c[j] = j < n_conv ? w[j] : 0.0f;
+            x[j]   = j < n_conv - 1 ? past[j] : 0.0f;
+        }
+    }
+    const float scale = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
+    for (int row = 0; row < args.mr_rows; ++row) {
+        const float * pr = args.proj + ((int64_t) col*args.mr_rows + row)*args.proj_s1;
+        const float cur_in = pr[off + (int64_t) g*HD + ci];
+        float taps[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            taps[j] = args.has_taps && j < n_conv ? pr[offt + (int64_t) g*n_conv + j] : 0.0f;
+            if (j == n_conv - 1) {
+                x[j] = cur_in;
+            }
+        }
+        float out = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            if (j < n_conv) {
+                out += x[j]*w_c[j];
+            }
+        }
+        if (args.has_taps) {
+#pragma unroll
+            for (int lag = 0; lag < 8; ++lag) {
+                if (lag < n_conv) {
+                    out += x[n_conv - 1 - lag]*taps[lag];
+                }
+            }
+        }
+        float y = (x[n_conv - 1] + out)*scale;
+        const float ss = warp_reduce_sum(y*y);
+        if (lane == 0) {
+            s_red[which][warp % 4] = ss;
+        }
+        __syncthreads();
+        const float sst = s_red[which][0] + s_red[which][1] + s_red[which][2] + s_red[which][3];
+        float factor;
+        if (which == 0) {
+            const float norm = sqrtf(sst) + args.clip_eps;
+            factor = fminf(fmaxf(args.qk_clip/norm, 0.0f), 1.0f);
+        } else {
+            factor = rsqrtf(sst/HD + args.norm_eps);
+        }
+        y *= factor;
+        const int64_t kv_idx = args.kv_idxs[row];
+        char * crow = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
+        if constexpr (std::is_same<cache_t, half>::value) {
+            ((half *) crow)[ci] = __float2half(y);
+        } else {
+            const float amax = warp_reduce_max(fabsf(y));
+            const float d    = amax/127.0f;
+            const float id   = d != 0.0f ? 1.0f/d : 0.0f;
+            const int   q    = (int) roundf(y*id);
+            block_q8_0 * b = (block_q8_0 *) crow + (warp % 4);
+            b->qs[lane] = (int8_t) q;
+            if (lane == 0) {
+                b->d = __float2half(d);
+            }
+        }
+        __syncthreads(); // s_red is reused by the next row
+        const int k = args.mr_rows - 1 - row;
+        if (k < args.mr_planes) {
+            float * st = args.state + ((int64_t) args.write_cell + (int64_t) k*args.mr_plane_cells)*args.state_s1 + ch*(n_conv - 1);
+#pragma unroll
+            for (int j = 0; j < 7; ++j) {
+                if (j < n_conv - 1) {
+                    st[j] = x[j + 1];
+                }
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < 7; ++j) {
+            x[j] = x[j + 1];
+        }
     }
 }
 
@@ -2981,7 +3239,13 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     a.n_extent  = (ggml_nelements(consts) - a.c_table)/a.n_rel;
     GGML_ASSERT(a.n_extent <= IK_ATTN_MAX_EXTENT);
 
-    a.proj       = (const float *) proj->data; a.proj_s1 = proj->nb[1]/sizeof(float); a.proj_ncols = proj->ne[1];
+    const int n_rows = dst->ne[1];
+    a.mr_rows        = n_rows;
+    a.mr_planes      = n_rows > 1 ? (ggml_get_op_params_i32(dst, 14) & 0xff) : 1;
+    a.mr_plane_cells = ggml_get_op_params_i32(dst, 15);
+    a.mr_dst_rs      = dst->nb[1];
+    a.mr_part_rs     = 0;
+    a.proj       = (const float *) proj->data; a.proj_s1 = proj->nb[1]/sizeof(float); a.proj_ncols = proj->ne[1]/n_rows;
     a.consts     = (const float *) consts->data;
     a.state      = (float *) state->data; a.state_s1 = state->nb[1]/sizeof(float);
     a.rs_ids     = (const int32_t *) rs_ids->data;
@@ -3043,6 +3307,11 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         a.n_split = std::max(1, std::min(mma_split, (a.n_kv + 16*IK_A2_WARPS*mma_spw - 1)/(16*IK_A2_WARPS*mma_spw)));
     }
     a.kv_per_split = ext ? (a.n_kv + n_ext - 1)/n_ext : (a.n_kv + a.n_split - 1)/a.n_split;
+    a.mr_mma       = mma;
+    a.mr_mma_split = mma_split;
+    a.mr_mma_step  = 16*IK_A2_WARPS*mma_spw;
+    a.mr_cps       = split_override > 0 ? split_override : 64;
+    a.mr_medium    = split_override <= 0 && ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X && k_cache->type == GGML_TYPE_Q8_0;
 
     cudaStream_t stream = ctx.stream();
     const int gqa = a.n_head/a.n_head_kv;
@@ -3050,15 +3319,34 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     ggml_cuda_pool_alloc<float> part(ctx.pool());
     a.part = nullptr; a.counters = nullptr;
     if (a.n_split > 1) {
-        part.alloc((size_t) a.n_head_kv*a.n_split*gqa*(IK_ATTN_HD + 2));
+        a.mr_part_rs = (int64_t) a.n_head_kv*a.n_split*gqa*(IK_ATTN_HD + 2);
+        part.alloc((size_t) a.mr_part_rs*n_rows);
         a.part     = part.get();
-        a.counters = ext ? nullptr : ik_counters(ctx, 0, a.n_head_kv); // self-resetting arrival counters
+        a.counters = ext ? nullptr : n_rows > 1 ? ik_counters(ctx, 64, a.n_head_kv*n_rows) : ik_counters(ctx, 0, a.n_head_kv); // self-resetting arrival counters
     }
 
     const bool q8 = dst->type == GGML_TYPE_Q8_1;
     GGML_ASSERT(dst->type == GGML_TYPE_F32 || q8);
     GGML_ASSERT(k_cache->type == v_cache->type && (k_cache->type == GGML_TYPE_F16 || k_cache->type == GGML_TYPE_Q8_0));
 
+    if (n_rows > 1) {
+        // a window: the K/V of all rows first (their cache cells and the state planes), then a block set per row
+        GGML_ASSERT(!ext && !v1 && n_rows <= 8 && a.n_head_kv*n_rows <= 64);
+        const dim3 grid_kv(a.n_head_kv, 1, 1);
+        const dim3 grid_mr(a.n_head_kv, a.n_split, n_rows);
+        if (k_cache->type == GGML_TYPE_F16) {
+            inkling_attn_kv_rows_kernel<half><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a);
+            if (q8) { inkling_attn2_launch<half, true, false, true>(a, grid_mr, stream); } else { inkling_attn2_launch<half, false, false, true>(a, grid_mr, stream); }
+        } else {
+            inkling_attn_kv_rows_kernel<block_q8_0><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a);
+            if (mma) {
+                if (q8) { inkling_attn2_launch<block_q8_0, true, true, true>(a, grid_mr, stream); } else { inkling_attn2_launch<block_q8_0, false, true, true>(a, grid_mr, stream); }
+            } else {
+                if (q8) { inkling_attn2_launch<block_q8_0, true, false, true>(a, grid_mr, stream); } else { inkling_attn2_launch<block_q8_0, false, false, true>(a, grid_mr, stream); }
+            }
+        }
+        return;
+    }
     if (ext) {
         inkling_attn_scan_launch(a, n_ext, stream);
         a.ext_scan = 1;
@@ -3377,6 +3665,68 @@ static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a,
     dst[c] = res + (sum + out)*scale;
 }
 
+// the rows of a window: a thread per channel walks the tokens in order (the statements of the single-token kernel)
+static __global__ void inkling_moe_sum_conv_rows_kernel(const float * __restrict__ a, const int64_t a_s1, const int64_t a_s2,
+        const float * __restrict__ w, const int w_s1, const int w_s2,
+        const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
+        const int write_cell, const int plane_cells, const int n_planes, const int chan_offset, const float scale,
+        const float * __restrict__ residual, const int64_t res_s1, float * __restrict__ dst, const int64_t dst_s1,
+        const int n_embd, const int n_used, const int n_conv, const int n_rows) {
+    const int c = blockIdx.x*blockDim.x + threadIdx.x;
+    if (c >= n_embd) {
+        return;
+    }
+    const int64_t ch   = chan_offset + c;
+    const float * past = state + (int64_t) rs_ids[0]*state_s1 + ch*(n_conv - 1);
+    const float * cw   = conv_w + (int64_t) c*n_conv;
+    float xs[8], wv[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        xs[j] = j < n_conv - 1 ? past[j] : 0.0f;
+        wv[j] = j < n_conv ? cw[j] : 0.0f;
+    }
+    for (int row = 0; row < n_rows; ++row) {
+        float av[8];
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+            av[e] = e < n_used ? a[c + e*a_s1 + row*a_s2] : 0.0f;
+        }
+        const float res = residual[c + row*res_s1];
+        float sum = 0.0f;
+        for (int e = 0; e < n_used; ++e) {
+            sum += av[e]*w[e*w_s1 + row*w_s2];
+        }
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            if (j == n_conv - 1) {
+                xs[j] = sum;
+            }
+        }
+        float out = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            if (j < n_conv) {
+                out += xs[j]*wv[j];
+            }
+        }
+        const int k = n_rows - 1 - row;
+        if (k < n_planes) {
+            float * st = state + ((int64_t) write_cell + (int64_t) k*plane_cells)*state_s1 + ch*(n_conv - 1);
+#pragma unroll
+            for (int j = 0; j < 7; ++j) {
+                if (j < n_conv - 1) {
+                    st[j] = xs[j + 1];
+                }
+            }
+        }
+        dst[c + row*dst_s1] = res + (sum + out)*scale;
+#pragma unroll
+        for (int j = 0; j < 7; ++j) {
+            xs[j] = xs[j + 1];
+        }
+    }
+}
+
 void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * a        = dst->src[0];
     const ggml_tensor * w        = dst->src[1];
@@ -3395,6 +3745,14 @@ void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_ten
     const float scale       = ggml_get_op_params_f32(dst, 2);
 
     const int block = 256;
+    if (dst->ne[1] > 1) {
+        inkling_moe_sum_conv_rows_kernel<<<(n_embd + block - 1)/block, block, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float), a->nb[2]/sizeof(float),
+                (const float *) w->data, (int) (w->nb[1]/sizeof(float)), (int) (w->nb[2]/sizeof(float)), (const float *) conv_w->data,
+                (float *) state->data, state->nb[1]/sizeof(float), (const int32_t *) rs_ids->data, write_cell, ggml_get_op_params_i32(dst, 4),
+                ggml_get_op_params_i32(dst, 3), chan_offset, scale, (const float *) residual->data, residual->nb[1]/sizeof(float),
+                (float *) dst->data, dst->nb[1]/sizeof(float), n_embd, n_used, n_conv, (int) dst->ne[1]);
+        return;
+    }
     inkling_moe_sum_conv_kernel<<<(n_embd + block - 1)/block, block, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float),
             (const float *) w->data, (int) (w->nb[1]/sizeof(float)), (const float *) conv_w->data, (float *) state->data, state->nb[1]/sizeof(float),
             (const int32_t *) rs_ids->data, write_cell, chan_offset, scale, (const float *) residual->data, (float *) dst->data, n_embd, n_used, n_conv);
@@ -3428,6 +3786,7 @@ struct ik_router_args {
     float         * cv_state; int64_t cv_state_s1; const int32_t * cv_rs_ids; int cv_write_cell, cv_chan_offset, cv_n_conv; float cv_scale;
     const float   * cv_residual;     // nullptr: none
     float         * attn_out;        // the last state, written
+    int64_t mr_st_rs, mr_route_rs, mr_dst_rs, mr_xq_rs; // multi-row launches (row: blockIdx.y): elements between the rows
     int dbg_skip; // timing experiments (IK_ROUTER_SKIP): 1 no arrival/selection, 2 no router rows, 4 no mix
     long long * dbg_times; // timing experiments (IK_ROUTER_TIMING): clock64 at the phase boundaries of block 0
 };
@@ -3702,8 +4061,23 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
 #define IK_R2_MAX_STATES 5
 #define IK_R2_MAX_EXPERT 256
 
-template <int NS, int NC> // NC: taps of the fused attention-output convolution (0: none)
-static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args) {
+template <int NS, int NC, bool MR = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
+    ik_router_args args_m;
+    if constexpr (MR) {
+        const int row = blockIdx.y;
+        args_m = args_in;
+#pragma unroll
+        for (int i = 0; i < NS; ++i) {
+            args_m.st.p[i] += row*args_in.mr_st_rs;
+        }
+        args_m.route   += row*args_in.mr_route_rs;
+        args_m.dst     += row*args_in.mr_dst_rs;
+        args_m.xq       = args_in.xq ? args_in.xq + row*args_in.mr_xq_rs : nullptr;
+        args_m.logits  += row*args_in.n_expert;
+        args_m.counter += row;
+    }
+    const ik_router_args & args = MR ? args_m : args_in;
     constexpr int NG = NS*(NS + 1)/2;          // Gram matrix (upper triangle)
     constexpr int NP = NG + NS;                 // + the dots with the query
     constexpr int C4 = (IK_R2_MAX_EMBD/4 + IK_R2_BLOCK - 1)/IK_R2_BLOCK; // float4 slots per thread
@@ -4003,6 +4377,17 @@ static void inkling_router2_launch_nc(ggml_backend_cuda_context & ctx, const ik_
 }
 
 template <int NS>
+static void inkling_router2_launch_rows(ggml_backend_cuda_context & ctx, const ik_router_args & a, const int n_rows) {
+    const size_t smem = (size_t) (IK_R2_WARPS + 1)*(IK_R2_MAX_EMBD/4)*sizeof(float4);
+    static bool attr_set[GGML_CUDA_MAX_DEVICES] = { false };
+    if (!attr_set[ctx.device]) {
+        CUDA_CHECK(cudaFuncSetAttribute(inkling_router2_kernel<NS, 0, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem));
+        attr_set[ctx.device] = true;
+    }
+    inkling_router2_kernel<NS, 0, true><<<dim3(a.n_expert/IK_R2_WARPS, n_rows), IK_R2_BLOCK, smem, ctx.stream()>>>(a);
+}
+
+template <int NS>
 static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
     if (a.wo_out) {
         GGML_ASSERT(a.cv_n_conv == 4);
@@ -4069,9 +4454,14 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     GGML_ASSERT(a.n_used <= 8 && n_states <= IK_MAX_STATES);
     GGML_ASSERT(((uintptr_t) a.query) % 16 == 0 && ((uintptr_t) a.norm_w) % 16 == 0 && ((uintptr_t) a.gate_inp) % 16 == 0 && ((uintptr_t) a.dst) % 16 == 0 && (a.xq == nullptr || ((uintptr_t) a.xq) % 16 == 0));
 
-    ggml_cuda_pool_alloc<float> logits(ctx.pool(), a.n_expert);
+    const int n_rows = dst->ne[1];
+    ggml_cuda_pool_alloc<float> logits(ctx.pool(), (size_t) a.n_expert*n_rows);
     a.logits  = logits.get();
-    a.counter = ik_counters(ctx, 8, 1);
+    a.counter = n_rows > 1 ? ik_counters(ctx, 128, n_rows) : ik_counters(ctx, 8, 1);
+    a.mr_st_rs    = dst->src[1]->nb[1]/sizeof(float);
+    a.mr_route_rs = route->nb[1]/sizeof(int32_t);
+    a.mr_dst_rs   = dst->nb[1]/sizeof(float);
+    a.mr_xq_rs    = xq ? xq->nb[1]/sizeof(block_q8_1) : 0;
     static const int dbg_skip = getenv("IK_ROUTER_SKIP") ? atoi(getenv("IK_ROUTER_SKIP")) : 0;
     a.dbg_skip = dbg_skip;
     static long long * dbg_times = [] () -> long long * {
@@ -4093,6 +4483,20 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
+    if (n_rows > 1) {
+        GGML_ASSERT(!has_conv && n_rows <= 8 && a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES);
+        for (int i = 0; i < n_states; ++i) {
+            GGML_ASSERT((int64_t) (dst->src[1 + i]->nb[1]/sizeof(float)) == a.mr_st_rs);
+        }
+        switch (n_states) {
+            case 1:  inkling_router2_launch_rows<1>(ctx, a, n_rows); break;
+            case 2:  inkling_router2_launch_rows<2>(ctx, a, n_rows); break;
+            case 3:  inkling_router2_launch_rows<3>(ctx, a, n_rows); break;
+            case 4:  inkling_router2_launch_rows<4>(ctx, a, n_rows); break;
+            default: inkling_router2_launch_rows<5>(ctx, a, n_rows); break;
+        }
+        return;
+    }
     if ((!v1 || has_conv) && a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES) {
         switch (n_states) {
             case 1:  inkling_router2_launch<1>(ctx, a); break;
