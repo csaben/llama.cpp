@@ -48,3 +48,16 @@ Both the release and default environments passed all 2,714 rollback/boundary row
 Eight mixed-width runs at prefixes 200 / 4,096 / 16,384 / 32,768 with packing on/off and randomized rollback each matched all 182 kept rows (1,456 in total). The rebuilt and frozen libraries produced identical FP32 bytes for all 88 full-vocabulary depth rows and 128 interleaved sequence rows. Both synchronization checks passed. CUDA passed 4,229 expanded cases across matrix multiplication, router/attention/controller operations, SITU, CONCAT and relative bias. [Depths](p8bc/checks/depths.txt), [hashes](p8bc/checks/logits.txt), [sanitizer and operator totals](p8bc/checks/sync-ops.txt).
 
 Run `CHECKS_GPU=0 CHECKS_OUT=build/p8-check bash perf/p6/r4_checks.sh` for the baseline battery. The width stress uses `mr_check`, two consecutive copies of `perf/ppl.txt`, `MR_RS_A=0 MR_RS=6 MR_SIZES=2,3,4,5,6,7 MR_RAND=37 MR_PLAIN_PCT=0 MR_CTX=34816`, 64 windows, and both `IK_WINDOW_COLS` settings. The frozen comparisons use the [full-logit driver](p7l3/logits.cpp).
+
+## Complete Phase 7c request matrices on GPU 0
+
+All 360 drafted requests (347,520 emitted token IDs) matched the full canonical message and the ID bytes from their same-flags plain server. The 384-token suite contributed 280 requests, including repeats, and the 3,000-token suite contributed 80. The main and fixed suites include the agent replay at both budgets. The TSV has 194 cells including plain controls, with rate, acceptance counts, and independently checkable hashes. [All cells](p8bc/matrix/cells.tsv), [raw rates and repeats](p8bc/matrix/), [runner](p8bc/matrix.sh), [byte comparator and totals](p8bc/summarize.py).
+
+| Cap 6, adaptive | Plain 384 | Hybrid 384 | Plain 3,000 | Hybrid 3,000 |
+|---|---:|---:|---:|---:|
+| code | 205.9 | 242.7 | 195.3 | 263.0 |
+| edit | 194.8 | 333.1 | 189.7 | 294.0 |
+| prose | 204.0 | 213.0 | 179.1 | 289.9 |
+| edit@16K | 178.5 | 274.5 | 162.5 | 267.6 |
+| edit@32K | 162.1 | 203.9 | 152.5 | 242.4 |
+| agent | 186.8 | 280.2 | 174.0 | 270.9 |

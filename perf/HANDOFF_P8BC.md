@@ -27,3 +27,5 @@ The additional short prose suite passed every byte and ID in all 100 drafted req
 All 280 short drafted requests (107,520 emitted IDs) now match same-flags plain, including the forced-width controls. The 3,000-token matrix is in progress. [Fixed-width 384](p8bc/matrix/fixed-384.txt).
 
 All 42 guarded 3,000-token main cells match the full plain messages and 126,000 IDs. The cap-6 agent cell measured 270.9 tok/s after the long-context cells in this matrix. Rates depend on thermal state and prompt order, so the paired comparison remains the throughput reference. [Long main matrix](p8bc/matrix/main-3000.txt).
+
+Both 7c matrices are complete, including the new six-token setting and agent workload. All 360 drafted messages and 347,520 IDs matched. The frozen/local crossover is running with identical prompt ordering and GPU clock samples. [Complete matrices and cap-6 table](RESULTS_P8BC.md#complete-phase-7c-request-matrices-on-gpu-0).
