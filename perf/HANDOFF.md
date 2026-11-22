@@ -14,6 +14,8 @@ Independent short prose held back `36ecab1`. Its cap-4 gardener letter reached 2
 
 A diagnostic gave every paid model proposal the same high confidence and an incorrect token ID. The first guard took only five plain steps. Backing off after a run of six loss-making verified windows gave 362 plain steps and preserved all 384 output IDs. This control tests the behavior when the confidence estimate is wrong. [Diagnostic and method](p7b/policy-trials/rejection-control.txt).
 
+The new candidate limits the paid model head to three predictions unless the user requests a larger minimum. A verified history continuation can use cap 4 after two sufficiently accurate history windows. The five-repeat cap-4 pilot reached 339.0 tok/s on edit, 217.3 on the lighthouse request and 213.1 on the gardener letter. Two paid model positions reduced long code to 254.3 tok/s versus 269.7 with three. The release matrix uses the original model files and three paid positions.
+
 # Phase 7 hand-off
 
 The staged build is `59c71a9`, local tag `p7-release-edit-324tok`, on branch `inkling-3090`. All measurements used physical GPU1 (RTX 3090). The release uses a fixed three-token draft, four-row MMA verification, a folded 32K shortlist, GPU-resident embedding tables and one 64K slot.

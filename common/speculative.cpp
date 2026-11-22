@@ -1426,7 +1426,6 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
 
         if (has_rnn_context && this->params.n_max > 0 && n_seq == 1) {
             // the head graph stops after the positions that are read (see graph_inkling2) and returns their logits only
-            setenv("LLAMA_DSPARK_HEAD_N", std::to_string(this->params.n_max).c_str(), 1);
             head_n = this->params.n_max;
             // LLAMA_DSPARK_PICK=0: the drafter returns the logits of the draft positions and the host scans them (round 2);
             // otherwise the draft tokens and their margins are reduced on the device (see graph_inkling2)
@@ -1485,9 +1484,16 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             const bool use_policy = policy ? atoi(policy) != 0 : adapt.on;
             cached_policy = device_draft && graphs && atoi(graphs) && use_policy;
             adapt.on = adapt.on || cached_policy;
+            if (cached_policy) {
+                // Limit model work to the packed window. History can use the full cap.
+                head_n = std::min(head_n, std::max(3, this->params.n_min));
+            }
             if (!device_draft) {
                 llama_set_ctx_state_src(this->params.ctx_tgt, nullptr);
             }
+        }
+        if (head_n > 0) {
+            setenv("LLAMA_DSPARK_HEAD_N", std::to_string(head_n).c_str(), 1);
         }
         if (has_rnn_context) {
             // Inkling2 uses host sampling to keep the first-maximum tie rule.
@@ -1546,6 +1552,7 @@ protected:
         bool   warmup = false;
         bool   from_history = false;
         int    history_steps = 0, history_accepted = 0, history_proposed = 0;
+        int    losing_rounds = 0;
         int    weak_windows = 0;             // consecutive windows below the required rate
         double cost[ADAPT_T_MAX + 1] = {};   // ms of a step by kind (decayed mean)
         int    cost_n[ADAPT_T_MAX + 1] = {}; // steps of this kind seen (the first is a warm-up and not counted in cost)
@@ -1628,6 +1635,7 @@ protected:
         if (fresh) {
             // A pause invalidates the timing between these two steps.
             adapt.warmup = cached_policy;
+            adapt.losing_rounds = 0;
             adapt.off_left = 0;
             adapt.off_len  = cached_policy ? 1 : 8;
             adapt.weak_windows = 0;
@@ -1662,7 +1670,14 @@ protected:
                     adapt.ok[b] *= 0.92;
                     adapt.tested[b] *= 0.92;
                 }
-                if (adapt.n_on >= 4 && t == 1 && adapt.gain < 1.0) {
+                adapt.losing_rounds = t > 1 && gain < 0.98 ? adapt.losing_rounds + 1 : 0;
+                if (adapt.losing_rounds >= 6) {
+                    // Repeatedly rejected high-confidence proposals must also yield to plain decode.
+                    adapt.off_len = std::min(64, std::max(4, 2*adapt.off_len));
+                    adapt.off_left = adapt.off_len;
+                    adapt.n_on = 0;
+                    adapt.weak_windows = 0;
+                } else if (adapt.n_on >= 4 && t == 1 && adapt.gain < 1.0) {
                     adapt.off_left = adapt.off_len;
                     adapt.off_len = adapt.weak_windows >= 3 ? std::min(8, 2*adapt.off_len) : 1;
                     adapt.n_on = 0;
@@ -1901,7 +1916,10 @@ public:
                 const uint16_t match = adapt.history_steps >= 2 && adapt.history_accepted < 0.5*adapt.history_proposed ? 16 : 12;
                 auto continuation = common_ngram_simple_draft({ match, match }, *dp.prompt, dp.id_last);
                 const int limit = dp.n_max > 0 ? std::min(dp.n_max, params.n_max) : params.n_max;
-                const int width = std::min(limit, (int) continuation.size());
+                int width = std::min(limit, (int) continuation.size());
+                if (adapt.history_steps < 2 || adapt.history_accepted < 0.85*adapt.history_proposed) {
+                    width = std::min(width, std::max(3, params.n_min));
+                }
                 if (width > 0 && width >= params.n_min) {
                     continuation.resize(width);
                     *dp.result = std::move(continuation);
@@ -2008,7 +2026,8 @@ public:
             const float * picks = pick ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
             float margins[ADAPT_T_MAX] = {};
             // bonus-anchor drafts read the mask positions only, like DFlash
-            for (int32_t i = i_draft_beg; i < i_draft_beg + params.n_max; ++i) {
+            const int n_read = cached_policy ? head_n : params.n_max;
+            for (int32_t i = i_draft_beg; i < i_draft_beg + n_read; ++i) {
                 const int32_t idx = beg + i;
 
                 if (conf && conf[(size_t) idx * n_embd_dec] < params.p_min) {
