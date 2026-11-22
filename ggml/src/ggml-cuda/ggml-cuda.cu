@@ -4744,6 +4744,30 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     }
 
     static const int route_visit = ggml_cuda_env_int("IK_ROUTE_VISIT", 0);
+    static const bool whole_layer = ggml_cuda_env_flag("IK_COMPLETE_LAYER");
+    if (whole_layer && route_visit > 0 && node->op == GGML_OP_MUL_MAT && cuda_ctx->stream_context().concurrent_events.empty() &&
+            ggml_cuda_info().devices[cuda_ctx->device].nsm == 82) {
+        const int a = ik_attention_projection_end(*cuda_ctx, cgraph, i);
+        const int w = a > i ? ik_next_compute(cgraph, a) : cgraph->n_nodes;
+        if (w < cgraph->n_nodes && cgraph->nodes[w]->src[1] == cgraph->nodes[a] && ggml_node_has_n_uses(cgraph, a, 1)) {
+            const int c = ik_projection_conv_end(*cuda_ctx, cgraph, w);
+            const int r = c > w ? ik_next_compute(cgraph, c) : cgraph->n_nodes;
+            const int u = r < cgraph->n_nodes ? ik_next_compute(cgraph, r) : cgraph->n_nodes;
+            if (u < cgraph->n_nodes && cgraph->nodes[r]->op == GGML_OP_INKLING_ROUTER && cgraph->nodes[u]->op == GGML_OP_MUL_MAT_ID) {
+                ggml_tensor * router = cgraph->nodes[r], * up = cgraph->nodes[u];
+                const int ns = ggml_get_op_params_i32(router, 6);
+                if (ns >= 1 && ns <= 5 && router->src[ns]->data == cgraph->nodes[c]->data && !ggml_get_op_params_i32(router, 10) &&
+                        ggml_is_vector(router) && router->ne[0] == 2304 && router->src[ns+2]->ne[1] == 128 && ggml_get_op_params_i32(router, 3) == 8 &&
+                        up->src[0]->type == GGML_TYPE_Q2_K && up->src[0]->ne[0] == 2304 && up->src[0]->ne[1] == 2304 &&
+                        up->src[0]->ne[2] == 128 && ggml_is_contiguous(up->src[0]) && router->src[ns+4] &&
+                        up->src[1]->data == router->src[ns+4]->data && ggml_is_contiguous(up->src[1]) && ggml_is_vector(up->src[1]) &&
+                        up->src[2]->data == router->src[ns+3]->data && ggml_nelements(up->src[2]) == 8 && ggml_is_contiguous(up->src[2])) {
+                    const int e = ik_expert_visit_end(cgraph, u, router->src[ns+3], cuda_ctx->device);
+                    if (e > u && ggml_cuda_inkling_layer(*cuda_ctx, cgraph->nodes[a], cgraph->nodes[w], cgraph->nodes[c], router, up, cgraph->nodes[e])) { return e-i; }
+                }
+            }
+        }
+    }
     if (route_visit > 0 && node->op == GGML_OP_INKLING_ROUTER && !ggml_cuda_env_flag("IK_MR") &&
             cuda_ctx->stream_context().concurrent_events.empty() && ggml_is_vector(node) && node->ne[0] == 2304 &&
             ggml_get_op_params_i32(node, 10) == 0 && ggml_get_op_params_i32(node, 3) == 8 &&

@@ -3493,7 +3493,7 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
     }
 }
 
-static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor * dst, bool project_gates) {
+static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor * dst, bool project_gates, ik_attn_args * record = nullptr) {
     const ggml_tensor * proj    = dst->src[0];
     const ggml_tensor * consts  = dst->src[1];
     ggml_tensor       * state   = dst->src[2];
@@ -3649,6 +3649,11 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
         const uintptr_t first = uintptr_t(x->data), last = first + ggml_nbytes(x);
         if (first < uintptr_t(dst->data) + ggml_nbytes(dst) && uintptr_t(dst->data) < last) {
             return false;
+        }
+        if (record) {
+            if (!short_scan || a.n_split != 1) { return false; }
+            *record = a;
+            return true;
         }
         if (a.has_taps) {
             ik_launch_gate_projection<1>(ctx, a, proj, short_scan);
@@ -4904,6 +4909,141 @@ static __device__ __forceinline__ void ik_ffn_tile(ik_router_args args, ik_exper
     }
 }
 
+// An input tile produces up to eight rows for one KV head. The last producer runs that head's attention.
+struct ik_dense_tile {
+    short base, stride;
+    unsigned char rows, col;
+};
+
+template<int taps>
+struct ik_dense_program {
+    ik_dense_tile tiles[138]{};
+    int count = 0;
+
+    constexpr void add(int base, int span, int col) {
+        for (int r = 0; r < span; r += 8) {
+            tiles[count++] = {short(base + r), short(span), (unsigned char) (r + 8 <= span ? 8 : span - r), (unsigned char) col};
+        }
+    }
+
+    constexpr ik_dense_program() {
+        add(0, 384, 0);
+        add(3072, 48, 0);
+        add(3456, 3, 0);
+        add(3480, 384, 0);
+        add(6552, 128, 1);
+        if (taps) { add(7576, 4, 1); }
+        add(7576 + 32*taps, 128, 2);
+        if (taps) { add(8632, 4, 2); }
+    }
+};
+
+template<int taps>
+static __device__ __constant__ ik_dense_program<taps> ik_dense_code;
+
+struct ik_layer_args {
+    ik_attn_args a;
+    const block_iq4_nl * wi;
+    const block_iq4_nl * wo;
+    const block_q8_1 * x;
+    float * out;
+    ik_projection_conv conv;
+    int * words;
+};
+
+static __device__ __forceinline__ float ik_layer_wo(const block_iq4_nl * w, const block_q8_1 * x, int row) {
+    constexpr int blocks = 3072/QK4_NL;
+    const int lane = threadIdx.x%32;
+    const int iqs = 2*(lane%2);
+    float partial[4]{};
+#pragma unroll
+    for (int start = 0; start < blocks; start += 64) {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int b = start + 16*j + lane/2;
+            if (b < blocks) {
+                const auto wi = ik_iq4_nl_decode(w, row*blocks + b, iqs);
+                const float d = __fmul_rn(wi.d, __low2float(x[b].ds));
+                partial[j] = __fmaf_rn(d, float(ik_iq4_nl_sumi(wi, x + b, iqs)), partial[j]);
+            }
+        }
+    }
+    const float y = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(partial[0], partial[1]), partial[2]), partial[3]));
+    return y;
+}
+
+template<int taps>
+static __device__ __forceinline__ void ik_layer_dense(ik_layer_args v) {
+    const int head = blockIdx.x%8, worker = blockIdx.x/8, workers = gridDim.x/8;
+    const int t = threadIdx.x, warp = t/32, lane = t%32;
+    const auto & program = ik_dense_code<taps>;
+    for (int pc = worker; pc < program.count; pc += workers) {
+        const auto tile = program.tiles[pc];
+        if (warp < tile.rows) {
+            int r = tile.base + head*tile.stride + warp;
+            int col = v.a.proj_ncols == 3 ? tile.col : 0;
+            ik_project_row(v.wi, v.x + col*72, (float *)v.a.proj, r);
+        }
+    }
+    __shared__ int last;
+    __syncthreads();
+    if (!t) { last = ik_atomic_add_acq_rel(v.words + head, 1) == workers - 1; }
+    __syncthreads();
+    if (last) {
+        if (!t) { ik_st_relaxed(v.words + head, 0); }
+        v.a.proj_ncols = 1;
+        ik_attention_tile<block_q8_0, true, 3, true, false, taps, true>(v.a, head, 0);
+        __syncthreads();
+        if (!t) { ik_atomic_add_acq_rel(v.words + 8, 1); }
+    }
+    if (!t) { while (ik_ld_acquire(v.words + 8) < 8) {} }
+    __syncthreads();
+    for (int r = 8*blockIdx.x + warp; r < 2304; r += 8*gridDim.x) {
+        const float value = ik_layer_wo(v.wo, (const block_q8_1 *)v.a.dst, r);
+        if (lane == r%2) {
+            auto c = v.conv;
+            const float * p = c.past + c.ids[0]*c.past_cell + 3*r;
+            const float * w = c.taps + 4*r;
+            const float p0 = p[0], p1 = p[1], p2 = p[2];
+            float sum = 0;
+            sum += p0*w[0]; sum += p1*w[1]; sum += p2*w[2]; sum += value*w[3];
+            float y = (value + sum)*c.scale;
+            if (c.residual) { y += c.residual[r]; }
+            v.out[r] = y;
+            c.state[3*r] = p1; c.state[3*r+1] = p2; c.state[3*r+2] = value;
+        }
+    }
+    __syncthreads();
+    if (!t) { last = ik_atomic_add_acq_rel(v.words + 9, 1) + 1 == gridDim.x; }
+    __syncthreads();
+    if (last) {
+        if (!t) { ik_st_relaxed(v.words + 8, 0); ik_st_relaxed(v.words + 9, 0); }
+        if (t < 32) { ik_st_release(v.words + 16 + t, 1); }
+    }
+}
+
+template<int ns, int taps>
+static __global__ void __launch_bounds__(256, 2) ik_complete_layer(ik_layer_args layer, ik_router_args args, ik_expert_task task) {
+    ik_layer_dense<taps>(layer);
+    if (blockIdx.x < 32) {
+        if (!threadIdx.x) {
+            while (!ik_ld_acquire(layer.words + 16 + blockIdx.x)) {}
+            ik_st_relaxed(layer.words + 16 + blockIdx.x, 0);
+        }
+        __syncthreads();
+        if (ik_router_tile<ns, 0, false, 4, true>(args, 32)) {
+            __syncthreads();
+            for (int i = threadIdx.x; i < gridDim.x; i += blockDim.x) { ik_st_release(task.flags + i, 1); }
+        }
+    }
+    if (!threadIdx.x) {
+        while (!ik_ld_acquire(task.flags + blockIdx.x)) {}
+        ik_st_relaxed(task.flags + blockIdx.x, 0);
+    }
+    __syncthreads();
+    ik_ffn_tile(args, task);
+}
+
 template<int NS, bool full>
 static __global__ void __launch_bounds__(256) ik_route_experts(ik_router_args args, ik_expert_task task) {
     constexpr int router_blocks = 64;
@@ -4930,12 +5070,14 @@ static __global__ void __launch_bounds__(256) ik_route_experts(ik_router_args ar
 }
 
 template<int NS>
-static void ik_launch_route_experts(ggml_backend_cuda_context & ctx, ik_router_args args, ggml_tensor * up, ggml_tensor * sum) {
+static void ik_launch_route_experts(ggml_backend_cuda_context & ctx, ik_router_args args, ggml_tensor * up, ggml_tensor * sum, ik_layer_args * layer) {
     constexpr size_t smem = 3*2304*sizeof(float);
     static const int requested = atoi(getenv("IK_ROUTE_VISIT"));
     auto kernel = sum ? ik_route_experts<NS, true> : ik_route_experts<NS, false>;
     int resident;
     CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, kernel, 256, smem));
+    auto complete = layer && layer->a.has_taps ? ik_complete_layer<NS, 1> : ik_complete_layer<NS, 0>;
+    if (layer) { CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, complete, 256, 4*576*sizeof(float))); }
     int blocks = std::min(requested, resident)*ggml_cuda_info().devices[ctx.device].nsm;
     if (sum) { blocks = blocks/8*8; }
     GGML_ASSERT(blocks >= 64 && blocks <= 6*82);
@@ -4961,6 +5103,11 @@ static void ik_launch_route_experts(ggml_backend_cuda_context & ctx, ik_router_a
         task.cell = ggml_get_op_params_i32(sum, 0);
         task.offset = ggml_get_op_params_i32(sum, 1);
         task.scale = ggml_get_op_params_f32(sum, 2);
+    }
+    if (layer) {
+        void * params[] = {layer, &args, &task};
+        CUDA_CHECK(cudaLaunchCooperativeKernel((void *)complete, blocks, 256, params, 4*576*sizeof(float), ctx.stream()));
+        return;
     }
     void * params[] = { &args, &task };
     CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, blocks, 256, params, smem, ctx.stream()));
@@ -5008,7 +5155,19 @@ static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_rou
     }
 }
 
-void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * up, ggml_tensor * sum) {
+bool ggml_cuda_inkling_layer(ggml_backend_cuda_context & ctx, ggml_tensor * attn, ggml_tensor * wo, ggml_tensor * conv, ggml_tensor * router, ggml_tensor * up, ggml_tensor * sum) {
+    ik_layer_args layer{};
+    if (!ggml_cuda_inkling_projection_conv(ctx, wo, conv, &layer.conv) || !ik_dispatch_attention(ctx, attn, true, &layer.a)) { return false; }
+    layer.wi = (const block_iq4_nl *)attn->src[0]->src[0]->data;
+    layer.x = (const block_q8_1 *)attn->src[0]->src[1]->data;
+    layer.wo = (const block_iq4_nl *)wo->src[0]->data;
+    layer.out = (float *)conv->data;
+    layer.words = ik_counters(ctx, 896, 48);
+    ggml_cuda_op_inkling_router(ctx, router, up, sum, &layer);
+    return true;
+}
+
+void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * up, ggml_tensor * sum, ik_layer_args * layer) {
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
     const ggml_tensor * consts   = dst->src[1 + n_states];
@@ -5099,11 +5258,11 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
     if (up) {
         switch (n_states) {
-            case 1: ik_launch_route_experts<1>(ctx, a, up, sum); break;
-            case 2: ik_launch_route_experts<2>(ctx, a, up, sum); break;
-            case 3: ik_launch_route_experts<3>(ctx, a, up, sum); break;
-            case 4: ik_launch_route_experts<4>(ctx, a, up, sum); break;
-            default: ik_launch_route_experts<5>(ctx, a, up, sum); break;
+            case 1: ik_launch_route_experts<1>(ctx, a, up, sum, layer); break;
+            case 2: ik_launch_route_experts<2>(ctx, a, up, sum, layer); break;
+            case 3: ik_launch_route_experts<3>(ctx, a, up, sum, layer); break;
+            case 4: ik_launch_route_experts<4>(ctx, a, up, sum, layer); break;
+            default: ik_launch_route_experts<5>(ctx, a, up, sum, layer); break;
         }
         return;
     }
