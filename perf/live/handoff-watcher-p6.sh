@@ -23,7 +23,7 @@ EOF
     reason=""
     [ "$five" -ge $FIVE_MAX ] && reason="5h usage ${five}%"
     [ "$week" -ge $WEEK_MAX ] && reason="7d usage ${week}%"
-    tail -c 20000 "$T" 2>/dev/null | grep -q -E "hit your session limit|usage limit|\"rate_limit\"" && reason="${reason:-rate-limit error in transcript}"
+    tail -c 20000 "$T" 2>/dev/null | grep -q -E "hit your [A-Za-z ]*limit|usage limit|rate_limit" && reason="${reason:-rate-limit error in transcript}"
     if [ -n "$reason" ]; then touch "$R/perf/STOP"; stopped=1; log "STOP: $reason (meter age ${age}s)"; fi
   else
     quiet=$(( $(date +%s) - $(stat -c %Y "$T" 2>/dev/null || echo 0) ))
