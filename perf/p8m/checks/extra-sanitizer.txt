@@ -1,0 +1,12 @@
+memcheck MUL_MAT_ID
+  2/2 tests passed
+========= ERROR SUMMARY: 0 errors
+synccheck MUL_MAT_ID
+  2/2 tests passed
+========= ERROR SUMMARY: 0 errors
+memcheck REL_BIAS
+  1/1 tests passed
+========= ERROR SUMMARY: 0 errors
+synccheck REL_BIAS
+  1/1 tests passed
+========= ERROR SUMMARY: 0 errors
