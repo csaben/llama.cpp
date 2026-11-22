@@ -1403,7 +1403,9 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             const bool has_conf = !has_rnn_context &&
                 (llama_model_meta_val_str(model_dft, "dflash.has_confidence_head", buf, sizeof(buf)) < 0 ||
                  std::strcmp(buf, "true") == 0);
-            if (!has_conf) {
+            // the Inkling2 drafter has no confidence head: p_min is then compared with the top-2 confidence of each draft
+            // position, sigmoid(top logit - second logit), an upper bound of the top probability (see draft())
+            if (!has_conf && !has_rnn_context) {
                 throw std::runtime_error("DSpark draft has no confidence head: please set --spec-draft-p-min 0");
             }
         }
@@ -1537,7 +1539,9 @@ public:
             auto & result = *dp.result;
 
             // DSpark: read from the first draft slot, truncate below the confidence threshold
-            const float * conf = params.p_min > 0.0f ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
+            const float * conf = params.p_min > 0.0f && !has_rnn_context ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
+            // the margin of the top logit over the second that p_min asks of a draft position (Inkling2 drafter)
+            const float margin_min = has_rnn_context && params.p_min > 0.0f && params.p_min < 1.0f ? logf(params.p_min/(1.0f - params.p_min)) : -INFINITY;
             // bonus-anchor drafts read the mask positions only, like DFlash
             for (int32_t i = i_draft_beg; i < i_draft_beg + params.n_max; ++i) {
                 const int32_t idx = beg + i;
@@ -1552,10 +1556,17 @@ public:
                     const float * logits = llama_get_logits_ith(ctx_dft, idx);
                     const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx_dft)));
                     llama_token best = 0;
+                    float second = -INFINITY;
                     for (int32_t v = 1; v < n_vocab; ++v) {
                         if (logits[v] > logits[best]) {
-                            best = v;
+                            second = logits[best];
+                            best   = v;
+                        } else if (logits[v] > second) {
+                            second = logits[v];
                         }
+                    }
+                    if (logits[best] - second < margin_min) {
+                        break; // an unsure position ends the draft: the verify window stays short
                     }
                     result.push_back(best);
                     continue;
