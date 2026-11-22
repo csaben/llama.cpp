@@ -5,6 +5,7 @@
 #include "cp-async.cuh"
 
 #include <cmath>
+#include <cooperative_groups.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
 // l2_clip: y = x*b * min(1, threshold/(|x*b| + eps)), one warp per row
@@ -1498,6 +1499,7 @@ static __global__ void ik_ctrl_apply8_rows(const float * cur, const float * msg,
     }
 }
 
+template<int sync>
 static __global__ void __launch_bounds__(256) ik_ctrl_apply_pack(const float * cur, const float * msg, const float * d,
         const half * wg, const half * wf, size_t cur_stride, size_t msg_stride, const float * nw, size_t nw_stride,
         block_q8_1 * out, float * partial, float eps, int * counters) {
@@ -1521,23 +1523,39 @@ static __global__ void __launch_bounds__(256) ik_ctrl_apply_pack(const float * c
             if (j*1024 + 32*tile < 2304) { ss += y[j][t]*y[j][t]; }
         }
         ss = warp_reduce_sum(ss);
-        // All 32 tiles must publish before any tile packs its normalized values.
-        if (!t) {
-            partial[b*32 + tile] = ss;
-            if (ik_atomic_add_acq_rel(counters+b, 1) == 31) {
-                ik_st_relaxed(counters+b, 0);
-                ik_st_release(counters+4+b, 1);
+        if (!t) { partial[b*32 + tile] = ss; }
+        if constexpr (sync != 1) {
+            int sense = 0, last = 0;
+            if (!t) {
+                if constexpr (sync >= 2) { sense = ik_ld_acquire(counters+4+b); }
+                last = ik_atomic_add_acq_rel(counters+b, 1) == 31;
+                if (last) {
+                    ik_st_relaxed(counters+b, 0);
+                    if constexpr (sync != 3) { ik_st_release(counters+4+b, sense^1); }
+                }
             }
-            while (!ik_ld_acquire(counters+4+b)) {}
+            if constexpr (sync == 3) {
+                if (__shfl_sync(0xffffffffu, last, 0)) {
+                    __syncwarp();
+                    float scale = rsqrtf(warp_reduce_sum(partial[32*b+t])/2304 + eps);
+                    partial[32*b+t] = scale;
+                    __syncwarp();
+                    if (!t) { ik_st_release(counters+4+b, sense^1); }
+                }
+            }
+            if (!t) { while (ik_ld_acquire(counters+4+b) == sense) {} }
+            __syncwarp();
         }
-        __syncwarp();
-        const float scale = rsqrtf(warp_reduce_sum(partial[32*b+t])/2304 + eps);
+    }
+    if constexpr (sync == 1) { cooperative_groups::this_grid().sync(); }
+    if (t < 32) {
+        const float scale = sync == 3 ? partial[32*b+t] : rsqrtf(warp_reduce_sum(partial[32*b+t])/2304 + eps);
 #pragma unroll
         for (int j = 0; j < 3; ++j) {
             const int c = j*1024 + 32*tile + t;
             if (c < 2304) { ik_warp_store_q8_1(y[j][t]*scale*nw[b*nw_stride+c], out+b*72+c/32, t, true); }
         }
-        if (!t && ik_atomic_add_acq_rel(counters+8+b, 1) == 31) {
+        if (sync == 0 && !t && ik_atomic_add_acq_rel(counters+8+b, 1) == 31) {
             ik_st_relaxed(counters+4+b, 0);
             ik_st_relaxed(counters+8+b, 0);
         }
@@ -1572,19 +1590,21 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
             wg->type == GGML_TYPE_F16 && (uintptr_t) d->data % 16 == 0 && (uintptr_t) wg->data % 8 == 0 &&
             (uintptr_t) wf->data % 8 == 0 && ik_ctrl_gemm_min() != 1 && ik_dependency_fusion(ctx) &&
             ggml_cuda_info().devices[ctx.device].supports_cooperative_launch && ctx.curr_stream_no == 0 && ctx.stream_context().concurrent_events.empty()) {
+        static const int sync = getenv("IK_PACK_SYNC") ? atoi(getenv("IK_PACK_SYNC")) : 0;
+        auto kernel = sync == 1 ? ik_ctrl_apply_pack<1> : sync == 2 ? ik_ctrl_apply_pack<2> : sync == 3 ? ik_ctrl_apply_pack<3> : ik_ctrl_apply_pack<0>;
         int resident;
-        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, ik_ctrl_apply_pack, 256, 0));
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, kernel, 256, 0));
         if (resident*82 >= 32*B) {
             ggml_cuda_pool_alloc<float> partial(ctx.pool(), 32*B);
             float * sums = partial.get();
-            int * counters = ik_counters(ctx, 832, 12);
+            int * counters = sync == 1 ? nullptr : ik_counters(ctx, 832, 12);
             size_t cur_stride = cur->ne[2] == 1 ? 0 : cur->nb[2]/sizeof(float);
             size_t msg_stride = msg->nb[2]/sizeof(float);
             size_t nw_stride = nw_nb1/sizeof(float);
             void * inputs[] = {cur->data, msg->data, d->data, wg->data, wf->data, nw->data};
             void * params[] = {&inputs[0], &inputs[1], &inputs[2], &inputs[3], &inputs[4],
                 &cur_stride, &msg_stride, &inputs[5], &nw_stride, &dst->data, &sums, &eps, &counters};
-            CUDA_CHECK(cudaLaunchCooperativeKernel((void *) ik_ctrl_apply_pack, dim3(32, B), 256, params, 0, ctx.stream()));
+            CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, dim3(32, B), 256, params, 0, ctx.stream()));
             return;
         }
     }
