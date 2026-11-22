@@ -148,10 +148,103 @@ static __global__ void __launch_bounds__(256, 2) ik_coop_gate_scan(ik_attn_args 
 #include "inkling-short.cuh"
 
 template<int taps>
+static __global__ void ik_scan_inputs_with_gate(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x, int early) {
+    const int i = (blockIdx.x*blockDim.x + threadIdx.x)/32;
+    const int input_rows = taps ? 5592 : 5528;
+    const int row = i < input_rows ? (i < a.off_gate ? i : i+3072) :
+        a.off_gate + ((i-input_rows)/early)*384 + (i-input_rows)%early;
+    const int col = a.proj_ncols == 3 && row >= a.off_k ? (row < a.off_v ? 1 : 2) : 0;
+    ik_project_row(w,x + col*72,(float *)a.proj,row);
+}
+
+static __device__ __forceinline__ void ik_gpu_stamp(unsigned long long * ptr, int i) {
+    if (ptr && threadIdx.x == 0) {
+        unsigned long long v;
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(v));
+        ptr[3*blockIdx.x+i] = v;
+    }
+}
+
+template<int taps, bool short_scan>
+static __global__ void __launch_bounds__(256) ik_wave_gate_scan(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x,
+        float * values, int * ctr, int gates, int early, bool interleave, unsigned long long * times) {
+    const int scans = a.n_split;
+    int g, k;
+    if (interleave) {
+        g = blockIdx.x/(scans+gates); k = blockIdx.x%(scans+gates);
+    } else {
+        g = blockIdx.x < 8*scans ? blockIdx.x%8 : (blockIdx.x-8*scans)/gates;
+        k = blockIdx.x < 8*scans ? blockIdx.x/8 : scans + (blockIdx.x-8*scans)%gates;
+    }
+    ik_gpu_stamp(times,0);
+    block_q8_1 * dst = (block_q8_1 *)a.dst;
+    if (k < scans) {
+        a.proj_ncols = 1;
+        a.dst = values;
+        ik_attention_tile<block_q8_0,false,3,true,false,taps,short_scan,true,false,false,!short_scan && !taps>(a,g,k);
+    } else {
+        for (int i = early+(k-scans)*8+threadIdx.x/32; i < 384; i += gates*8) {
+            ik_project_row(w,x,(float *)a.proj,a.off_gate+g*384+i);
+        }
+    }
+    __shared__ int last;
+    __syncthreads();
+    ik_gpu_stamp(times,1);
+    if (threadIdx.x == 0) { last = ik_atomic_add_acq_rel(ctr+g,1) == gates+scans-1; }
+    __syncthreads();
+    if (last) {
+        if (threadIdx.x == 0) { ik_st_relaxed(ctr+g,0); }
+        for (int i = threadIdx.x; i < 384; i += 256) {
+            const int c = 384*g+i;
+            const float v = values[c]*(1.0f/(1.0f+expf(-a.proj[a.off_gate+c])));
+            ik_warp_store_q8_1(v,dst+c/32,threadIdx.x%32,true);
+        }
+    }
+    ik_gpu_stamp(times,2);
+}
+
+static unsigned long long * ik_wave_times(int taps, bool short_scan) {
+    static unsigned long long * times = []() -> unsigned long long * {
+        if (!getenv("IK_WAVE_TIMING")) { return nullptr; }
+        unsigned long long * out;
+        CUDA_CHECK(cudaMallocManaged(&out,4*2048*3*sizeof(*out)));
+        memset(out,0,4*2048*3*sizeof(*out));
+        static unsigned long long * ptr = out;
+        atexit([]{
+            cudaDeviceSynchronize();
+            for (int i = 0; i < 4*2048; ++i) {
+                if (ptr[3*i]) { fprintf(stderr,"r4 phase %d %d %llu %llu %llu\n",i/2048,i%2048,ptr[3*i],ptr[3*i+1],ptr[3*i+2]); }
+            }
+        });
+        return out;
+    }();
+    return times ? times + (2*short_scan+taps)*2048*3 : nullptr;
+}
+
+template<int taps>
 static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
     const auto * x = (const block_q8_1 *) proj->src[1]->data;
     int * counters = ik_counters(ctx, 192, 8);
+    static const int wave = getenv("IK_GATE_WAVE") ? atoi(getenv("IK_GATE_WAVE")) : 0;
+    if (wave) {
+        static const int early = getenv("IK_GATE_EARLY") ? std::min(384, std::max(0,atoi(getenv("IK_GATE_EARLY"))/8)*8) : 0;
+        static const bool interleave = getenv("IK_WAVE_INTERLEAVE") && atoi(getenv("IK_WAVE_INTERLEAVE"));
+        const int gates = early == 384 ? 0 : std::min(48,wave);
+        if (early) {
+            ik_scan_inputs_with_gate<taps><<<(proj->ne[0]-3072+8*early)/4,128,0,ctx.stream()>>>(a,w,x,early);
+        } else {
+            ik_dense_scan_inputs<taps><<<(proj->ne[0]-3072)/4,128,0,ctx.stream()>>>(a,w,x);
+        }
+        ggml_cuda_pool_alloc<float> values(ctx.pool(),3072);
+        auto * times = ik_wave_times(taps,short_scan);
+        if (short_scan) {
+            ik_wave_gate_scan<taps,true><<<8*(a.n_split+gates),256,0,ctx.stream()>>>(a,w,x,values.get(),counters,gates,early,interleave,times);
+        } else {
+            ik_wave_gate_scan<taps,false><<<8*(a.n_split+gates),256,0,ctx.stream()>>>(a,w,x,values.get(),counters,gates,early,interleave,times);
+        }
+        return;
+    }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
     static const int mma = getenv("IK_MMA_ORDER") ? atoi(getenv("IK_MMA_ORDER")) : 0;
     if (mma) {
