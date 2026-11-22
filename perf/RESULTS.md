@@ -806,6 +806,187 @@ mixed use (+3% / +29% / -12% / +19%). Command: the round 1 deploy command below 
 `--setenv=IK_MMA=3` added, `--setenv=LLAMA_DSPARK_ADAPTIVE=1` removed, and
 `--spec-draft-model $HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-Q2K.gguf`. Not run at 64K context.
 
+## Round 3 (2026-11-21, `1c46feb`; flags `IK_MMA=3 IK_MR=1`, drafter file with fold + shortlist head)
+
+Goal: 300 tok/s on the edit prompts with DSpark, new code and prose never slower than plain. Raw outputs:
+`perf/p6/r3_spec.txt`, `r3_spec/`, `r3_mr_check.txt`, `r3_decode.txt`, `r3_ppl.txt`, `r3_backend_ops.txt`,
+`r3_prof_after.txt`. Scripts: `perf/p6/r3_spec.sh`, `r3_final.sh`, `r3_prof.sh`.
+
+**Outcome.** The edit prompt reaches **304 tok/s** with max 3 (1.49x plain; round 2: 273) and 303 with the policy.
+The edit at 16K context reaches **253 tok/s** (1.35x; round 2: 220), not 300: there each window row scans the
+16K-cell cache by itself and a 4-row window costs about 13.5 ms. With the retuned policy, new code is 5% faster
+than plain (225 vs 215) and prose is 2% slower than plain decode of the same server and 4% slower than the best
+plain build (206 vs 210 / 214): "never slower" is met for code and missed by that margin for prose. All 28 drafted
+replies are byte-identical to the plain replies; windows are bit-identical to single-token decode (257 rows, 0
+differ). The Codex plain-decode stream is merged: plain decode 221 tok/s at depth 0 (was 210).
+
+### Where a round went, before and after (edit prompt, max 3, 4-row window)
+
+nsys timeline of one fully accepted round (`perf/p6/prof_server.sh`, kernels and copies in launch order; the script
+that prints it is not in the tree: it selects `CUPTI_ACTIVITY_KIND_KERNEL` and `_MEMCPY` rows of the exported sqlite
+between two window starts):
+
+| Part of the round | Round 2 (`59449ce`), ms | Round 3, ms | What changed |
+|---|---:|---:|---|
+| Window (668 launches) + target head for 4 rows | 9.77 | 9.58 | merged router / attention instances |
+| Target sampling on the device (top-k per row) | 0.19 | 0.21 | |
+| Target features to the host, inject graph, host | 0.41 | 0.41 | |
+| Host before the draft (two graph rebuilds, uploads) | 0.38 | 0.34 | |
+| Drafter graph | 1.66 | 0.83 | |
+| - 3 layers over the 8-token block | 0.55 | 0.57 | |
+| - base logits | 0.38 | 0.06 | shortlist head: 33,024 rows instead of 201,024 |
+| - 3 head steps | 0.83 | 0.20 | fold over the shortlist (22 us, was 124), `ggml_dspark_pick` (14 us, was about 125 of pool / argmax / concat) |
+| Draft logits to the host (3.2 MB) and host scan | 0.53 | 0.00 | 24 bytes of picks |
+| Next target batch (uploads, launch) | 0.17 | 0.21 | |
+| **Round** | **13.11** | **11.58** | |
+
+Wall timers in the server without the profiler (`LLAMA_SPEC_PROF=1`, per target step): drafter 2.89 -> 1.07 ms,
+target decode with its readback 11.47 -> 10.73 ms, feature injection 0.47 -> 0.51 ms. So the "4 ms outside the
+window" of the brief was 3.3 ms, of which 2.2 ms was the drafter's own GPU time and its logits readback; about
+1.2 ms of host round trips remain (feature copies, two small drafter graphs rebuilt per round, batch setup).
+
+### DSpark against plain decode (`perf/p6/r3_spec.sh`: median of 3 requests per cell, same server; tok/s)
+
+| Prompt | Plain (default flags) | Plain (`IK_MMA=3 IK_MR=1`) | Max 2 | Max 3 | Max 4 | Max 3, full-vocabulary drafter head |
+|---|---:|---:|---:|---:|---:|---:|
+| New code | 215.1 | 210.0 | **228.9** (203 / 357) | 222.7 (227 / 463) | 204.0 (239 / 568) | 213.7 (227 / 463) |
+| Edit of given code | 204.3 | 200.3 | 276.8 (250 / 264) | **303.8** (281 / 306) | 298.2 (297 / 341) | 292.7 (282 / 302) |
+| Prose | 214.0 | 209.8 | 183.3 (159 / 445) | 167.3 (172 / 627) | 143.4 (178 / 811) | 163.5 (177 / 612) |
+| Edit at 16K context | 186.7 | 184.1 | 237.3 (247 / 270) | **252.6** (277 / 318) | 246.9 (293 / 359) | 241.3 (277 / 318) |
+
+With the policy (`LLAMA_DSPARK_ADAPTIVE=1`):
+
+| Prompt | Max 2 + policy | Max 3 + policy | Max 4 + policy |
+|---|---:|---:|---:|
+| New code | 217.4 (116 / 183) | **225.1** (137 / 247) | 220.7 (138 / 247) |
+| Edit of given code | 274.8 (243 / 250) | **302.7** (278 / 300) | 294.9 (284 / 305) |
+| Prose | 204.9 (68 / 138) | **205.8** (56 / 132) | 203.4 (28 / 64) |
+| Edit at 16K context | 231.7 (239 / 256) | **250.9** (275 / 309) | 248.1 (271 / 292) |
+
+In brackets: accepted / proposed draft tokens of the median run. Single runs of a cell vary: the three requests are
+within 1-2% in most cells, but separate server starts of the same build gave 267 and 297 tok/s for the edit at max 3
+during this round (one slow start in about ten; not explained), which is why the cells are medians. The shortlist
+head changes the drafts slightly (edit: 281 / 306 instead of 282 / 302) and is 4% faster.
+
+Greedy equality: every drafted reply (7 configurations x 4 prompts) is byte-identical to the plain reply of the same
+flags (`perf/p6/r3_spec/`, 28 of 28); the default-flag plain replies are the same four texts.
+
+### Exactness
+
+- Windows against single-token decode, `IK_MMA=3 IK_MR=1` (`perf/p6/r3_mr_check.txt`): 257 rows in 52 windows of
+  2-8 rows, with partial rollbacks, after 300- and 1,500-token prefixes: **0 rows differ, max |logit diff| 0**.
+- The merged plain-decode branch brought two kernels that change the fp32 order of the attention: a shape-specialized
+  instance and a short schedule for 256-cell caches. Chosen: under `IK_MR` single tokens and window rows both take
+  the shape-specialized instance (the window K/V kernel is specialized the same way; without that 110 of 120 rows
+  differed by up to 1.8), and the short schedule stays off under `IK_MR` for both, since it has no window form.
+  So in a DSpark server drafted and plain steps are bit-identical; a plain server without `IK_MR` additionally uses
+  the short schedule and is not bit-identical to a DSpark server (decode PPL 4.1979 vs 4.2038).
+- The drafter changes (pick on the device, shortlist) only change which drafts are proposed.
+
+### Plain decode regression and quality (`perf/p6/r3_decode.txt`, `r3_ppl.txt`)
+
+| `llama-bench -p 0 -n 128 -r 3` | depth 0 | 4K | 16K | 32K |
+|---|---:|---:|---:|---:|
+| Round 2, default flags (`d771a28`) | 209.98 ± 0.32 | 194.52 ± 2.27 | 182.60 ± 2.00 | 168.11 ± 2.07 |
+| Round 3, default flags | 221.35 ± 0.54 | 202.63 ± 2.30 | 190.40 ± 2.03 | 176.04 ± 1.72 |
+| Round 2, `IK_MMA=3` | 208.65 ± 0.49 | 193.31 ± 2.25 | 182.15 ± 2.13 | 168.47 ± 1.70 |
+| Round 3, `IK_MMA=3 IK_MR=1` | 213.12 ± 0.13 | 199.21 ± 2.13 | 188.00 ± 1.88 | 173.80 ± 1.70 |
+
+Plain decode is 4-5% faster at every depth (the merged Codex kernels: two-row Q2_0 down, router warp top-k,
+specialized and short attention; see `perf/RESULTS_PLAIN.md`). Prefill PPL (8x2048) 3.0530 with both flag sets
+(unchanged); decode-path PPL (2x1024, `-ub 1`) 4.1979 ± 0.28 default (4.2036 before the merge; the short attention
+schedule) and 4.2038 with `IK_MMA=3 IK_MR=1` (round 2: 4.1935). `test-backend-ops -o
+MUL_MAT_ID,INKLING_ROUTER,INKLING_ATTN`: 1108 / 1108. `perf/greedy.sh` was not rerun. `GGML_OP_DSPARK_PICK` has
+a CPU implementation but no `test-backend-ops` case; the unchanged accepted / proposed counts with and without it
+(282 / 302) are its check.
+
+### What was done
+
+1. **Profile** (above). New tools: `LLAMA_SPEC_PROF=1` (wall time of draft / target / inject / accept per request),
+   `LLAMA_GRAPH_BUILD_PROF=1` (host time of graph rebuilds: 0.88 ms for a target window, 0.08 ms for a drafter graph).
+2. **Draft tokens reduced on the device** (`ggml_dspark_pick`, `GGML_OP_DSPARK_PICK`, CUDA in `softcap.cu`): per draft
+   position one kernel pair adds base and fold logits, applies the soft cap and returns the first maximum and its
+   margin over the second; the graph returns 2 ints per position through the `h_nextn` output and no logits.
+   `LLAMA_DSPARK_PICK=0` restores the round 2 path. Edit max 3: 265-273 -> 290-297 tok/s, same drafts.
+3. **Shortlist head** (`perf/p6/shortlist_rank.py`, `perf/p6/dspark_fold.py ... RANK.bin 32768`,
+   `src/models/dspark.cpp`): the 32,768 most frequent tokens of 48 MB of system code and documentation (99.93% of its
+   17.2M tokens) plus the 60 control tokens; their rows of the target head (IQ4_NL bytes copied) and of the fold are
+   stored in the drafter file (+52 MB). `LLAMA_DSPARK_SHORT=0` scores the whole vocabulary. Context tokens are not
+   added to the list at run time (ingine does that); acceptance on the four prompts did not need it.
+4. **Policy** (`LLAMA_DSPARK_ADAPTIVE=1`, `common/speculative.cpp`): the time of a step is learned per window size, the
+   acceptance of a draft per bin of its top-2 margin; each drafted step verifies the prefix of the drafts with the
+   best expected tokens per ms (a change of window size is charged 1 ms); the drafter is switched off for 8-64 steps
+   while no window beats a plain step, and probed again. While it is off the target features stay on the host and are
+   injected in one batch before the next probe, so plain steps cost what plain decode costs (4.76 ms measured in the
+   policy against 4.75 ms plain). Round 2's instability is gone (max 3 edit 303, was 192 with the old policy).
+5. **CUDA graphs keyed by shape** (`ggml_cuda_graph_get_key`; `IK_GRAPH_KEY_SHAPE=0` = as before): each window size
+   keeps its captured graph instead of resetting the warm-up at every change of size. No effect on fixed sizes.
+6. **Merge of `inkling-3090-plain`** (tag `p6p-final-215tok`) after its unit was inactive; exactness handled as above.
+
+### Not done / did not work
+
+- **A device-side round with one host sync** (ingine `model/spec.cpp`): only the drafter's output moved to the
+  device. Accept / rollback and the drafter commit still go through the server loop: target sampling -> host ->
+  features -> drafter inject graph -> drafter block graph -> host -> next window. That is about 1.2 ms of an 11.6 ms
+  round. Folding it into one launch needs a single graph over both models and greedy acceptance on the device,
+  which llama-server's sampler and two-context design do not allow without a rewrite of the speculative path.
+- **Per-step window sizes** gain nothing over a fixed size: a change of size rebuilds the target graph on the host
+  (0.88 ms) and the policy therefore settles on one size per stretch. Max 4 with the policy is slower than max 3.
+  A graph cache per window size in `llama_context` (one scheduler each) would remove this.
+- **300 tok/s at 16K context**: 253. The window there costs about 13.5 ms because every row scans the cache
+  separately (+0.8 ms per row over depth 0); sharing one pass over K/V between the rows of a window (rows as extra
+  mma columns of the tensor-core scan, as ingine's attention does) is the next cut and was not attempted.
+- **Prose never slower than plain**: -2% against plain decode with the same flags, -4% against the default build
+  (the DSpark flags themselves cost 2%: no short attention schedule, `IK_MMA` expert kernels). Probes and the first
+  request (when the policy has no calibration yet: 195-197 tok/s for the very first prose reply of a server) are the
+  rest.
+
+### Sources (round 3)
+
+- ingine (Apache-2.0), <https://github.com/satellitedown/inkling-2-mini-abliterated-ingine>: the shortlist head
+  (`native/src/model/drafter.h`, `native/tools/build_draft_shortlist.py`, `native/DESIGN.md` "Speculative
+  decoding"), the device-side round (`native/src/model/spec.cpp`, read; not reproduced). Ideas only: the ranking
+  here was built from local system files with this model's tokenizer, ingine's `draft_shortlist.bin` was not used.
+- basalt (MIT), <https://github.com/jesdga95/basalt>: `src/spec/draft_policy.cpp` (`window`, `chance_rate`, cost per
+  window size learned online, probing of unmeasured sizes). Ideas only, no code copied.
+- Codex plain-decode stream: `perf/RESULTS_PLAIN.md` and its sources.
+- llama.cpp's CUDA graph cache (`ggml_backend_cuda_context::cuda_graphs`) and backend sampling path.
+
+### Risks (round 3)
+
+- The shortlist cannot draft a token outside its 32,824 (rare identifiers, most non-English text): drafts then fail
+  and the policy turns drafting off; output is unaffected. The drafter file is tied to the target head it was built
+  from (as the fold) and older builds warn about unused tensors and ignore the shortlist.
+- The policy keeps its costs and calibration across requests of a server; its first requests run uncalibrated.
+  It measures wall time between draft calls, so other load on the GPU or CPU moves its decisions (never the output).
+- With `LLAMA_DSPARK_ADAPTIVE=1` up to 512 feature rows wait on the host while drafting is off; rows older than
+  that are never injected (the drafter then sees a gap in its context after a long plain stretch).
+- `IK_GRAPH_KEY_SHAPE` keeps one captured CUDA graph per graph shape (evicted after 10 s without use, as before).
+- Not run at 64K context, with more than one slot, or with sampling at temperature > 0.
+
+### Deploy (round 3)
+
+The live server is back on the phase 5 binaries (`bash perf/live/restore-p5.sh`). This build is worth switching to:
+plain decode alone is 4-5% faster, and with DSpark max 3 + policy edits are +48% (+34% at 16K), new code +5%,
+prose -4% against the best plain build. Command (same model, port and alias; new snapshot folder):
+
+```bash
+systemctl --user stop inkling-3090-experiment
+mkdir -p ~/inkling-live-bin-p6r3 && cp -a ~/llama.cpp-fast/build/bin/. ~/inkling-live-bin-p6r3/
+systemd-run --user --unit=inkling-3090-experiment --working-directory=$HOME/llama.cpp-fast \
+  --setenv=CUDA_VISIBLE_DEVICES=1 --setenv=LLAMA_INKLING_CTRL_F16=1 --setenv=IK_BATCH_MESSAGES=1 --setenv=IK_SEGMENTED_Q6=1 \
+  --setenv=IK_SEGMENTED_IQ4=1 --setenv=IK_CTRL_APPLY8=1 --setenv=IK_MIX_SPECIALIZE=1 --setenv=IK_MR=1 --setenv=IK_MMA=3 \
+  --setenv=LLAMA_DSPARK_ADAPTIVE=1 --setenv=LD_LIBRARY_PATH=$HOME/inkling-live-bin-p6r3 \
+  $HOME/inkling-live-bin-p6r3/llama-server -m $HOME/models/inkling-2-mini/Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf \
+  -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 65536 -np 1 --backend-sampling --host 127.0.0.1 --port 8031 --alias inkling-mini \
+  --spec-type draft-dspark --spec-draft-model $HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf \
+  --spec-draft-n-max 3 --spec-draft-p-min 0
+```
+
+For plain serving only (no drafter, +5% over the live build): the phase 5 command with the new snapshot folder and
+no other change. Back to phase 5: `systemctl --user stop inkling-3090-experiment && bash perf/live/restore-p5.sh`.
+The DSpark command was measured with a 32K slot, not at 64K.
+
 ## What was done
 
 1. **Window graph** (`src/models/inkling2.cpp`, `graph::mr`): a ubatch of 2-8 tokens of one sequence keeps the direct

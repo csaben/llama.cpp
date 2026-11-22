@@ -1,31 +1,34 @@
 # Phase 6 hand-off (keep current; newest status first)
 
-## Round 3 status (2026-11-21, in progress)
+## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
-Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Raw outputs: `perf/p6/r3_*`. Run-to-run spread of one spec_probe cell is
-large (edit max 3: 267 and 297 tok/s in two runs of the same build), so round 3 cells are medians of 3 (`SPEC_REPS=3`).
+Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.
+Flags for DSpark: `IK_MMA=3 IK_MR=1` (+ `LLAMA_DSPARK_ADAPTIVE=1` for the policy); drafter file
+`~/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf` (fold + shortlist head).
 
-Done (commits after `59449ce`):
-- Profile of a round (`LLAMA_SPEC_PROF=1` wall timers in the server, `perf/p6/r3_prof.sh <n_max> "<kinds>"`; nsys kernel order of
-  one round with the scratch script described in RESULTS "Round 3"). Edit, max 3, 13.1 ms per round under nsys: window 9.77
-  (body 9.19, target head 0.38), target sampling + feature copies 0.25, inject 0.46, host before the draft 0.3, drafter graph
-  1.66 (3 layers 0.55, base logits 0.38, 3 head steps 0.83 of which fold matvec 0.37), logits copy 0.25, host scan 0.29, next
-  target batch 0.26.
-- `ggml_dspark_pick` (new op `GGML_OP_DSPARK_PICK`, CPU + CUDA in `softcap.cu`): per draft position the token and its margin are
-  reduced on the device; the drafter graph returns 2*n ints through the h_nextn output, no logits (3.2 MB copy + host scan gone,
-  and the pool/argmax/concat chain). `LLAMA_DSPARK_PICK=0` restores the round 2 path. Edit max 3: 265 -> 290-297, same 282/302.
-- Merged `inkling-3090-plain` (Codex, tag `p6p-final-215tok`) after its unit went inactive. Plain default on GPU1: 222.7 / 204.0
-  (d0 / d4096). Its short 256-cell attention schedule stays off under `IK_MR`; its shape-specialized attention instance is now
-  also used for window rows and for single tokens under `IK_MR` (K/V rows kernel specialized the same way): `mr_check` 0 rows
-  differ (300- and 1500-token prefixes). `IK_ATTN_FIXED_MR=0` restores the generic instances. Plain with `IK_MMA=3 IK_MR=1`:
-  214.5 / 200.4 (before 211.3 / 196.1).
-- Shortlist head: `perf/p6/shortlist_rank.py` (token frequency over system code + docs through /tokenize; ranking in
-  `perf/p6/shortlist_rank.bin`), `perf/p6/dspark_fold.py TARGET DRAFTER OUT RANK.bin 32768` writes `dspark_short_{head,fold,ids}`;
-  file `~/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf`. Graph: `src/models/dspark.cpp` (pick path),
-  `LLAMA_DSPARK_SHORT=0` scores the full vocabulary. Static list only (no context tokens yet).
+Final numbers (median of 3, `perf/p6/r3_spec.sh`): plain 215 / 204 / 214 / 187 (code / edit / prose / edit@16K); max 3:
+223 / 304 / 167 / 253; max 3 + policy: 225 / 303 / 206 / 251. 28 of 28 drafted replies identical to plain; windows 0 of 257
+rows differ. Plain `llama-bench` 221.35 / 202.63 / 190.40 / 176.04 (default), 213.12 / 199.21 / 188.00 / 173.80 (DSpark flags).
+PPL 3.0530 prefill; decode 4.1979 (default) / 4.2038 (DSpark flags). Live server restored with `bash perf/live/restore-p5.sh`.
 
-In flight: measuring the shortlist; then deferred feature injection on plain steps + policy retune (`adaptive_step` in
-`common/speculative.cpp`), final table (`perf/p6/r3_spec.sh`), RESULTS "Round 3", restore.
+Done (commits after `59449ce`, tags `p6-r3-pick-short-edit-306tok`, `p6-r3-final-edit-304tok`):
+- Round profile: `LLAMA_SPEC_PROF=1` (`perf/p6/r3_prof.sh <n_max> "<kinds>"`; env `DRAFT_FILE`, `PROF=0`, any `IK_*` / `LLAMA_*`),
+  `LLAMA_GRAPH_BUILD_PROF=1`. Round (edit, max 3, nsys): 13.11 -> 11.58 ms; table in RESULTS.
+- `ggml_dspark_pick` (`GGML_OP_DSPARK_PICK`; `ggml.c`, `ggml-cpu/ops.cpp`, `ggml-cuda/softcap.cu`): draft tokens + margins on the
+  device, returned through `h_nextn` (`llama-context.cpp` copies `min(rows, ggml_nbytes)`). `LLAMA_DSPARK_PICK=0` = round 2 path.
+- Shortlist head: `perf/p6/shortlist_rank.py URL OUT.bin` (needs a running llama-server for /tokenize), ranking committed as
+  `perf/p6/shortlist_rank.bin`; `.venv/bin/python perf/p6/dspark_fold.py $Q2 $DRAFT OUT.gguf perf/p6/shortlist_rank.bin 32768`.
+  `LLAMA_DSPARK_SHORT=0` = full vocabulary. Ids are stored as F32 (an I32 weight with `GGML_OP_NONE` is skipped by the loader).
+- Policy rewrite in `common/speculative.cpp` (`adaptive_begin`, `adaptive_window`, `defer_features`, `flush_pending`);
+  `LLAMA_DSPARK_ADAPTIVE_LOG=1` prints steps by kind, costs and chances when the server exits.
+- CUDA graph key includes the graph shape (`IK_GRAPH_KEY_SHAPE=0` = old key).
+- Merge of `inkling-3090-plain`; attention: specialized instance also for windows and under `IK_MR` (`IK_ATTN_FIXED_MR=0` = generic),
+  short schedule off under `IK_MR`.
+
+Next, if someone continues (RESULTS "Not done"): one scan over K/V for all rows of a window (the 16K case: 253 tok/s); a
+graph (scheduler) cache per window size in `llama_context` (0.88 ms per change of size); a device-side accept + drafter commit;
+context tokens in the shortlist; a `test-backend-ops` case for `GGML_OP_DSPARK_PICK`; the unexplained slow server starts
+(about one in ten is 10% slower for its whole life).
 
 ## Round 2 status (2026-11-21, finished)
 
