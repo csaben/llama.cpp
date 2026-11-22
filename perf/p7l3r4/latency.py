@@ -132,7 +132,7 @@ def report(path, depth, steps):
     for excess, name, params, grid, block, calls, us, size, floor in sorted(rankings, reverse=True):
         cfg = lambda dims: 'x'.join(map(str, dims))
         print(f'| {name}{params or ""} | {cfg(grid)} | {cfg(block)} | {calls:g} | {us:.3f} | {us*calls:.2f} | {size:,.0f} | {floor:.3f} | {excess:.2f} |')
-    print(f'\n{sum(row[0] for row in families.values()):g} launches/token.\n')
+    print(f'\n{sum(row[0] for row in families.values()):g} launches/token.')
 
 
 if __name__ == '__main__':

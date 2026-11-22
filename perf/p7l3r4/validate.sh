@@ -64,11 +64,20 @@ case "$1" in
         done
         python3 perf/p7l3r4/summarize.py "$work"/{off,on}-{0,16384}.sqlite >"$out/coverage.txt"
         for depth in 0 16384; do
+            if ((depth)); then echo; fi
             python3 perf/p7l3r4/compare.py "$work/off-$depth.sqlite" "$work/on-$depth.sqlite" "$depth"
         done >"$out/kernel-deltas.md"
-        for depth in 0 16384; do
-            python3 perf/p7l3r4/latency.py "$work/on-$depth.sqlite" "$depth" --mean
-        done >"$out/latency-mean.md"
+        for name in first single mean; do
+            case "$name" in
+                first)  args=(--step 0);;
+                single) args=(--step 64);;
+                mean)   args=(--mean);;
+            esac
+            for depth in 0 16384; do
+                if ((depth)); then echo; fi
+                python3 perf/p7l3r4/latency.py "$work/on-$depth.sqlite" "$depth" "${args[@]}"
+            done >"$out/latency-$name.md"
+        done
         ;;
     *) exit 2 ;;
 esac

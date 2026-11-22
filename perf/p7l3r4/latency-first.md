@@ -127,4 +127,3 @@
 | inkling_moe_sum_conv_kernel | 9x1x1 | 256x1x1 | 48 | 2.284 | 109.63 | 184,356 | 2.707 | -20.32 |
 
 514 launches/token.
-

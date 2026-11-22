@@ -31,7 +31,7 @@ def report(control, candidate, depth):
         us1 = f'{t1/c1:.3f}' if c1 else '-'
         print(f'| {name} | {c0:g}/{c1:g} | {us0}/{us1} | {t0:.2f} | {t1:.2f} | {t0-t1:+.2f} | {t0-floor0:.2f} | {t1-floor1:.2f} |')
     t0, t1 = [sum(t for _, t, _ in data.values()) for data in (before, after)]
-    print(f'\nAll kernel intervals total {t0:.2f} us/token off and {t1:.2f} on.\n')
+    print(f'\nAll kernel intervals total {t0:.2f} us/token off and {t1:.2f} on.')
 
 
 if __name__ == '__main__':
