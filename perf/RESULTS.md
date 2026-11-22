@@ -853,7 +853,17 @@ With natural stopping, the n3 run on the first cache fix (`dca9008`) matched all
 
 Reproduce with `bash perf/p6/r4_spec.sh perf/p6/r4_3000` and `SPEC_MAXT=384 SPEC_REPS=3 bash perf/p6/r4_spec.sh perf/p6/r4_384`. The outputs include timing logs, full JSON messages, raw little-endian int32 token IDs and `equality.txt`. Compare either directory with `SPEC_KINDS=code,edit,prose,edit@16K SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py DIR plain-mr n2 n3 n4 n2-adapt n3-adapt n4-adapt`.
 
-Regression checks and deployment status are in progress.
+#### Plain sampler and regression checks
+
+Turning off `--backend-sampling` in the **non-drafting** server changes edit character 214. The first differing output token is number 46. The backend-sampling run ranks ` There` ahead of ` It` by 0.2517 log-probability units and the other run ranks ` It` ahead by 0.0065. The target decoded the same prompt batches. The serialized sequence states already differ after the first 12 prompt tokens, before any output token was selected. Disabling CUDA fusion (`GGML_CUDA_DISABLE_FUSION=1`) made the 12-, 509- and 1021-token checkpoint hashes and the entire 64-token edit response match across sampler modes. Disabling graph capture and reuse together, or disabling warmup, preserved the original discrepancy. This control isolates a prefill numerical difference independent of the DSpark cache fixes. See `p6/r4_dbg2/` and `p6/r4_checks/sampling.txt`.
+
+All six CLI greedy probes matched Round 3 byte for byte. Eight 2048-token prefill chunks gave PPL 3.0530 for default and window math. Two 1024-token chunks processed one token at a time gave 4.1979 (default) and 4.2038 (window math), matching Round 3 at the reported precision. All 1108 selected CUDA backend tests passed. Paired default decode benchmarks used original `3aea16a` and fixed `06d9abb` libraries in old/new/new/old order. Their mean rates at depths 0/4096/16384/32768 were 219.00/200.91/189.72/175.38 versus 218.95/200.94/189.61/175.43 tok/s. The largest change was 0.06%, inside the observed run variation. Raw logs are in `p6/r4_checks/`.
+
+#### Scheduling verify rows on shared KV tiles
+
+Commit `399b61a` makes the query row the fastest-varying CUDA grid coordinate in multi-row attention. Neighboring blocks read the same KV tile for different queries, improving locality without changing the order of the floating-point sums. No external kernel code was used. On fixed n3 in an old/new/new/old trial, long edit@16K improved from 241.7/241.3 to 255.0/257.4 tok/s (+6.1% on the means), and edit from 268.3/265.2 to 272.3/273.0 (+2.2%). Each run produced the same full message, token IDs and draft counts. Source and measurements are in `ggml/src/ggml-cuda/inkling.cu` and `p6/r4_checks/locality.txt`.
+
+Final throughput and deployment checks for the scheduling change are in progress.
 
 ## Round 3 (2026-11-21, `1c46feb`; flags `IK_MMA=3 IK_MR=1`, drafter file with fold + shortlist head)
 
