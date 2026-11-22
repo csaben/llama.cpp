@@ -5,6 +5,13 @@ applypack-3            d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c4424
 branch-1               d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 branch-2               d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 branch-3               d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+controlled--2          d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+controlled--3          d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+controlled--4          d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+controlled-1           d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+controlled-2           d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+controlled-3           d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+controlled-4           d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 drain--1               d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 drain--2               d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 drain-1                d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
@@ -19,6 +26,10 @@ match-2                d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c4424
 match-3                d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 mixdown-1              d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 mixdown-2              d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+packsync-0             d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+packsync-1             d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+packsync-2             d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+packsync-3             d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 pair-1                 d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 pair-2                 d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 pass-1                 d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
@@ -40,3 +51,8 @@ tile-1                 d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c4424
 tile-2                 d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 tile-4                 d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
 tile-8                 d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+width-0                d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+width-2                d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+width-4                d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+width-8                d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0
+width-direct           d754e91eae657bc81693a2d294ca3034447489e690d8bffbb384c44249223edb  differing_rows=0/64  max_abs=0  argmax_changes=0

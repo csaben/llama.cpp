@@ -1,5 +1,9 @@
 # GPU0 Phase 7 handoff
 
+Round 3 selected source is **812b439**, tagged **p7l3r3-selected-grid-225tok**. It uses two-rank mixed-state down dots, a cooperative controller RMS/pack barrier, and four-row register routing for queried states. Set `IK_DEPENDENCY_FUSION=0` for the Round 2 control. Final default validation is underway. [Round 3 results](RESULTS_LEVER3.md#round-3-on-gpu0), [crossover](p7l3r3/sync-pairs.txt)
+
+## Round 2
+
 Round 2 selected source is **`a4b8d65`**, tagged **`p7l3r2-default-gate`**, on `inkling-3090-lever3`. The matching plain decode on the 82-SM RTX 3090 uses gate/attention overlap automatically. `IK_DENSE_VISIT=0` selects the Round 1 control. The full results include the baseline, same-binary comparisons and source tags for the single-kernel prototypes. [Round 2 results](RESULTS_LEVER3.md#round-2-on-gpu0), [experiment log](#round-2-experiment-log)
 
 Final default tg128 reached **223.07 / 205.20 / 192.18 / 177.46 tok/s** at depths 0 / 4096 / 16384 / 32768, up 3.26-4.36% over the fresh 16264c6 baseline. The 300 tok/s target remains 1.150 ms/token away at depth zero. The incremental same-binary Round 2 gains were 1.73-2.49%. The fastest isolated dot kernel took 2.692 ms. The version with production rounding matched all 2,494,400 rows in 2.775 ms. The best tested single-kernel dense-plus-router extension lost to the two-kernel control by 4.287 us/visit. [Default rates](p7l3r2/default.txt), [paired results](p7l3r2/paired.txt), [exact floor](p7l3r2/bitwise-floor.txt), [router](p7l3r2/resident-router-tune-trace.txt)
