@@ -1818,3 +1818,7 @@ perf/p9/verify.sh matrix build/p9/repeat-matrix
 ```
 
 For each upstream-only matrix the same runner used `P8_LIBS` and `SPEC_SERVER_BIN` pointing at that stage's isolated runtime. Its nine-file manifest is stored alongside the stage's measurements. Each matrix checks repeat consistency, complete assistant-message bytes and ordered token IDs against same-flags plain and the frozen P8m reference. The separate snapshot runner compares four fresh localhost server processes against the release matrix.
+
+### DSpark release verification
+
+All 194 matrix cells matched frozen P8m, including the ordered IDs and complete assistant messages. The 360 drafted replies contained 347,520 generated IDs. Every short repeat agreed with its same-flags plain control. Guarded adaptive cap 6 delivered 304.1 / 329.0 tok/s on the 384 / 3,000-token agent replay, compared with 218.4 / 216.4 plain (+39.2% / +52.0%). All eleven 3,000-token prompts beat plain, with a minimum lift of 22.3%. Seven of the eleven short prompts beat plain. The largest short deficit was 1.56% on dialogue. [All cell rates and digests](p9/matrix/cells.tsv), [frozen-control audit](p9/matrix/audit.txt).
