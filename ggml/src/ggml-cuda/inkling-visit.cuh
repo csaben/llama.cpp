@@ -1,5 +1,6 @@
 // The scan reads Q, relative, sink, K and V first. Its sigmoid gate is needed only at the final store.
-static __device__ __forceinline__ void ik_project_row(const block_iq4_nl * w, const block_q8_1 * x, float * out, int row) {
+template<bool sig>
+static __device__ __forceinline__ void ik_project_row_sig(const block_iq4_nl * w, const block_q8_1 * x, float * out, int row) {
     constexpr int blocks = 2304/QK4_NL;
     const int lane = threadIdx.x%32;
     const int iqs = 2*(lane%2);
@@ -17,7 +18,11 @@ static __device__ __forceinline__ void ik_project_row(const block_iq4_nl * w, co
         }
     }
     const float y = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(partial[0], partial[1]), partial[2]), partial[3]));
-    if (lane == row%2) { out[row] = y; }
+    if (lane == row%2) { out[row] = sig ? 1.0f/(1.0f+expf(-y)) : y; }
+}
+
+static __device__ __forceinline__ void ik_project_row(const block_iq4_nl * w, const block_q8_1 * x,float * out,int row) {
+    ik_project_row_sig<false>(w,x,out,row);
 }
 
 template<int taps>
@@ -268,6 +273,78 @@ static __global__ void __launch_bounds__(512+gates*32) ik_ahead_gate_scan(ik_att
     }
 }
 
+template<bool linear, bool presig>
+static __device__ __forceinline__ void ik_join_tile(const ik_attn_args & a, int g, int qb) {
+    const int h=qb/4, lane=threadIdx.x%32, c=(qb%4)*32+lane, count=a.n_split;
+    const int group=g*3+h;
+    const float * meta=linear ? a.part+8*3*count*128+group*count*2 : a.part+(g*count*3+h)*130+128;
+    const int stride=linear ? 2 : 390;
+    const float * data=linear ? a.part+(group*count)*128+c : a.part+(g*count*3+h)*130+c;
+    float mx=-INFINITY, av=0, den=0;
+    for (int base=0;base<count;base+=8) {
+        const int sp=base+lane;
+        const bool live=lane<8 && sp<count;
+        const float m=live ? meta[sp*stride] : -INFINITY;
+        const float l=live ? meta[sp*stride+1] : 0;
+        float value[8];
+#pragma unroll
+        for (int k=0;k<8;++k) {
+            value[k]=base+k<count ? data[(base+k)*(linear ? 128 : 390)] : 0;
+        }
+        const float next=fmaxf(mx,warp_reduce_max(m));
+        if (next!=-INFINITY) {
+            const float prev=mx!=-INFINITY ? expf(mx-next) : 0.0f;
+            av*=prev; den*=prev;
+            const float coeff=m!=-INFINITY ? expf(m-next) : 0.0f;
+            const unsigned active=__ballot_sync(0xffffffffu,m!=-INFINITY);
+#pragma unroll
+            for (int k=0;k<8;++k) {
+                if (active&(1u<<k)) {
+                    const float v=__shfl_sync(0xffffffffu,coeff,k);
+                    av+=value[k]*v;
+                    den+=__shfl_sync(0xffffffffu,l,k)*v;
+                }
+            }
+        }
+        mx=next;
+    }
+    const int i=384*g+qb*32+lane;
+    const float peak=fmaxf(mx,0.0f), corr=expf(mx-peak);
+    const float gv=a.proj[a.off_gate+i];
+    const float val=av*corr/(den*corr+expf(-peak))*(presig ? gv : 1.0f/(1.0f+expf(-gv)));
+    ik_warp_store_q8_1(val,(block_q8_1 *)a.dst+i/32,lane,true);
+}
+
+template<int taps, int mode>
+static __global__ void __launch_bounds__(384) ik_join_gate_scan(ik_attn_args a,const block_iq4_nl * w,const block_q8_1 * x,int * ctr) {
+    constexpr bool linear=(mode&1)!=0, coop=(mode&2)!=0, presig=(mode&4)!=0;
+    const int t=threadIdx.x,g=blockIdx.x,sp=blockIdx.y;
+    if (t<256) {
+        a.proj_ncols=1;
+        ik_attention_tile<block_q8_0,true,3,true,false,taps,false,false,true,false,!taps,8,false,false,linear ? 2 : 1>(a,g,sp);
+    } else {
+        for (int i=sp*4+(t-256)/32;i<384;i+=a.n_split*4) {
+            const int row=a.off_gate+g*384+i;
+            ik_project_row_sig<presig>(w,x,(float *)a.proj,row);
+        }
+    }
+    if constexpr (coop) {
+        cooperative_groups::this_grid().sync();
+        for (int qb=sp+(t/32)*a.n_split;qb<12;qb+=12*a.n_split) {
+            ik_join_tile<linear,presig>(a,g,qb);
+        }
+    } else {
+        __shared__ int last;
+        __syncthreads();
+        if (t==0) { last=ik_atomic_add_acq_rel(ctr+g,1)==a.n_split-1; }
+        __syncthreads();
+        if (last) {
+            if (!t) { ik_st_relaxed(ctr+g,0); }
+            ik_join_tile<linear,presig>(a,g,t/32);
+        }
+    }
+}
+
 template<int taps>
 static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
@@ -293,6 +370,29 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
         return;
     }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+    static const int join=getenv("IK_JOIN_GATE") ? atoi(getenv("IK_JOIN_GATE")) : 0;
+    if (join && !short_scan && a.n_split>1) {
+        auto run=[&](auto opt) {
+            constexpr int bits=decltype(opt)::value;
+            const auto kernel=ik_join_gate_scan<taps,bits>;
+            if constexpr ((bits&2)!=0) {
+                int resident;
+                CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident,kernel,384,0));
+                if (!ggml_cuda_info().devices[ctx.device].supports_cooperative_launch || 8*a.n_split>resident*ggml_cuda_info().devices[ctx.device].nsm) { return false; }
+                void * params[]={&a,&w,&x,&counters};
+                CUDA_CHECK(cudaLaunchCooperativeKernel((void *)kernel,dim3(8,a.n_split),384,params,0,ctx.stream()));
+            } else { kernel<<<dim3(8,a.n_split),384,0,ctx.stream()>>>(a,w,x,counters); }
+            return true;
+        };
+        if (join==1 && run(std::integral_constant<int,0>{})) { return; }
+        if (join==2 && run(std::integral_constant<int,1>{})) { return; }
+        if (join==3 && run(std::integral_constant<int,2>{})) { return; }
+        if (join==4 && run(std::integral_constant<int,3>{})) { return; }
+        if (join==5 && run(std::integral_constant<int,4>{})) { return; }
+        if (join==6 && run(std::integral_constant<int,5>{})) { return; }
+        if (join==7 && run(std::integral_constant<int,6>{})) { return; }
+        if (join==8 && run(std::integral_constant<int,7>{})) { return; }
+    }
     static const int ahead=getenv("IK_SCORE_AHEAD") ? atoi(getenv("IK_SCORE_AHEAD")) : 0;
     if (ahead && !taps && !short_scan && a.kv_per_split<=256) {
         auto run=[&](auto n,auto order) {

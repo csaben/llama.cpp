@@ -3261,7 +3261,7 @@ static __device__ __forceinline__ bool ik_attention_tail(ik_attn_args a, int g, 
     return true;
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false, int sched = 0, bool subgroup = false, bool ahead = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false, int sched = 0, bool subgroup = false, bool ahead = false, int publish = 0>
 static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -3880,6 +3880,23 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         }
     }
 
+    if constexpr (publish) {
+        if (tid<HD) {
+#pragma unroll
+            for (int h=0;h<G;++h) {
+                if constexpr (publish==2) {
+                    const int row=(g*G+h)*args.n_split+split;
+                    args.part[row*HD+tid]=A[h];
+                    if (!tid) { ((float2 *)(args.part+8*G*args.n_split*HD))[row]=make_float2(M[h],L[h]); }
+                } else {
+                    float * row=args.part+((g*args.n_split+split)*G+h)*(HD+2);
+                    row[tid]=A[h];
+                    if (!tid) { row[HD]=M[h]; row[HD+1]=L[h]; }
+                }
+            }
+        }
+        return;
+    }
     if (args.n_split > 1) {
         // publish the partial result; the last block of the head to arrive combines
         if (tid < HD) {

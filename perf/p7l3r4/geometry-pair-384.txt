@@ -1,0 +1,12 @@
+IK_GATE_THREADS=0 start_C=75
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.87 ± 0.43 |
+build: 812b439 (231)
+IK_GATE_THREADS=384 start_C=81
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        224.33 ± 0.32 |
+build: 812b439 (231)
+IK_GATE_THREADS=384 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        223.66 ± 0.44 |
+build: 812b439 (231)
+IK_GATE_THREADS=0 start_C=80
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.14 ± 0.31 |
+build: 812b439 (231)
