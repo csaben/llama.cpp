@@ -2,7 +2,7 @@
 
 Local runtime `72fd097e` (`p9-runtime`) includes the three safe upstream fixes and direct Q8_0 tiles for SM86 Inkling prefill. At 16K the final profile had zero whole-cache conversions against 3,072 frozen. At 64K the compute buffer fell from 2,078 to 1,816 MiB and process memory fell from 13,034 to 12,772 MiB. Prefill PPL remained 3.0530. The 16K tool turn measured 5.673 s plain and 5.796 s at cap 6.
 
-The all-width loader uses the F16 Stream-K partition. All 432 existing FP32 rows, 128 mixed-width interleaved rows, and the full batch traces matched. Seven CUDA cases passed ordinary execution, memcheck and synccheck. Banded attention and query chunking saved more memory but slowed prefill. The released DSpark policy beat the upstream EMA trial. The remaining release checks and per-fix matrices are in progress. [Phase 9 tables and references](RESULTS.md#phase-9).
+The all-width loader uses the F16 Stream-K partition. All 432 existing FP32 rows, 128 mixed-width interleaved rows, and the full batch traces matched. Seven CUDA cases passed ordinary execution, memcheck and synccheck. Banded attention and query chunking saved more memory but slowed prefill. The released DSpark policy beat the upstream EMA trial. The nine-file snapshot is staged at `~/inkling-live-bin-p9-72fd097`. All hashes and eight loader paths passed. The [manual deployment script](live/deploy-p9.sh) passed its syntax check and has not been run. The remaining release checks, snapshot probes and per-fix matrices are in progress. [Phase 9 tables and references](RESULTS.md#phase-9).
 
 # Phase 8 merge
 
