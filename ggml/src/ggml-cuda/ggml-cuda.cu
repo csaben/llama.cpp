@@ -4578,8 +4578,113 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
     return false;
 }
 
+#if defined(USE_CUDA_GRAPH) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11040
+static __global__ void ik_gap_prefetch(const char * w, size_t stride, size_t bytes, const int32_t * ids, int experts) {
+    const int expert = ids ? ids[blockIdx.y] : blockIdx.y;
+    if ((unsigned) expert >= (unsigned) experts) {
+        return;
+    }
+    w += expert*stride;
+    for (size_t line = blockIdx.x*blockDim.x + threadIdx.x; line*128 < bytes; line += gridDim.x*blockDim.x) {
+        ggml_cuda_prefetch_l2(w + line*128);
+    }
+}
+
+// Attach the weight read to the same predecessors as the glue. Join both before reusing any graph storage.
+struct ik_gap_branch {
+    cudaGraphNode_t branch = nullptr;
+    cudaStream_t stream = nullptr;
+
+    void start(ggml_backend_cuda_context & ctx, const ggml_cgraph * graph, int index, int mask) {
+        const ggml_tensor * glue = graph->nodes[index];
+        int bit = 0;
+        switch (glue->op) {
+            case GGML_OP_RES_MIX:              bit = 1; break;
+            case GGML_OP_LOOP_CTRL_DOWN:       bit = 2; break;
+            case GGML_OP_LOOP_CTRL_APPLY:      bit = 4; break;
+            case GGML_OP_INKLING_ATTN:         bit = 8; break;
+            case GGML_OP_SHORTCONV_RES:        bit = 16; break;
+            case GGML_OP_INKLING_ROUTER:       bit = 32; break;
+            case GGML_OP_GLU:                  bit = 64; break;
+            case GGML_OP_INKLING_MOE_SUM_CONV: bit = 128; break;
+            case GGML_OP_RMS_NORM:             bit = 256; break;
+            default: return;
+        }
+        if (!(mask & bit)) {
+            return;
+        }
+        const ggml_tensor * w = nullptr;
+        const ggml_tensor * ids = nullptr;
+        int slots = 1, experts = 1;
+        for (int j = index + 1; j < graph->n_nodes && !w; ++j) {
+            const ggml_tensor * op = graph->nodes[j];
+            if (!(op->flags & GGML_TENSOR_FLAG_COMPUTE) || ggml_cuda_is_view_or_noop(op)) {
+                continue;
+            }
+            switch (op->op) {
+                case GGML_OP_MUL_MAT:
+                case GGML_OP_LOOP_CTRL_DOWN: w = op->src[0]; break;
+                case GGML_OP_LOOP_CTRL_APPLY: w = op->src[3]; break;
+                case GGML_OP_INKLING_ROUTER: {
+                    int ns = ggml_get_op_params_i32(op, 6);
+                    if (ns < 1 || ns + 2 >= GGML_MAX_SRC) { return; }
+                    w = op->src[ns + 2];
+                    break;
+                }
+                case GGML_OP_MUL_MAT_ID:
+                    w = op->src[0];
+                    if (w->ne[2] != 128 || w->ne[3] != 1) { return; }
+                    experts = 128;
+                    if (bit == 64 && op->src[1] == glue) {
+                        ids = op->src[2];
+                        if (ids->type != GGML_TYPE_I32 || !ggml_is_contiguous(ids) || ggml_nelements(ids) != 8 ||
+                                !ids->buffer || ids->buffer->buft != ggml_backend_cuda_buffer_type(ctx.device)) { return; }
+                        slots = 8;
+                    } else {
+                        slots = experts;
+                    }
+                    break;
+                default: break;
+            }
+        }
+        if (!w || !w->buffer || w->buffer->buft != ggml_backend_cuda_buffer_type(ctx.device) || !ggml_is_contiguous(w)) {
+            return;
+        }
+        static const int kib = getenv("IK_GAP_KIB") ? atoi(getenv("IK_GAP_KIB")) : 1024;
+        static const int blocks = getenv("IK_GAP_BLOCKS") ? atoi(getenv("IK_GAP_BLOCKS")) : 82;
+        size_t stride = ggml_nbytes(w)/experts;
+        size_t bytes = std::min(stride, size_t(std::min(6144, std::max(1, kib)))*1024/slots);
+        const void * address = w->data;
+        const void * selection = ids ? ids->data : nullptr;
+        cudaKernelNodeParams kernel{};
+        void * args[] = { &address, &stride, &bytes, &selection, &experts };
+        kernel.func = (void *) ik_gap_prefetch;
+        kernel.gridDim = dim3(std::min<int>((bytes + 4095)/4096, std::max(1, std::min(1024, std::max(1, blocks))/slots)), slots);
+        kernel.blockDim = dim3(32);
+        kernel.kernelParams = args;
+
+        stream = ctx.stream();
+        cudaStreamCaptureStatus status;
+        cudaGraph_t capture;
+        const cudaGraphNode_t * dependencies;
+        size_t count;
+        CUDA_CHECK(cudaStreamGetCaptureInfo_v2(stream, &status, nullptr, &capture, &dependencies, &count));
+        if (status == cudaStreamCaptureStatusActive) {
+            CUDA_CHECK(cudaGraphAddKernelNode(&branch, capture, dependencies, count, &kernel));
+        }
+    }
+
+    ~ik_gap_branch() {
+        if (branch) {
+            CUDA_CHECK(cudaStreamUpdateCaptureDependencies(stream, &branch, 1, cudaStreamAddCaptureDependencies));
+        }
+    }
+};
+#endif
+
 // try and fuse nodes and return the number of nodes to skip
-static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
+static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i, int gap_mask) {
+    GGML_UNUSED(gap_mask);
 
     if (ggml_cuda_fusion_disabled()) {
         return 0;
@@ -4605,6 +4710,12 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_INKLING_ATTN &&
                 (cgraph->nodes[j]->flags & GGML_TENSOR_FLAG_COMPUTE) && cgraph->nodes[j]->src[0] == node) {
             ggml_cuda_inkling_segmented_projection(*cuda_ctx, node, cgraph->nodes[j]);
+#if defined(USE_CUDA_GRAPH) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11040
+            ik_gap_branch gap;
+            if (gap_mask) {
+                gap.start(*cuda_ctx, cgraph, j, gap_mask);
+            }
+#endif
             ggml_cuda_op_inkling_attn(*cuda_ctx, cgraph->nodes[j]);
             return j - i;
         }
@@ -5559,6 +5670,20 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 stream_ctx.concurrent_events.clear();
             }
 
+            int gap_mask = 0;
+#if defined(USE_CUDA_GRAPH) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11040
+            static const int requested = getenv("IK_GAP_MASK") ? atoi(getenv("IK_GAP_MASK")) : 0;
+            if (requested && use_cuda_graph && !ggml_cuda_env_flag("IK_MR") && !should_launch_concurrent_events &&
+                    ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X) {
+                for (int j = 0; j < cgraph->n_nodes; ++j) {
+                    const ggml_tensor * op = cgraph->nodes[j];
+                    if (op->op == GGML_OP_INKLING_ATTN && ggml_nelements(op->src[6]) == 1) {
+                        gap_mask = requested;
+                        break;
+                    }
+                }
+            }
+#endif
             for (int i = 0; i < cgraph->n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];
 #ifdef USE_CUDA_GRAPH
@@ -5610,7 +5735,13 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     continue;
                 }
 
-                int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
+#if defined(USE_CUDA_GRAPH) && !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11040
+                ik_gap_branch gap;
+                if (gap_mask) {
+                    gap.start(*cuda_ctx, cgraph, i, gap_mask);
+                }
+#endif
+                int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i, gap_mask);
 
                 if (nodes_to_skip != 0) {
 #ifdef GGML_CUDA_DEBUG
