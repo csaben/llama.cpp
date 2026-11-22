@@ -4,7 +4,7 @@ set -euo pipefail
 source perf/p5env.sh
 export CUDA_DEVICE_ORDER=PCI_BUS_ID LD_LIBRARY_PATH="$PWD/build/bin"
 out=${2:-perf/p8/release}
-work=build/p8
+work=${VERIFY_WORK:-build/p8}
 frozen="$HOME/inkling-live-bin-p7c-401460d"
 mkdir -p "$out" "$work"
 release_env() {
@@ -31,7 +31,7 @@ case "${1:?stage}" in
         CHECKS_OUT="$out/$mode" bash perf/p6/r4_checks.sh
         d="$out/$mode"
         check_rows "$d/rows.txt" 11 2714
-        rg -q '1108/1108 tests passed' "$d/ops.txt"
+        rg -q " ${VERIFY_CORE_OPS:-1108}/${VERIFY_CORE_OPS:-1108} tests passed" "$d/ops.txt"
         for label in plain plain-mr; do
             diff -r "perf/p7c/release/$mode/$label" "$d/$label"
             for ppl in prefill decode; do
@@ -77,7 +77,7 @@ case "${1:?stage}" in
             echo "$ops"
             rg 'tests passed|Backend CUDA0.*OK' "$work/ops-$ops.log" | sed -E 's/\x1B\[[0-9;]*[mK]//g'
         done >"$out/ops.txt"
-        for n in 3777 162 5 44; do rg -q " $n/$n tests passed" "$out/ops.txt"; done ;;
+        for n in "${VERIFY_MATRIX_OPS:-3777}" 162 5 44; do rg -q " $n/$n tests passed" "$out/ops.txt"; done ;;
     sync)
         for setting in default mr; do
             flags=()

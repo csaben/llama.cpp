@@ -2,7 +2,7 @@
 # Usage: probe.sh OUTPUT LABEL WIDTH [additional server flags].
 set -eu -o pipefail
 : "${SPEC_PORT:?source perf/p8bc/env.sh first}"
-[[ $GPU == 0 && $CUDA_VISIBLE_DEVICES == 0 ]]
+[[ $GPU == "${P8_GPU:-0}" && $CUDA_VISIBLE_DEVICES == "$GPU" ]]
 out=$1
 label=$2
 width=$3

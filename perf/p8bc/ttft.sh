@@ -17,7 +17,7 @@ if (( ${DRAFT_WIDTH:-0} )); then
     args+=(--spec-type draft-dspark --spec-draft-model "$P8_DRAFT" --spec-draft-n-max "$DRAFT_WIDTH" --spec-draft-p-min 0)
 fi
 # Warm the same server before timing three uncached requests at each context.
-build/bin/llama-server -m "$Q2" -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 65536 -np 1 --backend-sampling "${args[@]}" -b 2048 -ub "${UB:-512}" --port 18432 --host 127.0.0.1 >"$out/server.log" 2>&1 &
+"${SPEC_SERVER_BIN:-build/bin/llama-server}" -m "$Q2" -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 65536 -np 1 --backend-sampling "${args[@]}" -b 2048 -ub "${UB:-512}" --port 18432 --host 127.0.0.1 >"$out/server.log" 2>&1 &
 server=$!
 trap 'kill "$server" 2>/dev/null || :; wait "$server" || :' EXIT
 for ((i=0; i<120; i++)); do

@@ -1627,3 +1627,7 @@ Source `66eadaf` (`p8a-runtime`) is staged at `~/inkling-live-bin-p8-66eadaf`. T
 All 270 drafted replies and 260,640 token IDs across the six matrices matched same-flags plain and frozen p7c. This includes the 60 forced-width controls. Independent snapshot tests on port 8041 matched another 20 drafted replies and 7,680 IDs. Plain before / after measured 221.8 / 225.5 and 221.2 / 224.9 tok/s on edit / prose. Guarded cap 3 measured 351.6 / 224.7 with adaptation unset and 351.5 / 225.2 with explicit adaptation. Short prose can favor the faster plain path. The existing DSpark policy and folded 32K drafter were used throughout. [All six tables](p8/release/matrices.md), [snapshot tests](p8/release/snapshot-probes/), [release verification driver](p8/verify.sh).
 
 The manual deployment script was syntax-checked and left unexecuted. It selects physical GPU1, one 64K slot and guarded adaptive cap 3, verifies all nine runtime files before stopping the unit, and restores Phase 5 on startup or health failure. [Deploy script](live/deploy-p8.sh), [fallback](live/restore-p5.sh).
+
+## Phase 8 merge
+
+Combined runtime source `f7f505c` (`p8m-merged`), physical GPU1 (03:00.0). Verification in progress.
