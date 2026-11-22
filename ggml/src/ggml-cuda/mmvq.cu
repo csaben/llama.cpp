@@ -1953,6 +1953,52 @@ static __global__ void ik_mmvq_mr_pairs(
     }
 }
 
+// One warp reads two weight rows for the whole window. Sum the four partials in single-token order.
+template <int NC, int K>
+static __global__ void ik_iq4_nl_window(const void * weights, const block_q8_1 * x, float * dst,
+        uint32_t rows, uint32_t weight_stride, uint32_t x_stride, uint32_t dst_stride) {
+    constexpr int lanes = QI4_NL/VDR_IQ4_NL_Q8_1_MMVQ;
+    const int lane = threadIdx.x;
+    const uint32_t row = 2*(blockIdx.x*blockDim.y + threadIdx.y);
+    if (row >= rows) {
+        return;
+    }
+    const int iqs = (lane % lanes)*VDR_IQ4_NL_Q8_1_MMVQ;
+    float sums[NC][2] = {};
+#pragma unroll
+    for (int w = 0; w < 4; ++w) {
+        float partial[NC][2] = {};
+#pragma unroll
+        for (int k = (32*w + lane)/lanes; k < K/QK4_NL; k += 4*32/lanes) {
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+                const auto wd = ik_iq4_nl_decode(weights, (row + r)*weight_stride + k, iqs);
+#pragma unroll
+                for (int t = 0; t < NC; ++t) {
+                    partial[t][r] += ik_iq4_nl_dot(wd, x + t*x_stride + k, iqs);
+                }
+            }
+        }
+#pragma unroll
+        for (int t = 0; t < NC; ++t) {
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+                sums[t][r] = w == 0 ? partial[t][r] : __fadd_rn(sums[t][r], partial[t][r]);
+            }
+        }
+    }
+#pragma unroll
+    for (int t = 0; t < NC; ++t) {
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const float sum = warp_reduce_sum<32>(sums[t][r]);
+            if (lane == r) {
+                dst[t*dst_stride + row + r] = sum;
+            }
+        }
+    }
+}
+
 template <ggml_type type>
 static void ik_mmvq_mr_launch(
         const void * vx, const block_q8_1 * vy, const int32_t * ids, const int32_t * plan, float * dst, const uint32_t ncols_x, const uint32_t nrows_x,
@@ -1968,6 +2014,25 @@ static void ik_mmvq_mr_launch(
     const int  n_slots = ids ? n_tok*n_used : 1;
     // IK_MR_GROUPED=1: the grouped kernel (each distinct expert read once) instead of a warp per pair
     static const bool grouped = getenv("IK_MR_GROUPED") && atoi(getenv("IK_MR_GROUPED")) != 0;
+    if constexpr (type == GGML_TYPE_IQ4_NL) {
+        if (!ids && !small_k && nwarps1 == 4 && nrows_x % 2 == 0 && (ncols_x == 2304 || ncols_x == 3072) && n_tok >= 2 && n_tok <= 4) {
+            const dim3 grid((nrows_x + 7)/8), block(32, 4);
+            auto launch = [&](auto cols) {
+                constexpr int nc = decltype(cols)::value;
+                if (ncols_x == 2304) {
+                    ik_iq4_nl_window<nc, 2304><<<grid, block, 0, stream>>>(vx, vy, dst, nrows_x, stride_row_x, y_stride_tok, dst_stride_tok);
+                } else {
+                    ik_iq4_nl_window<nc, 3072><<<grid, block, 0, stream>>>(vx, vy, dst, nrows_x, stride_row_x, y_stride_tok, dst_stride_tok);
+                }
+            };
+            switch (n_tok) {
+                case 2: launch(std::integral_constant<int, 2>{}); break;
+                case 3: launch(std::integral_constant<int, 3>{}); break;
+                case 4: launch(std::integral_constant<int, 4>{}); break;
+            }
+            return;
+        }
+    }
     if (ids && !grouped) {
         const dim3 grid((nrows_x + 1)/2, n_used, 1), block(warp_size, n_tok, 1);
         if (small_k) {
