@@ -3,9 +3,14 @@
 set -euo pipefail
 . perf/p5env.sh
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0 LD_LIBRARY_PATH="$PWD/build/bin"
-work=build/p7l3r3
-mkdir -p "$work" perf/p7l3r3
-out=perf/p7l3r3
+work=${P7L3R3_WORK:-build/p7l3r3}
+out=${P7L3R3_OUT:-perf/p7l3r3}
+mkdir -p "$work" "$out"
+if [[ ${P7L3R3_DEFAULT:-0} == 1 ]]; then
+    unset IK_DEPENDENCY_FUSION
+else
+    export IK_DEPENDENCY_FUSION=1
+fi
 base="$PWD/build/p7l3r2/baseline-16264c6/obj/bin"
 common=(-m "$Q2" -ngl 99 -ctk q8_0 -ctv q8_0)
 bench=(-fa 1 -p 0 -n 128 -r 3)
@@ -19,15 +24,14 @@ cool() {
     done
     echo "start_temp_C=$temp"
 }
-bench_one() {
+bench_one() (
     local version=$1 depth=$2 bin="$PWD/build/bin"
     if [[ $version == base ]]; then bin=$base; fi
-    local enabled=1
-    if [[ $version == off ]]; then enabled=0; fi
+    if [[ $version == off ]]; then export IK_DEPENDENCY_FUSION=0; fi
     echo "version=$version depth=$depth"
     cool
-    IK_DEPENDENCY_FUSION=$enabled LD_LIBRARY_PATH="$bin" "$bin/llama-bench" "${common[@]}" "${bench[@]}" -d "$depth"
-}
+    LD_LIBRARY_PATH="$bin" "$bin/llama-bench" "${common[@]}" "${bench[@]}" -d "$depth"
+)
 case "$1" in
     bench)
         for version in base on; do
@@ -45,12 +49,12 @@ case "$1" in
             for workload in prefill decode; do
                 args=(-c 2048 -b 2048 --chunks 8)
                 if [[ $workload == decode ]]; then args=(-c 1024 -b 1024 -ub 1 --chunks 2); fi
-                IK_DEPENDENCY_FUSION=1 LD_LIBRARY_PATH="$bin" "$bin/llama-perplexity" "${common[@]}" "${ppl[@]}" "${args[@]}" >"$work/$version-$workload.log" 2>&1
+                LD_LIBRARY_PATH="$bin" "$bin/llama-perplexity" "${common[@]}" "${ppl[@]}" "${args[@]}" >"$work/$version-$workload.log" 2>&1
             done
             for prefix in 200 4096 16384 32768; do
                 rows=8
                 if [[ $prefix == 200 ]]; then rows=64; fi
-                IK_DEPENDENCY_FUSION=1 LD_LIBRARY_PATH="$bin" "$work/logits" "$Q2" perf/ppl.txt "$prefix" "$rows" >"$work/$version-$prefix.bin" 2>"$work/$version-$prefix.log"
+                LD_LIBRARY_PATH="$bin" "$work/logits" "$Q2" perf/ppl.txt "$prefix" "$rows" >"$work/$version-$prefix.bin" 2>"$work/$version-$prefix.log"
                 test "$(stat -c %s "$work/$version-$prefix.bin")" -eq "$((rows*200058*4))"
             done
         done
@@ -61,7 +65,7 @@ case "$1" in
         done >"$out/logits.txt"
         ;;
     mr)
-        export IK_DEPENDENCY_FUSION=1 IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=4
+        export IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=4
         g++ -O2 -std=c++17 -Wno-deprecated-declarations perf/p6/mr_check.cpp -Iinclude -Iggml/include -Lbuild/bin -lllama -lggml -lggml-base -o "$work/mr_check"
         gzip -dc perf/p6/r4_repro/n3.trace.gz >"$work/r4.trace"
         (
@@ -80,7 +84,6 @@ case "$1" in
         if rg -F -v ': 0 rows differ from single-token decode, max |logit diff| 0' "$out/mr.txt"; then exit 1; fi
         ;;
     ops)
-        export IK_DEPENDENCY_FUSION=1
         for ops in MUL_MAT,MUL_MAT_ID INKLING_ATTN,INKLING_ROUTER,SHORTCONV_RES,RES_MIX,LOOP_CTRL_DOWN,LOOP_CTRL_APPLY SITU CONCAT; do
             args=()
             # The expert sum and shortconv fixtures concatenate the state and output.
