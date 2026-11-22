@@ -1,0 +1,6 @@
+plain          code      prompt     47  3000 tok   219.3 tok/s    9296 chars
+plain          edit      prompt   1025  3000 tok   217.3 tok/s    9009 chars
+plain          prose     prompt     36  3000 tok   219.1 tok/s   10905 chars
+plain          edit@16K  prompt  16044  3000 tok   200.5 tok/s    4508 chars
+plain          edit@32K  prompt  32045  3000 tok   185.1 tok/s    2271 chars
+plain          agent     prompt   2025  3000 tok   217.4 tok/s    6154 chars
