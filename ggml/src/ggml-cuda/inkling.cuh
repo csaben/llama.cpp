@@ -19,3 +19,4 @@ void ggml_cuda_op_inkling_proj(ggml_backend_cuda_context & ctx, ggml_tensor * ds
 void ggml_cuda_inkling_segmented_projection(ggml_backend_cuda_context & ctx, ggml_tensor * projection, const ggml_tensor * attn);
 bool ggml_cuda_inkling_segmented_projection_rows(ggml_backend_cuda_context & ctx, ggml_tensor * projection, int q_rows, int n_tok);
 bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+bool ggml_cuda_inkling_resident_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);

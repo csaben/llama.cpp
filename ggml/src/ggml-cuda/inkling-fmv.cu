@@ -10,6 +10,8 @@
 // the kernel is replayable from a CUDA graph.
 
 #include "inkling.cuh"
+#include "cp-async.cuh"
+#include "unary.cuh"
 #include "ggml-cuda.h"
 #include "inkling-common.cuh"
 #include "vecdotq.cuh"
@@ -947,5 +949,155 @@ bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     }
     ik_q2_down_rows<<<dim3(2304/8, 8), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
             (const block_q2_0 *) w->data, (const block_q8_1 *) x->data, (const int32_t *) ids->data, (float *) dst->data);
+    return true;
+}
+
+// Each slot has a SITU producer and a queue of two-row down-projection tiles.
+// The workers fetch the first tile while the producer quantizes the activation.
+template <int warps, bool stage>
+static __global__ void ik_resident_down(const block_q2_0 * weights, const float * gate, const float * up,
+        int gate_stride, int up_stride, float beta, float lb, const int32_t * ids, float * out, block_q8_1 * activation, int * counters, bool all) {
+    constexpr int width = 1152;
+    constexpr int blocks = width/QK2_0;
+    constexpr int tile_rows = 2*warps;
+    constexpr int tile_bytes = tile_rows*blocks*sizeof(block_q2_0);
+    const int slot = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int lane = tid % WARP_SIZE;
+    const int warp = tid/WARP_SIZE;
+    activation += slot*(width/QK8_1);
+    int * flag = counters + 2*slot;
+    if (blockIdx.x == 0) {
+        for (int j = tid; j < width; j += warps*WARP_SIZE) {
+            float v = ggml_cuda_op_situ_single(gate[slot*gate_stride + j], up[slot*up_stride + j], beta, lb);
+            ik_warp_store_q8_1(v, activation + j/QK8_1, lane, true);
+        }
+        __syncthreads();
+        if (tid == 0) {
+            __threadfence();
+            if (all) { ik_atomic_add_acq_rel(counters + 16, 1); }
+            else { ik_st_relaxed(flag, 1); }
+        }
+        return;
+    }
+
+    const int workers = gridDim.x - 1;
+    const int tile = blockIdx.x - 1;
+    weights += ids[slot]*2304*blocks;
+    __shared__ __align__(16) char tiles[stage ? 2*tile_bytes : 1];
+    auto fetch = [&](int t, int page) {
+        const char * src = (const char *) weights + t*tile_bytes;
+        for (int i = tid*16; i < tile_bytes; i += warps*WARP_SIZE*16) {
+            cp_async_cg_16<0>(ggml_cuda_cvta_generic_to_shared(tiles + page*tile_bytes + i), src + i);
+        }
+        cp_async_commit_group();
+    };
+    if constexpr (stage) {
+        fetch(tile, 0);
+    }
+    if (all) {
+        if (tid == 0) { while (ik_ld_acquire(counters + 16) != 8) { __nanosleep(32); } }
+        __syncthreads();
+    } else {
+        ik_wait_flag(flag);
+    }
+    __shared__ block_q8_1 x[width/QK8_1];
+    for (int j = tid; j < int(sizeof(x)/sizeof(int)); j += warps*WARP_SIZE) {
+        ((int *) x)[j] = ((const int *) activation)[j];
+    }
+    __syncthreads();
+    int page = 0;
+    for (int t = tile; t < 2304/tile_rows; t += workers) {
+        const block_q2_0 * w = weights + t*tile_rows*blocks;
+        if constexpr (stage) {
+            cp_async_wait_all();
+            __syncthreads();
+            if (t + workers < 2304/tile_rows) {
+                fetch(t + workers, page ^ 1);
+            }
+            w = (const block_q2_0 *) (tiles + page*tile_bytes);
+        }
+        const int row = 2*warp;
+        float sums[2] = {};
+#pragma unroll
+        for (int start = 0; start < blocks*QI2_0; start += WARP_SIZE) {
+            int b = (start + lane)/QI2_0;
+            if (b < blocks) {
+#pragma unroll
+                for (int r = 0; r < 2; ++r) {
+                    float v = vec_dot_q2_0_q8_1(w, x + b*(QK2_0/QK8_1), (row + r)*blocks + b, lane % QI2_0);
+                    sums[r] = __fadd_rn(sums[r], v);
+                }
+            }
+        }
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            float v = warp_reduce_sum(sums[r]);
+            if (lane == (row + r)%4) {
+                out[slot*2304 + t*tile_rows + row + r] = v;
+            }
+        }
+        if constexpr (stage) {
+            __syncthreads();
+            page ^= 1;
+        }
+    }
+    __syncthreads();
+    if (all) { flag = counters + 16; }
+    if (tid == 0 && ik_atomic_add_acq_rel(flag + 1, 1) == (all ? workers*8 : workers) - 1) {
+        flag[0] = 0;
+        flag[1] = 0;
+    }
+}
+
+template <int warps, bool stage>
+static void ik_launch_resident_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int desired) {
+    const auto * situ = dst->src[1];
+    const void * w = dst->src[0]->data, * gate = situ->src[0]->data, * up = situ->src[1]->data;
+    int gs = situ->src[0]->nb[1]/sizeof(float), us = situ->src[1]->nb[1]/sizeof(float);
+    float beta = ggml_get_op_params_f32(situ, 2), lb = ggml_get_op_params_f32(situ, 3);
+    const void * ids = dst->src[2]->data;
+    void * out = dst->data;
+    ggml_cuda_pool_alloc<block_q8_1> scratch(ctx.pool(), 8*(1152/QK8_1));
+    auto * x = scratch.get();
+    int * counters = ik_counters(ctx, 192, 18);
+    auto overlaps = [&](const ggml_tensor * src) {
+        return (uintptr_t) src->data < (uintptr_t) dst->data + ggml_nbytes(dst) &&
+               (uintptr_t) dst->data < (uintptr_t) src->data + ggml_nbytes(src);
+    };
+    bool all = overlaps(situ->src[0]) || overlaps(situ->src[1]);
+    auto kernel = ik_resident_down<warps, stage>;
+    int active;
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, kernel, warps*WARP_SIZE, 0));
+    const int workers = std::min({desired, active*ggml_cuda_info().devices[ctx.device].nsm/8 - 1, 2304/(2*warps)});
+    GGML_ASSERT(workers > 0);
+    void * args[] = { &w, &gate, &up, &gs, &us, &beta, &lb, &ids, &out, &x, &counters, &all };
+    CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, dim3(workers + 1, 8), warps*WARP_SIZE, args, 0, ctx.stream()));
+}
+
+bool ggml_cuda_inkling_resident_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const auto * w = dst->src[0], * situ = dst->src[1], * ids = dst->src[2];
+    const auto * gate = situ->src[0], * up = situ->src[1];
+    if (!gate || !up || gate->type != GGML_TYPE_F32 || up->type != GGML_TYPE_F32 || !ggml_are_same_shape(gate, up) ||
+            !ggml_are_same_shape(gate, situ) || !ggml_is_matrix(situ) || !ggml_is_contiguous_1(gate) || !ggml_is_contiguous_1(up) ||
+            gate->nb[0] != sizeof(float) || up->nb[0] != sizeof(float) || gate->nb[1] > INT_MAX || up->nb[1] > INT_MAX ||
+            gate->nb[1] % sizeof(float) || up->nb[1] % sizeof(float) || situ->ne[0] != 1152 || situ->ne[1] != 8 ||
+            situ->type != GGML_TYPE_Q8_1 || w->type != GGML_TYPE_Q2_0 || w->ne[0] != 1152 || w->ne[1] != 2304 ||
+            w->ne[2] != 128 || w->ne[3] != 1 || !ggml_is_contiguous(w) || (uintptr_t) w->data % 16 ||
+            !ggml_is_matrix(dst) || dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst) ||
+            !ggml_is_vector(ids) || ids->ne[0] != 8 || ids->type != GGML_TYPE_I32 || !ggml_is_contiguous(ids) ||
+            !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device)) {
+        return false;
+    }
+    static const int workers = getenv("IK_RD_WORKERS") ? std::max(1, atoi(getenv("IK_RD_WORKERS"))) : 32;
+    static const int warps = getenv("IK_RD_WARPS") ? atoi(getenv("IK_RD_WARPS")) : 4;
+    static const bool stage = !getenv("IK_RD_STAGE") || atoi(getenv("IK_RD_STAGE")) != 0;
+    if (warps == 8) {
+        if (stage) { ik_launch_resident_down<8, true>(ctx, dst, workers); }
+        else       { ik_launch_resident_down<8, false>(ctx, dst, workers); }
+    } else {
+        if (stage) { ik_launch_resident_down<4, true>(ctx, dst, workers); }
+        else       { ik_launch_resident_down<4, false>(ctx, dst, workers); }
+    }
     return true;
 }
