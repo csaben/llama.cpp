@@ -38,12 +38,16 @@ try:
         PROMPTS.append(("edit@16K", doc + "\n\nCopy the first function defined in the source above exactly, then add a one-line comment above each of its statements. Output only the code."))
     for kind, p in PROMPTS:
         body = {"model": "x", "messages": [{"role": "user", "content": p}], "max_tokens": 384, "temperature": 0, "seed": 1, "cache_prompt": False}
-        r = post("/v1/chat/completions", body)
+        # SPEC_REPS=n: the request n times; the median run is reported, all rates are listed
+        runs = [post("/v1/chat/completions", body) for _ in range(int(os.environ.get("SPEC_REPS", "1")))]
+        runs.sort(key=lambda x: x["timings"]["predicted_per_second"])
+        r = runs[len(runs)//2]
         t = r["timings"]
         if os.environ.get("SPEC_OUT"):  # keep the reply, to compare drafted against plain output
             os.makedirs(os.environ["SPEC_OUT"], exist_ok=True)
             open(os.path.join(os.environ["SPEC_OUT"], f"{label}.{kind}.txt"), "w").write(r["choices"][0]["message"].get("content") or "")
         acc = f"  accepted/proposed {t.get('draft_n_accepted')}/{t.get('draft_n')}" if t.get("draft_n") else ""
-        print(f"{label:14s} {kind:9s} prompt {t['prompt_n']:6d}  {t['predicted_n']:4d} tok  {t['predicted_per_second']:6.1f} tok/s{acc}", flush=True)
+        allr = "  runs " + "/".join(f"{x['timings']['predicted_per_second']:.0f}" for x in runs) if len(runs) > 1 else ""
+        print(f"{label:14s} {kind:9s} prompt {t['prompt_n']:6d}  {t['predicted_n']:4d} tok  {t['predicted_per_second']:6.1f} tok/s{acc}{allr}", flush=True)
 finally:
     proc.terminate(); proc.wait()

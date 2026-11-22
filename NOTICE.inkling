@@ -56,3 +56,15 @@ after the integer sums, a CUDA-core variant with exact block sums, no programmat
 
 perf/p6/dspark_fold.py and the folded head in src/models/dspark.cpp take the idea of basalt's head fold
 (https://github.com/jesdga95/basalt, MIT, src/models/inkling2/dspark.hpp); no code was copied.
+
+--------------------------------------------------------------------------------
+Phase 6 round 3 (perf/RESULTS.md "Phase 6", "Round 3"), ideas only, no code or data copied:
+
+The drafter's shortlist head (perf/p6/shortlist_rank.py, perf/p6/dspark_fold.py, src/models/dspark.cpp) follows the
+idea of ingine's shortlist head (native/src/model/drafter.h, native/tools/build_draft_shortlist.py; Apache-2.0,
+copyright and link above): base logits scored over the most frequent tokens only. The ranking in
+perf/p6/shortlist_rank.bin was built here from system files with this model's tokenizer.
+
+The window policy in common/speculative.cpp (LLAMA_DSPARK_ADAPTIVE) follows the idea of basalt's draft policy
+(https://github.com/jesdga95/basalt, MIT, src/spec/draft_policy.cpp): costs per window size learned online, draft
+chances calibrated per confidence bin, the window maximizing expected tokens per ms.
