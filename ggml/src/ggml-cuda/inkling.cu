@@ -1811,7 +1811,6 @@ struct ik_attn_args {
     float qk_clip, rel_clip, norm_eps, tau_alpha, tau_floor, kq_scale, clip_eps;
     int64_t off_rel, off_sink, off_gate, off_k, off_ktaps, off_v, off_vtaps;
     int64_t c_relclip, c_kconv, c_vconv, c_table;
-    float * scan_scores;
     float * part;  // [n_head_kv, n_split, gqa, HD + 2]: the partial sums, max and denominator of each split
     int   * counters;
     int     ext_scan; // the cells were scanned by inkling_attn_scan_kernel (parts 0 .. n_split - 2); this kernel adds the current cell
@@ -2470,13 +2469,15 @@ static __device__ __forceinline__ void ik_mma_init(ik_mma_lane<G> & st, const fl
 // yet) count. The Q8_0 rows of the kv head are at kb + row*k_nb2 and vb + row*v_nb2, row = min(cell - row0, row_max):
 // the cache itself, or a tile of it in shared memory.
 template <int G>
-static __device__ __forceinline__ void ik_mma_scores(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
-        const char * kb, const int64_t k_nb2, const int row0, const int row_max,
-        const int kt, const int w1, const int64_t kv_idx, float (&s)[2]) {
+static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
+        const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
+        const int kt, const int w1, const int64_t kv_idx) {
+    constexpr float PS = IK_MMA_PS;
     const int  lane = threadIdx.x % WARP_SIZE;
     const int  gr = lane >> 2, tq = lane & 3;
-    const int ht = min(tq, G - 1);
-    const bool head_ok = tq < G;
+    const int  hq = min(gr >> 1, G - 1), ht = min(tq, G - 1);
+    const bool col_ok = (gr >> 1) < G, head_ok = tq < G;
+    const bool lo_limb = gr & 1;
     const float * table = args.consts + args.c_table;
     const int     n_rel = args.n_rel;
     const int     last  = args.n_kv - 1;
@@ -2506,8 +2507,23 @@ static __device__ __forceinline__ void ik_mma_scores(const ik_attn_args & args, 
         mk[i] = head_ok && cell < w1 && cell != kv_idx ? mv : -INFINITY;
         dk[i] = args.rel_pos[cc];
     }
+    uint32_t vh[4][2], vl[4][2], vq[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
+        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
+#pragma unroll
+        for (int P = 0; P < 2; ++P) {
+            vh[i][P] = r.head(P);
+            vl[i][P] = r.tail(P);
+        }
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+            vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
+        }
+    }
     // ---- Q K^T: C[16 cells][8 columns] += A[16 cells][16 dims] B[16 dims][8 columns], block by block ----
-    s[0] = 0; s[1] = 0;
+    float s[2] = { 0.0f, 0.0f };
 #pragma unroll
     for (int b = 0; b < 4; ++b) {
         float cb[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -2541,43 +2557,6 @@ static __device__ __forceinline__ void ik_mma_scores(const ik_attn_args & args, 
 #pragma unroll
     for (int i = 0; i < 2; ++i) {
         s[i] = mk[i] == -INFINITY ? -INFINITY : args.kq_scale*s[i] + bias[i] - st.sink + mk[i];
-    }
-}
-
-template <int G, bool cached = false>
-static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
-        const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
-        const int kt, const int w1, const int64_t kv_idx, int group = 0) {
-    constexpr float PS = IK_MMA_PS;
-    const int  lane = threadIdx.x % WARP_SIZE;
-    const int  gr = lane >> 2, tq = lane & 3;
-    const int hq = min(gr >> 1, G - 1);
-    const bool col_ok = (gr >> 1) < G, head_ok = tq < G;
-    const bool lo_limb = gr & 1;
-    float s[2];
-    if constexpr (cached) {
-#pragma unroll
-        for (int j = 0; j < 2; ++j) {
-            const int cell = kt + gr + j*8;
-            s[j] = head_ok && cell < w1 ? args.scan_scores[(group*args.n_kv + cell)*4 + tq] : -INFINITY;
-        }
-    } else {
-        ik_mma_scores(args, st, s_r, kb, k_nb2, row0, row_max, kt, w1, kv_idx, s);
-    }
-    uint32_t vh[4][2], vl[4][2], vq[4][4];
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
-        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
-#pragma unroll
-        for (int P = 0; P < 2; ++P) {
-            vh[i][P] = r.head(P);
-            vl[i][P] = r.tail(P);
-        }
-#pragma unroll
-        for (int b = 0; b < 4; ++b) {
-            vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
-        }
     }
     float mx = fmaxf(s[0], s[1]); // over the lanes of the same head
 #pragma unroll
@@ -2666,7 +2645,105 @@ static __device__ __forceinline__ void ik_scan_sync() {
     }
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool prepared = false, bool cached = false>
+template<bool subset, bool ungated>
+static __device__ __forceinline__ bool ik_attention_tail(ik_attn_args a, int g, int split, float (&m)[3][8],
+        float (&l)[3][8], float (&acc)[3][8][128], int * gate_count, int gate_producers) {
+    const int t = threadIdx.x, lane = t%32;
+    float out[2], maxv[2], den[2];
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const int id = t + 256*j, h = id/128, c = id%128;
+        if (id < 384) {
+            const float mw = lane < 8 ? m[h][lane] : -INFINITY;
+            const float mx = warp_reduce_max(mw);
+            const float cw = mw == -INFINITY ? 0.0f : expf(mw-mx);
+            const int valid = __ballot_sync(0xffffffffu, mw != -INFINITY);
+            float av = 0, lv = 0;
+#pragma unroll
+            for (int w = 0; w < 8; ++w) {
+                if (valid & (1 << w)) {
+                    const float coeff = __shfl_sync(0xffffffffu, cw, w);
+                    av += acc[h][w][c]*coeff;
+                    lv += l[h][w]*coeff;
+                }
+            }
+            out[j] = av;
+            maxv[j] = mx;
+            den[j] = lv;
+            if (a.n_split > 1) {
+                float * row = a.part + ((g*a.n_split + split)*3+h)*130;
+                row[c] = av;
+                if (c == 0) { row[128] = mx; row[129] = lv; }
+            }
+        }
+    }
+    if (a.n_split > 1) {
+        __shared__ int last;
+        ik_scan_sync<subset>();
+        if (t == 0) { last = ik_atomic_add_acq_rel(a.counters+g, 1) == a.n_split-1; }
+        ik_scan_sync<subset>();
+        if (!last) { return false; }
+        if (t == 0) { ik_st_relaxed(a.counters+g, 0); }
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            const int id = t+256*j, h = id/128, c = id%128;
+            if (id < 384) {
+                float mx = -INFINITY, av = 0, lv = 0;
+                const float * p = a.part + (g*a.n_split*3+h)*130;
+                for (int sp = 0; sp < a.n_split; sp += 8) {
+                    const bool live = lane < 8 && sp+lane < a.n_split;
+                    const float sm = live ? p[(sp+lane)*390+128] : -INFINITY;
+                    const float sl = live ? p[(sp+lane)*390+129] : 0.0f;
+                    const float next = fmaxf(mx, warp_reduce_max(sm));
+                    if (next != -INFINITY) {
+                        const float prev = mx != -INFINITY ? expf(mx-next) : 0.0f;
+                        lv *= prev;
+                        av *= prev;
+                        const float sc = sm == -INFINITY ? 0.0f : expf(sm-next);
+                        const int valid = __ballot_sync(0xffffffffu, sm != -INFINITY);
+#pragma unroll
+                        for (int k = 0; k < 8; ++k) {
+                            if (valid & (1 << k)) {
+                                const float coeff = __shfl_sync(0xffffffffu, sc, k);
+                                av += p[(sp+k)*390+c]*coeff;
+                                lv += __shfl_sync(0xffffffffu, sl, k)*coeff;
+                            }
+                        }
+                        mx = next;
+                    }
+                }
+                out[j] = av;
+                maxv[j] = mx;
+                den[j] = lv;
+            }
+        }
+    }
+    if (gate_count) {
+        if (t == 0) {
+            while (ik_ld_acquire(gate_count) != gate_producers) {}
+            ik_st_relaxed(gate_count, 0);
+        }
+        ik_scan_sync<subset>();
+    }
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const int id = t+256*j;
+        if (id < 384) {
+            const int c = 384*g+id;
+            const float mx = fmaxf(maxv[j], 0.0f);
+            const float corr = expf(maxv[j]-mx);
+            const float v = out[j]*corr/(den[j]*corr + expf(-mx));
+            if constexpr (ungated) {
+                ((float *) a.dst)[c] = v;
+            } else {
+                ik_warp_store_q8_1(v*(1.0f/(1.0f+expf(-a.proj[a.off_gate+c]))), (block_q8_1 *) a.dst+c/32, lane, true);
+            }
+        }
+    }
+    return true;
+}
+
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false>
 static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -2768,7 +2845,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     const int     n_conv = args.n_conv;
     const int64_t ch     = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
     float cur_in, w_c[8], taps[8];
-    if constexpr (!MR && !prepared) {
+    if constexpr (!MR) {
         const int64_t off  = which ? args.off_v : args.off_k;
         const int64_t offt = which ? args.off_vtaps : args.off_ktaps;
         const int     col  = args.proj_ncols == 3 ? (which ? 2 : 1) : 0;
@@ -2837,7 +2914,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 
     // ===== round 2: the past inputs of the convolution (after the cell id), consumed after the cell loop =====
     float x[8];
-    if constexpr (!MR && !prepared) {
+    if constexpr (!MR) {
         const float * past = args.state + (int64_t) read_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -3000,12 +3077,25 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 #pragma unroll
                 for (int tile = warp; tile < 16; tile += IK_A2_WARPS) {
                     if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
-                        ik_mma_step<G, cached>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx, g);
+                        ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
+                    }
+                }
+            } else if constexpr (mask_tiles) {
+                for (int kt = w0; kt < w1; kt += 32) {
+                    const int cell = kt+lane;
+                    const bool valid = cell < w1 && cell != kv_idx && (args.mask_f16 ?
+                            __half2float(((const half *) args.mask)[cell]) : ((const float *) args.mask)[cell]) != -INFINITY;
+                    const unsigned mask = __ballot_sync(0xffffffffu, valid);
+#pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        if (mask & (0xffffu << (j*16))) {
+                            ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv-1, kt+j*16, w1, kv_idx);
+                        }
                     }
                 }
             } else {
                 for (int kt = w0; kt < w1; kt += 16) {
-                    ik_mma_step<G, cached>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx, g);
+                    ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
                 }
             }
         }
@@ -3020,7 +3110,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 
     // ===== the K/V convolution of the token, the post-normalization, the cache store (split 0), the new state =====
     float x_new[7];
-    if constexpr (MR || prepared) {
+    if constexpr (MR) {
         const char * row = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
         float yq;
         if constexpr (std::is_same<cache_t, half>::value) {
@@ -3178,6 +3268,15 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     ik_scan_sync<warp_split>();
     IK_DBG_T(5);
 
+    if constexpr (fast_tail) {
+        if (ik_attention_tail<warp_split, ungated>(args, g, split, s_m, s_l, s_acc, ready, producers)) {
+            float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*3;
+#pragma unroll
+            for (int j = 0; j < 3; ++j) { st[j] = x_new[j]; }
+        }
+        return;
+    }
+
     float M[G], L[G], A[G];
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
@@ -3264,7 +3363,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     }
 
     // ===== the new recurrent state of the K and V channels (every block has read the old state by now) =====
-    if constexpr (!MR && !prepared) {
+    if constexpr (!MR) {
         float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 7; ++j) {
@@ -3551,7 +3650,6 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
     const ggml_tensor * pos     = dst->src[9];
 
     ik_attn_args a;
-    a.scan_scores = nullptr;
     a.n_head     = ggml_get_op_params_i32(dst, 0);
     a.n_head_kv  = ggml_get_op_params_i32(dst, 1);
     const int hd = ggml_get_op_params_i32(dst, 2);
