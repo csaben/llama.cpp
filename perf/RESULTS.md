@@ -1590,3 +1590,20 @@ On the long fast attention path, each gate warp now permutes its shared Q8 input
 The controller pack reduced measured zero-depth pack time from 152.07 to 127.86 us/token. Further trials varied work ownership, IQ4 loads, router probability exchange, controller rank reuse, scan input tiling and split merging. The screening table includes losing trials, drifting controls and local source tags. [Isolated experiments](p8/screenings.md), [controller trace](p8/packwarp/latency-mean.md), [release reproduction](p8/verify.sh).
 
 The main 384-token matrix matched every complete reply and token ID against the new same-flags plain control and frozen Phase 7c. All six guarded configurations trailed new plain on short prose (224.9-225.7 vs 226.8 tok/s). All six beat plain on the other four prompts. Cap 3 with explicit adaptation reached 257.5 / 350.4 / 224.9 / 298.8 / 261.0 tok/s on code, edit, prose, edit at 16K and edit at 32K. [Three-repeat matrix](p8/release/384/), [full-message and ID comparisons](p8/release/384/compare.txt).
+
+### Combined runtime on physical GPU1
+
+Mean of the two process means from each side of the frozen/candidate/candidate/frozen crossover, three tg128 repetitions per depth. Both sides used the same benchmark executable; the runtime library directory selected the build.
+
+| Decode tok/s | 0 | 4096 | 16384 | 32768 |
+|---|---:|---:|---:|---:|
+| Default frozen p7c | 239.28 | 218.79 | 205.51 | 189.61 |
+| Default p8 | 240.80 | 221.19 | 207.44 | 191.35 |
+| Default change (%) | +0.64 | +1.10 | +0.94 | +0.92 |
+| MR/MMA frozen p7c | 214.32 | 199.70 | 188.29 | 173.54 |
+| MR/MMA p8 | 230.00 | 217.81 | 204.50 | 188.53 |
+| MR/MMA change (%) | +7.32 | +9.07 | +8.60 | +8.64 |
+
+[Plain crossover](p8/final-plain/), [MR/MMA crossover](p8/final-mr/), [matched kernel trace deltas](p8/final/kernel-deltas.md).
+
+In the combined build the controller pack saved 23.51 / 24.98 us/token at 0 / 16K. Long sliding and full attention together saved 14.76 us/token. The trace sum over all kernels rose 21.02 us/token at zero and fell 26.22 at 16K. These single profiled runs include variation in unrelated kernels. The independent uninstrumented crossover above supplies the throughput result. [Final ranked mean](p8/final/latency-mean.md), [frozen ranked mean](p8/base/latency-mean.md).
