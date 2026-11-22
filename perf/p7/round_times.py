@@ -27,6 +27,8 @@ if len(rounds) < 10:
     sys.exit("fewer than ten complete four-graph rounds")
 
 print("Complete rounds", len(rounds))
+# The target reads the GPU draft. These two graphs cannot overlap.
+print("Sum of target and draft GPU ms", round(sum(sum(sorted(gpu)[-2:]) for gpu, _, _ in rounds), 3))
 for label, values in [
     ("round ms", [ms for _, _, ms in rounds]),
     ("GPU graphs total ms", [sum(gpu) for gpu, _, _ in rounds]),
