@@ -16,8 +16,8 @@ case "${1:?stage}" in
                 log="$VERIFY_WORK/wide-$packed-$depth.log"
                 IK_MR=1 IK_MMA=3 IK_WINDOW_COLS=$packed MR_RS_A=0 MR_RS=6 MR_SIZES=2,3,4,5,6,7 MR_RAND=37 MR_PLAIN_PCT=0 MR_CTX=34816 \
                     build/bin/mr_check "$Q2" "$VERIFY_WORK/depth-input" "$depth" 64 >"$log" 2>&1
-                echo "packed=$packed $(rg '182 rows .*: 0 rows differ from single-token decode, max \|logit diff\| 0$' "$log")"
-                rg -q '182 rows .*: 0 rows differ from single-token decode, max \|logit diff\| 0$' "$log"
+                row=$(rg '182 rows .*: 0 rows differ from single-token decode, max \|logit diff\| 0$' "$log")
+                echo "packed=$packed $row"
             done
         done >"$out/wide.txt" ;;
     extra-ops)

@@ -1,5 +1,6 @@
 """Measure client time to first visible or reasoning token after an uncached file read."""
 import json
+import os
 import subprocess
 import time
 import urllib.request
@@ -47,7 +48,8 @@ def main():
     with post('/tokenize', {'content': text}) as response:
         tokens = json.load(response)['tokens']
     docs = []
-    for size in (4096, 16384, 32768):
+    for size in map(int, os.environ.get("TTFT_SIZES", "4096,16384,32768").split(",")):
+        assert 0 < size <= len(tokens)
         with post('/detokenize', {'tokens': tokens[:size]}) as response:
             docs.append((size, json.load(response)['content']))
     run(docs[0][1][:2000], 16, 0)

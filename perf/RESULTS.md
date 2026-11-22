@@ -1631,3 +1631,5 @@ The manual deployment script was syntax-checked and left unexecuted. It selects 
 ## Phase 8 merge
 
 Combined runtime source `f7f505c` (`p8m-merged`), physical GPU1 (03:00.0). The frozen stream A 64K-slot control had median uncached client TTFT of 1.670 / 6.486 / 13.973 s at 4K / 16K / 32K with plain and 1.711 / 6.567 / 14.190 s with guarded cap 3. [Plain samples](p8m/ttft/stream-a-plain/samples.txt), [DSpark samples](p8m/ttft/stream-a-draft/samples.txt).
+
+At target/draft microbatches 512/512 on the merged build, median client TTFT at 4K / 16K / 32K was 1.458 / 5.738 / 12.498 s plain, 1.500 / 5.868 / 12.838 s with adaptive cap 3 and 1.500 / 5.877 / 12.850 s with adaptive cap 6. Three uncached tool follow-ups per depth, after warmup, with 128 reply tokens. At cap 6 the 2,048/512 split measured 1.425 / 5.673 / 12.675 s. Minimum whole-device free memory was 7,816 MiB for 512/512 and 2,084 MiB for 2,048/512, sampled every 250 ms. [Samples and memory](p8m/ttft/), [replay driver](p8m/ttft.sh).
