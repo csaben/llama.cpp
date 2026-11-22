@@ -47,10 +47,14 @@ try:
         if kind not in kinds:
             continue
         body = {"model": "x", "messages": [{"role": "user", "content": p}], "max_tokens": int(os.environ.get("SPEC_MAXT", "384")), "temperature": 0, "seed": 1, "cache_prompt": False}
+        if os.environ.get("SPEC_FIXED_LENGTH") == "1":
+            body["ignore_eos"] = True
         if os.environ.get("SPEC_PROBS"):
             body.update({"logprobs": True, "top_logprobs": 3})
         # SPEC_REPS=n: the request n times; the median run is reported, all rates are listed
         runs = [post("/v1/chat/completions", body) for _ in range(int(os.environ.get("SPEC_REPS", "1")))]
+        if body.get("ignore_eos") and any(x["timings"]["predicted_n"] != body["max_tokens"] for x in runs):
+            raise ValueError(f"{label} {kind}: generation stopped before the requested token count")
         runs.sort(key=lambda x: x["timings"]["predicted_per_second"])
         r = runs[len(runs)//2]
         t = r["timings"]
