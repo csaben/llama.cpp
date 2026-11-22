@@ -6,5 +6,5 @@ R=$(cd "$(dirname "$0")/../.." && pwd); O=${PROF_DIR:-/tmp/claude-1000/-home-are
 mkdir -p "$O"; N=$1; ROWS=$2; shift 2
 rm -f "$O/$N".*
 $NSYS profile -t cuda --cuda-graph-trace=node -o "$O/$N" --force-overwrite true "$R/build/bin/llama-bench" -m "$Q2" -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 "$@" >/dev/null 2>&1
-$NSYS stats --report cuda_gpu_kern_sum --format csv -o "$O/$N" "$O/$N.nsys-rep" >/dev/null 2>&1
+$NSYS stats --force-export=true --force-overwrite=true --report cuda_gpu_kern_sum --format csv -o "$O/$N" "$O/$N.nsys-rep" >/dev/null 2>&1
 python3 "$R/perf/kernsum_total.py" "$O/${N}_cuda_gpu_kern_sum.csv" "$ROWS"

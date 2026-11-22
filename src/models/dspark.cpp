@@ -1065,6 +1065,7 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
     // LLAMA_DSPARK_HEAD_N=n (set by the drafter from --spec-draft-n-max): only the first n draft positions are read, so
     // the head (a full-vocabulary matvec and a first-maximum search per position, each feeding the next) stops there
     // and the base logits are computed for those columns only. The n drafts are unchanged. One sequence per batch.
+    // The logits then have n + 1 columns: the batch must ask for the outputs of its first n + 1 tokens only.
     int64_t n_head = block - 1;
     if (const char * env = getenv("LLAMA_DSPARK_HEAD_N")) {
         if (nb == 1 && block <= hparams.dflash_block_size && atoi(env) >= 1) {
@@ -1088,9 +1089,7 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
     auto * prev = ids;
     for (int64_t i = 1; i < block; ++i) {
         if (i > n_head) {
-            // an unread position: any column keeps the shape
-            logits = ggml_concat(ctx0, logits, ggml_view_2d(ctx0, base, base->ne[0], 1, base->nb[1], 0), 1);
-            continue;
+            break; // unread positions: the caller asks for the logits of the first n_head + 1 tokens only
         }
         auto * col = build_inkling2_head(*this, model, *target, prev, state, column(cur, i), column(base, i), context);
         logits = ggml_concat(ctx0, logits, col, 1);
@@ -1099,6 +1098,10 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
         auto * maximum = ggml_pool_1d(ctx0, valid, GGML_OP_POOL_MAX, valid->ne[0], 1, 0);
         auto * is_max = ggml_scale_bias(ctx0, ggml_step(ctx0, ggml_sub(ctx0, ggml_repeat(ctx0, maximum, valid), valid)), -1.0f, 1.0f);
         prev = ggml_argmax(ctx0, ggml_mul(ctx0, is_max, tie_rank));
+    }
+    if (n_head < block - 1) {
+        res->t_logits = ggml_cont(ctx0, ggml_view_2d(ctx0, logits, hparams.n_vocab_unpadded, n_head + 1, logits->nb[1], 0));
+        return;
     }
     logits = ggml_reshape_3d(ctx0, logits, logits->ne[0], nb, block);
     logits = ggml_reshape_2d(ctx0, ggml_cont(ctx0, ggml_permute(ctx0, logits, 0, 2, 1, 3)), logits->ne[0], n_tokens);

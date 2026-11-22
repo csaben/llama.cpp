@@ -1377,6 +1377,9 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
     // The recurrent head uses the anchor features from the injection.
     bool has_rnn_context = false;
 
+    // > 0: the drafter graph computes (and returns the logits of) the anchor and the first head_n draft positions only
+    int32_t head_n = 0;
+
     size_t context_rows = 0;
     std::vector<float>     context_embd;
     std::vector<llama_pos> context_pos;
@@ -1405,9 +1408,10 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             }
         }
 
-        if (has_rnn_context && this->params.n_max > 0) {
-            // the head graph stops after the positions that are read (see graph_inkling2); an existing value wins
-            setenv("LLAMA_DSPARK_HEAD_N", std::to_string(this->params.n_max).c_str(), 0);
+        if (has_rnn_context && this->params.n_max > 0 && n_seq == 1) {
+            // the head graph stops after the positions that are read (see graph_inkling2) and returns their logits only
+            setenv("LLAMA_DSPARK_HEAD_N", std::to_string(this->params.n_max).c_str(), 1);
+            head_n = this->params.n_max;
         }
         if (has_rnn_context) {
             const llama_model * model_tgt = llama_get_model(this->params.ctx_tgt);
@@ -1503,7 +1507,7 @@ public:
             }
             i_block_beg[seq_id] = batch.size();
             for (int32_t i = 0; i < n_block_tokens; ++i) {
-                const int32_t idx = batch.add(i == 0 ? dp.id_last : mask_token_id, n + i, seq_id, true);
+                const int32_t idx = batch.add(i == 0 ? dp.id_last : mask_token_id, n + i, seq_id, head_n == 0 || i <= head_n);
                 if (context) {
                     batch.set_embd_state(idx, { context, 1, (size_t) n_embd_dec });
                 }
@@ -1542,13 +1546,21 @@ public:
                     break;
                 }
 
-                const llama_token sampled = common_sampler_sample(smpl, ctx_dft, idx, true);
                 if (has_rnn_context) {
-                    // Use the first maximum, as in the RNN conditioning graph.
-                    common_sampler_accept(smpl, sampled, true);
-                    result.push_back(sampled);
+                    // Use the first maximum, as in the RNN conditioning graph: a scan of the logits (what the greedy
+                    // sampler chain returns, without building its candidate array of the whole vocabulary).
+                    const float * logits = llama_get_logits_ith(ctx_dft, idx);
+                    const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx_dft)));
+                    llama_token best = 0;
+                    for (int32_t v = 1; v < n_vocab; ++v) {
+                        if (logits[v] > logits[best]) {
+                            best = v;
+                        }
+                    }
+                    result.push_back(best);
                     continue;
                 }
+                const llama_token sampled = common_sampler_sample(smpl, ctx_dft, idx, true);
 
                 const auto * cur_p = common_sampler_get_candidates(smpl, true);
 

@@ -17,5 +17,5 @@ t = json.load(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:80
 print({k: t.get(k) for k in ("prompt_n", "predicted_n", "predicted_per_second", "draft_n", "draft_n_accepted")})
 PY
 pkill -INT -x llama-server; wait
-$NSYS stats --report cuda_gpu_kern_sum --format csv -o "$O/$N" "$O/$N.nsys-rep" >/dev/null 2>&1
+$NSYS stats --force-export=true --force-overwrite=true --report cuda_gpu_kern_sum --format csv -o "$O/$N" "$O/$N.nsys-rep" >/dev/null 2>&1
 python3 "$R/perf/kernsum_total.py" "$O/${N}_cuda_gpu_kern_sum.csv" "$ROWS"
