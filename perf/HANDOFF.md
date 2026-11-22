@@ -12,6 +12,8 @@ In flight: `bash perf/p6/r4_spec.sh perf/p6/r4_3000` (fixed-length requests, bac
 
 The fixed-length harness also collects the accepted token IDs through the server's existing verbose response (`return_tokens=true`). This checks the full tail after the parser finishes prose and edit@16K. `SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py perf/p6/r4_3000 plain-mr n2 n3 n4 n2-adapt n3-adapt n4-adapt` compares both representations. Plain without the window math flags produces different strings on the long prompts; it is a separate speed reference. Use `bash perf/p6/r4_checks.sh` for the trace, boundary checks, bench, PPL, greedy probes and backend ops.
 
+At inference commit `06d9abb` all 24 fixed-length full messages matched plain-mr. The follow-up raw-ID check has also passed for all four prompts at n2, n4 and all three adaptive widths. A fresh n3 server is collecting the final four raw token arrays. The 384-token table, quality checks and 64K slot smoke are queued on GPU1. The trial attention block ordering binary is outside the build tree, under `/tmp/r4-row-local`.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.

@@ -43,10 +43,23 @@ try:
         toks = post("/tokenize", {"content": text})["tokens"]
         doc = post("/detokenize", {"tokens": toks[:16000]})["content"]
         PROMPTS.append(("edit@16K", doc + "\n\nCopy the first function defined in the source above exactly, then add a one-line comment above each of its statements. Output only the code."))
+    if "read-tool" in kinds:
+        PROMPTS.append(("read-tool", "Read perf/longctx.py and explain how it measures time to first token. Identify the statement that stops the timer."))
     for kind, p in PROMPTS:
         if kind not in kinds:
             continue
         body = {"model": "x", "messages": [{"role": "user", "content": p}], "max_tokens": int(os.environ.get("SPEC_MAXT", "384")), "temperature": 0, "seed": 1, "cache_prompt": False}
+        if kind == "read-tool":
+            name = "perf/longctx.py"
+            with open(os.path.join(ROOT, name)) as source:
+                lines = "".join(f"{i}: {line}" for i, line in enumerate(source, 1))
+            body["tools"] = [{"type": "function", "function": {"name": "read", "description": "Read a file with line numbers.",
+                "parameters": {"type": "object", "properties": {"filePath": {"type": "string"}}, "required": ["filePath"]}}}]
+            body["messages"].extend([
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call_read", "type": "function",
+                    "function": {"name": "read", "arguments": json.dumps({"filePath": name})}}]},
+                {"role": "tool", "tool_call_id": "call_read", "content": lines},
+            ])
         if os.environ.get("SPEC_FIXED_LENGTH") == "1":
             body.update(ignore_eos=True, return_tokens=True, verbose=True)
         if os.environ.get("SPEC_PROBS"):

@@ -98,13 +98,19 @@ static int replay(llama_model * model, const char * path) {
         llama_batch_free(b);
         llama_synchronize(ctx);
     };
+    auto remove_suffix = [](llama_context * ctx, const tr_ev & e) {
+        if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, e.p0, e.p1)) {
+            fprintf(stderr, "replay could not rewind to %d\n", e.p0);
+            exit(1);
+        }
+    };
     std::vector<float> ref((size_t) (std::min(lim, n_pos) - n_prompt)*n_vocab), got((size_t) (std::min(lim, n_pos) - n_prompt)*n_vocab);
     std::vector<int> step_of(n_pos, -1), row_of(n_pos, -1), size_of(n_pos, 0);
     {
         llama_context * ctx = make_ctx(model, getenv("MR_RS_A") ? "MR_RS_A" : "MR_RS");
         for (size_t i = 0; i < gen0; ++i) {
             if (evs[i].kind == 'D') run(ctx, evs[i]);
-            else llama_memory_seq_rm(llama_get_memory(ctx), 0, evs[i].p0, evs[i].p1);
+            else remove_suffix(ctx, evs[i]);
         }
         for (int p = n_prompt; p < n_pos && p < lim; ++p) {
             tr_ev e; e.kind = 'D'; e.pos = {p}; e.tok = {fin[p]}; e.out = {1};
@@ -116,8 +122,8 @@ static int replay(llama_model * model, const char * path) {
     llama_context * ctx = make_ctx(model);
     for (size_t i = 0; i < evs.size(); ++i) {
         const tr_ev & e = evs[i];
-        if (e.kind == 'R') { llama_memory_seq_rm(llama_get_memory(ctx), 0, e.p0, e.p1); continue; }
-        if (e.pos[0] >= lim) continue;
+        if (e.kind == 'R') { remove_suffix(ctx, e); continue; }
+        if (e.pos[0] >= lim) break;
         run(ctx, e);
         if (i < gen0) continue;
         int o = 0;
