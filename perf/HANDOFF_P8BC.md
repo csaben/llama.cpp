@@ -21,3 +21,5 @@ The release-flag rollback/boundary battery matched all 2,714 rows, all six CLI g
 Both correctness batteries are complete. The eight additional depth tests matched all 1,456 kept rows, the bytewise frozen comparisons passed at all depths and with interleaved sequences, and the two synchronization checks and 4,229 expanded CUDA cases passed. The full served matrix started after these checks. [Verifier results](RESULTS_P8BC.md#stream-b-verifier-checks).
 
 The 384-token main matrix passed all 42 drafted cells (three identical repeats each) against a fresh plain server. That includes guarded and explicit adaptive n2/n3/n4 and guarded n6 on all six prompts. Additional prose, forced-width controls and the 3,000-token matrices are running serially on GPU 0. [Main 384-token measurements](p8bc/matrix/main-384.txt).
+
+The additional short prose suite passed every byte and ID in all 100 drafted requests. The last review/dialogue cells ran below the initial plain control. GPU 0 reached 86 C and reported changing clocks during these rows. Paired runs bracket both implementations and repeat the same prompt order. [Additional short prose](p8bc/matrix/prose-384.txt).
