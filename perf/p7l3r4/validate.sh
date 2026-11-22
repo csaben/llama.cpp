@@ -23,6 +23,22 @@ case "$1" in
             echo "$config 8 full-vocabulary rows identical"
         done >"$out/fallbacks.txt"
         ;;
+    sequences)
+        base="$PWD/build/p7l3r2/baseline-16264c6/obj/bin"
+        for prefix in 49 1129; do
+            for mode in base off on; do
+                bin="$PWD/build/bin"
+                value=1
+                if [[ $mode == base ]]; then bin=$base; fi
+                if [[ $mode == off ]]; then value=0; fi
+                LD_LIBRARY_PATH="$bin" IK_GLUE_FAST=$value "$work/logits" "$Q2" perf/ppl.txt "$prefix" 32 interleave >"$work/seq-$prefix-$mode.bin" 2>"$work/seq-$prefix-$mode.log"
+                test "$(stat -c %s "$work/seq-$prefix-$mode.bin")" -eq "$((64*200058*4))"
+            done
+            cmp "$work/seq-$prefix-base.bin" "$work/seq-$prefix-off.bin"
+            cmp "$work/seq-$prefix-base.bin" "$work/seq-$prefix-on.bin"
+            sha256sum "$work"/seq-"$prefix"-{base,off,on}.bin
+        done >"$out/sequences.txt"
+        ;;
     bench)
         base="$PWD/build/p7l3r2/baseline-16264c6/obj/bin"
         bash perf/p7l3r4/run.sh bench final/official-base 0,4096,16384,32768 "$base"
