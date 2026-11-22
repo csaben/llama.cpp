@@ -1,18 +1,10 @@
 # Phase 8 merge
 
-Local merge `f7f505c` (`p8m-merged`) combines stream A with `p8c-final`. Git merged the distinct controller/attention and relative-bias hunks in `inkling.cu` cleanly. The SM86 build and nine-file snapshot at `~/inkling-live-bin-p8m-f7f505c` are complete. The staged binary reports `f7f505c` and resolves all eight local libraries. Frozen stream A controls are captured. On GPU1 the 16K tool replay reached 5.738 s plain and 5.868 s with cap 3 (stream A 6.486 / 6.567 s). The 2,048/512 trial left 2,084 MiB free through 32K. The six release matrices are in progress. The live endpoint is stopped.
+Local source `f7f505c` (`p8m-merged`) includes A and `p8c-final`. The nine-file SM86 snapshot is staged at `~/inkling-live-bin-p8m-f7f505c`. Its server reports the merged commit and resolves all eight project libraries inside the snapshot.
 
-- Main at 384 tokens: 126 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/main/384/).
+All six GPU1 matrices passed. All 360 drafted replies and 347,520 emitted IDs matched same-flags plain and frozen stream B. The archived stream A controls also matched on every shared prompt. Adaptive cap 6 reached 303.1 / 330.5 tok/s on the short / long agent replay. At 16K, cap-6 uncached TTFT was 5.877 s at microbatches 512/512 and 5.673 s at 2,048/512. The split trial left 2,084 MiB free through 32K. [Release table](RESULTS.md#merged-served-decode), [matrix audit](p8m/matrix/audit.txt), [all cells](p8m/matrix/cells.tsv).
 
-- Prose at 384 tokens: 100 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/prose/384/).
-
-- Fixed at 384 tokens: 54 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/fixed/384/).
-
-- Main at 3000 tokens: 42 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/main/3000/).
-
-- Prose at 3000 tokens: 20 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/prose/3000/).
-
-- Fixed at 3000 tokens: 18 drafted replies matched same-flags plain and stream B, including token IDs. [Captures](p8m/matrix/fixed/3000/).
+The rollback, depth, FP32, PPL and CUDA checks are in progress. The live endpoint is stopped.
 
 # Phase 8
 

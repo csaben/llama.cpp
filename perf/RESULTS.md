@@ -1650,3 +1650,5 @@ Decode tok/s. The 384-token columns are three-request medians. Long columns are 
 | Agent tool replay | 218.3 | 303.1 | 217.4 | 330.5 |
 
 Cap 6 exceeded cap 3 on five of the six long prompts, and cap 3 was 2.2 tok/s faster on long code. Short cap 3 was 3.5 / 2.7 tok/s faster than cap 6 on edit at 16K / 32K. [384-token captures](p8m/matrix/main/384/), [3,000-token captures](p8m/matrix/main/3000/).
+
+Across the main, extra prose and forced-width suites, all 360 drafted replies and 347,520 generated token IDs matched same-flags merged plain and frozen stream B. Every common prompt also matched stream A. The audit covers 194 cells, three short repeats (five on additional prose) and one long request per cell. Every long cap-6 prompt beat plain by 22.3-74.8%. Four of eleven short cap-6 prompts trailed plain by 0.04-1.12%. [Rates and digests](p8m/matrix/cells.tsv), [audit](p8m/matrix/audit.txt), [runner](p8bc/matrix.sh).
