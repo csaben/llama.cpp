@@ -40,3 +40,11 @@ The three-token minimum tried too many weak matches on short prose. With a five-
 | Cap 6 plus DSpark/history agreement, five repeats | 244.0 / 338.6 / 214.1 / 290.5 |
 
 The final trial measured 263.4 / 293.3 / 288.7 / 314.6 tok/s at 3,000 tokens. All eight messages and their IDs matched frozen plain. Each variant uses its own live run, so small differences include timing variation. [Trial captures](p8bc/trials/), [exact verifier costs](p8bc/windows/).
+
+## Stream B verifier checks
+
+Both the release and default environments passed all 2,714 rollback/boundary rows, six CLI greedy probes and 1,108 CUDA tests. The historical failing trace compares the kept logits bit for bit. As in the Phase 7c control, two tokens recorded by the old failing server are not today's single-row argmax. Prefill PPL was 3.0530 in both runs and decode PPL was 4.1979 (plain) / 4.2038 (multi-row flags). [Release](p8bc/checks/release-rows.txt), [defaults](p8bc/checks/default-rows.txt), [PPL and plain decode rates at four depths](p8bc/checks/).
+
+Eight mixed-width runs at prefixes 200 / 4,096 / 16,384 / 32,768 with packing on/off and randomized rollback each matched all 182 kept rows (1,456 in total). The rebuilt and frozen libraries produced identical FP32 bytes for all 88 full-vocabulary depth rows and 128 interleaved sequence rows. Both synchronization checks passed. CUDA passed 4,229 expanded cases across matrix multiplication, router/attention/controller operations, SITU, CONCAT and relative bias. [Depths](p8bc/checks/depths.txt), [hashes](p8bc/checks/logits.txt), [sanitizer and operator totals](p8bc/checks/sync-ops.txt).
+
+Run `CHECKS_GPU=0 CHECKS_OUT=build/p8-check bash perf/p6/r4_checks.sh` for the baseline battery. The width stress uses `mr_check`, two consecutive copies of `perf/ppl.txt`, `MR_RS_A=0 MR_RS=6 MR_SIZES=2,3,4,5,6,7 MR_RAND=37 MR_PLAIN_PCT=0 MR_CTX=34816`, 64 windows, and both `IK_WINDOW_COLS` settings. The frozen comparisons use the [full-logit driver](p7l3/logits.cpp).

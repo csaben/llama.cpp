@@ -1,0 +1,12 @@
+========= ERROR SUMMARY: 0 errors
+========= ERROR SUMMARY: 0 errors
+  3777/3777 tests passed
+  Backend CUDA0: OK
+  162/162 tests passed
+  Backend CUDA0: OK
+  5/5 tests passed
+  Backend CUDA0: OK
+  273/273 tests passed
+  Backend CUDA0: OK
+  12/12 tests passed
+  Backend CUDA0: OK
