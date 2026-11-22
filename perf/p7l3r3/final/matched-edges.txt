@@ -1,0 +1,2 @@
+r3-default.sqlite kernels/token 514 (control 584)
+ik_mix_down: 46 sites/token, graph 7.668, fused 6.825 us/site

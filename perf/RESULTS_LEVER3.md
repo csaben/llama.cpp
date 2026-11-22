@@ -245,7 +245,7 @@ Each graph has N+1 empty kernels and N edges. Each resident launch performs N ha
 
 Across 119 warmed head-to-head intervals, the top three within-token boundaries by aggregate signed idle time were router to Q2_K gate/up (42 calls, 5.688 us/token), residual mix to controller down (48, 3.958 us), and controller down to apply (48, 3.849 us). The respective mean gap per visit was 0.135, 0.082 and 0.080 us. An empty-node slope includes dispatch and block execution. Subtracting the end of one active kernel from the start of the next measures a different interval. Nsight node timestamps even overlap slightly for some serial pairs. The 332 us softcap-to-next-input gap crosses the host decode boundary. [Ranked edges and kernel durations](p7l3r3/control-edges.txt), [trace analysis](p7l3r3/edges.py)
 
-Of the 4.850 ms/token instrumented control interval, 4.503 ms was active kernel time, 0.332 ms crossed the host boundary, and the remaining signed gaps summed to 0.015 ms. The 1.6 ms difference from the isolated matvec stream includes real attention, routing and glue computation. The selected three changes cut measured active kernel time by 0.062 ms/token and the number of kernels from 584 to 514. [Interval accounting](p7l3r3/token-spans.txt), [kernel counts](p7l3r3/matched-edges.txt)
+Of the 4.850 ms/token instrumented control interval, 4.503 ms was active kernel time, 0.332 ms crossed the host boundary, and the remaining signed gaps summed to 0.015 ms. The 1.6 ms difference from the isolated matvec stream includes real attention, routing and glue computation. The first combined candidate cut active kernel time by 0.062 ms/token. The final grid-barrier build cut it by 0.087 ms, from 4.503 to 4.416 ms, and reduced 584 launches to 514. Its 46 fused down dots took 6.825 us against 7.668 us for the matched graph sites. Its 24 apply/pack launches took 6.766 us. [Interval accounting](p7l3r3/final/token-spans.txt), [matched sites](p7l3r3/final/matched-edges.txt), [launch coverage](p7l3r3/final/coverage.txt), [short trace](p7l3r3/final/short-edges.txt)
 
 Router work cost 350 us/token, residual mixes 285, controller-down 198, apply 147, expert sum/state update 98, separate RMS/packing 93 and SITU 89. Q2 gate/up itself averaged 19.442 us on the 42 directly adjacent router edges. Each experiment below timed useful work from the first producer's start through the last consumer's finish. Rows with different coverage use their own matched graph control. [Kernel and edge inventory](p7l3r3/control-edges.txt), [matched FFN spans](p7l3r3/matched-ffn.txt), [controller spans](p7l3r3/controller-trace.txt)
 
@@ -285,6 +285,7 @@ export LD_LIBRARY_PATH="$PWD/build/bin"
 mkdir -p build/p7l3r3
 "$HOME/opt/cuda-12.8/bin/nvcc" -O3 -std=c++17 -arch=sm_86 -rdc=true perf/p7l3r3/dependency.cu -o build/p7l3r3/dependency
 build/p7l3r3/dependency
+export P7L3R3_DEFAULT=1 P7L3R3_WORK=build/p7l3r3/final P7L3R3_OUT=perf/p7l3r3/final
 for stage in bench quality mr ops guards; do perf/p7l3r3/validate.sh "$stage" || break; done
 ```
 

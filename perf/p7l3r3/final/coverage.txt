@@ -1,0 +1,6 @@
+kernel grid_x grid_y grid_z calls/token
+ik_ctrl_apply_pack         32    3    1  24.0
+ik_mix_down                32    1    1  24.0
+ik_mix_down                32    3    1  22.0
+inkling_router2_kernel     16    1    1  24.0
+inkling_router2_kernel     32    1    1  24.0
