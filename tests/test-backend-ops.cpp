@@ -13394,6 +13394,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    for (ggml_type type : {GGML_TYPE_Q2_K, GGML_TYPE_Q2_0}) {
+        test_cases.emplace_back(new test_mul_mat_id(type, GGML_TYPE_F32, 64, 8, true, 257, 512, 512));
+    }
+
     // Both experts receive every token
     for (ggml_type type : {GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, GGML_TYPE_Q4_K}) {
         for (int n : {64, 65}) {
