@@ -358,3 +358,28 @@ Assigning additional gate rows to empty sliding-window splits was slower across 
 A two-kernel controller/router variant published 64 or 256 exact RMS partials while applying the controller. All six variants matched the 64-row reference. The fastest producer and router together took 382.5 us/token against 379.9 for the compact control. Its paired result was -0.06%. Sharing attention merge coefficients and skipping entirely empty short-scan warps gained 0.36% in the short-context crossover. The shared combine lengthened long-context attention. [RMS handoff](p7l3r4/rms-kernels.txt), [paired RMS handoff](p7l3r4/rms-pair-0-2.txt), [attention combines](p7l3r4/combine-kernels.txt), [short crossover](p7l3r4/combine-pair-0-6.txt)
 
 Keeping the gate's Q8 input in registers across rows cut the 16K family from 25.91 to 25.51 us/visit in a pre-vector build. Grouping two or four rows pushed it above 32 us/visit. The single-row long-context crossover gained 0.49%, with its two control processes 3.15 tok/s apart. The short sweep favored the ordinary one-row loop. Transposing the Q/R clipping sums or using a native integer reduction for absolute maxima saved up to 4.3 us/token in the short trace and increased time at 16K. The release keeps the vectorized bias and native gate layout. [Gate grouping](p7l3r4/gateregs-kernels.txt), [long crossover](p7l3r4/gateregs-pair-16384-1.txt), [warp primitives](p7l3r4/prim-kernels.txt), [short crossover](p7l3r4/prim-pair-0-2.txt), [long crossover](p7l3r4/prim-pair-16384-1.txt), [all individual crossovers](p7l3r4/screenings.md)
+
+### Exactness and backend checks
+
+Against the separately built `16264c6` reference, the default produced identical bytes for all 200,058 FP32 logits in each of 88 rows. These were 64 rows after a 200-token prefix and eight rows after each of 4K, 16K and 32K. Prefill PPL was 3.0530 on eight 2,048-token chunks. Single-token decode PPL was 4.1979 on two 1,024-token chunks with `-ub 1`. Both estimates and their reported uncertainty matched the reference. [Full-row hashes](p7l3r4/final/logits.txt), [PPL logs](p7l3r4/final/ppl.txt), [validation commands](p7l3r4/validate.sh)
+
+Two different token streams shared one KV buffer. Their prefills alternated in 47-token chunks, and their subsequent single-token steps alternated for 32 positions per sequence. The short and long prefix cases each produced 64 rows. All 128 matched in three runs using `16264c6`, Round 4 disabled and the default. Eight fallback configurations also matched all eight checked rows per configuration. [Interleaved hashes](p7l3r4/final/sequences.txt), [checker](p7l3/logits.cpp), [fallback checks](p7l3r4/final/fallbacks.txt)
+
+All 12 DSpark comparisons passed under `IK_MR=1`, including the captured 1,699-row replay. Across 2,834 rows the maximum absolute logit difference was zero. The CUDA backend passed all 3,988 supported cases in the four selected operator groups. Compute Sanitizer's synchronization checker reported zero errors on the selected gate/attention and cooperative pack kernels for two graph-disabled decode steps at each of prefixes 113 and 1129. [DSpark results](p7l3r4/final/mr.txt), [backend results](p7l3r4/final/ops.txt), [synchronization checks](p7l3r4/final/synccheck.txt)
+
+### Reproducing the release measurements
+
+The release binary was built from `5d1f9e0`, tagged `p7l3r4-default-vector`. The four production CUDA files also form commit `ab2ad69` on the Round 3 final commit `549883d`. Their source bytes match the measured revision. The `p7l3r4-release-source` tag identifies that standalone commit. The measurement scripts and detailed evidence are on `inkling-3090-lever3`. [Release environment](p7l3r4/final/environment.txt), [kernel dispatch](../ggml/src/ggml-cuda/inkling.cu), [gate/scan geometry](../ggml/src/ggml-cuda/inkling-visit.cuh)
+
+The default selects the matching single-token path on an 82-SM GA10x device. `IK_GLUE_FAST=0` selects the Round 3 schedule. Both settings use the same calibrated GGUF. The validation driver selects GPU0 before starting each CUDA process. It uses the archived `16264c6` executable built under this worktree as described in the Round 2 reproduction instructions. [Validation driver](p7l3r4/validate.sh), [archive build instructions](#round-2-on-gpu0), [synchronization checker](p7l3r4/synccheck.sh)
+
+```sh
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_COMPILER="$HOME/opt/cuda-12.8/bin/nvcc" -DCMAKE_CUDA_ARCHITECTURES=86
+cmake --build build -j8
+for stage in metadata quality mr ops guards sequences trace bench; do
+    bash perf/p7l3r4/validate.sh "$stage"
+done
+bash perf/p7l3r4/synccheck.sh
+```

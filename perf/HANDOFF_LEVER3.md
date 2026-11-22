@@ -1,16 +1,10 @@
 # GPU0 Phase 7 handoff
 
-## Round 4 in progress
+## Round 4 release validation
 
-The starting source is the Round 3 default. GPU0 traces at both depths rank gate/attention, router and mixed-state controller down first. The table includes one actual mid-run step and a 120-step mean. The local traces are in build/p7l3r4. [Single-token table](p7l3r4/latency-single.md), [mean table](p7l3r4/latency-mean.md), [commands](p7l3r4/run.sh)
+The built default is `5d1f9e0` (`p7l3r4-default-vector`). The same four CUDA files form a single local code commit `ab2ad69` directly on the Round 3 final commit. Select that commit with tag `p7l3r4-release-source`. The default targets the 82-SM GA10x plain decoder. Set `IK_GLUE_FAST=0` to restore the Round 3 schedule. [Build and model identity](p7l3r4/final/environment.txt), [ranked latency tables](RESULTS_LEVER3.md#kernel-latency-and-logical-traffic), [screening results](p7l3r4/screenings.md)
 
-The first combined build measured 230.61 / 210.16 / 196.79 / 178.28 tok/s and matched all 88 full-vocabulary logit rows. Short attention fell from 12.35 to 11.12 us/visit with 56 blocks. The production candidate also incorporates smaller controller, residual, router, SITU and expert-sum changes. The final temperature-matched comparisons are pending. [Combined benchmark](p7l3r4/combined.txt), [logits](p7l3r4/combined-hashes.txt), [short attention](p7l3r4/geometry-pair-384.txt), [epilogues](p7l3r4/teams-kernels.txt)
-
-The smaller candidate at `p7l3r4-compact-candidate` changes four CUDA source files. It matched 88 full-vocabulary rows at prefixes 200/4096/16384/32768. Its warm same-binary crossovers gained 3.76% at zero, 2.86% at 4K 2.15% at 16K and 2.70% at 32K. At zero its trace saved 74 us/token in gate/attention and 47 in controller down. Temperature-matched release benchmarks, PPL, DSpark and backend tests are pending. [Exact hashes](p7l3r4/slim-hashes.txt), [kernel timings](p7l3r4/slim-kernels.txt), [depth-zero crossover](p7l3r4/slim-pair-0.txt)
-
-The aligned relative-position bias path gained a further 0.72% at 16K and tied at depth zero. It is enabled with the other measured improvements by default on the eligible 82-SM GA10x plain decoder. `IK_GLUE_FAST=0` restores the Round 3 schedule in this binary. The release build and its validation run use the default setting. [Depth zero](p7l3r4/bias-pair-0-3.txt), [16K](p7l3r4/bias-pair-16384-3.txt)
-
-The built default is `5d1f9e0` (`p7l3r4-default-vector`). Its four CUDA source files also form a single local commit directly on Round 3, `ab2ad69` (`p7l3r4-release-source`). The two code trees match. The complete same-binary screening table and build configuration are recorded. [Screenings](p7l3r4/screenings.md), [build and model identity](p7l3r4/final/environment.txt)
+At 06:46 EST, the release had matched all 88 reference logit rows and 128 additional rows from interleaved sequences. PPL matched at 3.0530/4.1979, all 2,834 DSpark rows agreed, and all 3,988 backend cases passed. The four-depth temperature-matched benchmark is pending. [Exactness and backend evidence](RESULTS_LEVER3.md#exactness-and-backend-checks)
 
 ## Round 3
 

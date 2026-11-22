@@ -1,0 +1,8 @@
+build/p7l3r4/final/on-decode.log:0.02.199.197 I perplexity: calculating perplexity over 2 chunks, n_ctx=1024, batch_size=1024, n_seq=1
+build/p7l3r4/final/on-decode.log:0.11.709.132 I Final estimate: PPL = 4.1979 +/- 0.28221
+build/p7l3r4/final/base-decode.log:0.01.856.541 I perplexity: calculating perplexity over 2 chunks, n_ctx=1024, batch_size=1024, n_seq=1
+build/p7l3r4/final/base-decode.log:0.11.505.054 I Final estimate: PPL = 4.1979 +/- 0.28221
+build/p7l3r4/final/on-prefill.log:0.01.963.684 I perplexity: calculating perplexity over 8 chunks, n_ctx=2048, batch_size=2048, n_seq=1
+build/p7l3r4/final/on-prefill.log:0.09.035.598 I Final estimate: PPL = 3.0530 +/- 0.06532
+build/p7l3r4/final/base-prefill.log:0.01.960.015 I perplexity: calculating perplexity over 8 chunks, n_ctx=2048, batch_size=2048, n_seq=1
+build/p7l3r4/final/base-prefill.log:0.09.053.175 I Final estimate: PPL = 3.0530 +/- 0.06532

@@ -10,7 +10,7 @@ bench_exe=build/bin/llama-bench
 if [[ -n ${R4_BIN:-} && -x $R4_BIN/llama-bench ]]; then bench_exe=$R4_BIN/llama-bench; fi
 case $1 in
 trace)
-    "$HOME/opt/cuda-12.8/nsight-systems-2024.6.2/bin/nsys" profile -t cuda --sample=none --cpuctxsw=none --cuda-graph-trace=node --export=sqlite -o "$work/$2" "$bench_exe" "${bench[@]}" -d "$3" -r 1 >"$work/$2.log" 2>&1 ;;
+    "$HOME/opt/cuda-12.8/nsight-systems-2024.6.2/bin/nsys" profile --force-overwrite=true -t cuda --sample=none --cpuctxsw=none --cuda-graph-trace=node --export=sqlite -o "$work/$2" "$bench_exe" "${bench[@]}" -d "$3" -r 1 >"$work/$2.log" 2>&1 ;;
 bench)
     bin=${4:-"$PWD/build/bin"}
     while (( $(nvidia-smi -i 00000000:01:00.0 --query-gpu=temperature.gpu --format=csv,noheader,nounits) > 63 )); do sleep 2; done
