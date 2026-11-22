@@ -1,0 +1,12 @@
+IK_ROUTE_STAGE=0 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.02 ± 0.56 |
+build: 812b439 (231)
+IK_ROUTE_STAGE=4 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.10 ± 0.29 |
+build: 812b439 (231)
+IK_ROUTE_STAGE=4 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.83 ± 0.24 |
+build: 812b439 (231)
+IK_ROUTE_STAGE=0 start_C=83
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        220.52 ± 0.12 |
+build: 812b439 (231)

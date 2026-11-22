@@ -6,6 +6,8 @@ The starting source is the Round 3 default. GPU0 traces at both depths rank gate
 
 The first combined build measured 230.61 / 210.16 / 196.79 / 178.28 tok/s and matched all 88 full-vocabulary logit rows. Short attention fell from 12.35 to 11.12 us/visit with 56 blocks. The production candidate also incorporates smaller controller, residual, router, SITU and expert-sum changes. The final temperature-matched comparisons are pending. [Combined benchmark](p7l3r4/combined.txt), [logits](p7l3r4/combined-hashes.txt), [short attention](p7l3r4/geometry-pair-384.txt), [epilogues](p7l3r4/teams-kernels.txt)
 
+The smaller candidate at `p7l3r4-compact-candidate` changes four CUDA source files. It matched 88 full-vocabulary rows at prefixes 200/4096/16384/32768. Its warm same-binary crossovers gained 3.76% at zero, 2.86% at 4K and 2.15% at 16K. At zero its trace saved 74 us/token in gate/attention and 47 in controller down. Temperature-matched release benchmarks, PPL, DSpark and backend tests are pending. [Exact hashes](p7l3r4/slim-hashes.txt), [kernel timings](p7l3r4/slim-kernels.txt), [depth-zero crossover](p7l3r4/slim-pair-0.txt)
+
 ## Round 3
 
 Round 3 selected source is **812b439**, tagged **p7l3r3-selected-grid-225tok**. It uses two-rank mixed-state down dots, a cooperative controller RMS/pack barrier, and four-row register routing for queried states. Set `IK_DEPENDENCY_FUSION=0` for the Round 2 control. Final local tag **p7l3r3-final-225tok**. Validation finished at 04:53 EST on November 22, 2026. [Round 3 results](RESULTS_LEVER3.md#round-3-on-gpu0), [crossover](p7l3r3/sync-pairs.txt)

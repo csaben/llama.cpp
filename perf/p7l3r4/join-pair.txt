@@ -1,0 +1,12 @@
+IK_JOIN_GATE=0 start_C=85
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        190.74 ± 1.66 |
+build: 812b439 (231)
+IK_JOIN_GATE=2 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        189.62 ± 0.48 |
+build: 812b439 (231)
+IK_JOIN_GATE=2 start_C=87
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        189.02 ± 1.13 |
+build: 812b439 (231)
+IK_JOIN_GATE=0 start_C=85
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        191.16 ± 1.72 |
+build: 812b439 (231)

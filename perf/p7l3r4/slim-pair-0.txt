@@ -1,0 +1,12 @@
+IK_GLUE_FAST=0 start_C=73
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.57 ± 0.82 |
+build: 812b439 (231)
+IK_GLUE_FAST=1 start_C=80
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        231.12 ± 0.38 |
+build: 812b439 (231)
+IK_GLUE_FAST=1 start_C=80
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        231.04 ± 0.10 |
+build: 812b439 (231)
+IK_GLUE_FAST=0 start_C=80
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        222.84 ± 0.23 |
+build: 812b439 (231)
