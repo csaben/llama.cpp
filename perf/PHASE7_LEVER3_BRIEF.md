@@ -97,3 +97,21 @@ Round 3: attack the cost per dependency.
    2.775 ms streaming kernel, glue tasks inline with counters, one visit first, then the token.
 Same rules (GPU0 only; never touch ~/llama.cpp-fast or GPU1; exactness or PPL gate; DSpark rows exact; tags
 `p7l3r3-*`; cite sources; keep HANDOFF_LEVER3.md current). Stop and report by 08:45 local at the latest.
+
+## Round 4 (after tag `p7l3r3-final-225tok`, `549883d`)
+
+Round 3 showed the dependency is not the cost: a graph edge is 0.668 µs (514 launches ≈ 0.34 ms/token), a persistent
+flag-synced visit was slower (96.1 vs 71.7 µs). So the ~1.6 ms of non-matvec time per token is the glue and attention
+kernels' **own execution latency**. Round 4: make each of them fast.
+
+1. Per-kernel table from nsys for one token at depth 0 and 16K: every non-matvec kernel, instances per token, µs each,
+   total µs, grid/block config, and its own floor (bytes it must touch / bandwidth, plus one launch's ~2–3 µs). Rank by
+   (actual − floor) × instances.
+2. Attack the top items one by one with exact (or PPL-gated) changes: e.g. short-context attention at ~11 µs per visit
+   (48 visits) should be a few µs; router; controller apply; res_mix/norms; situ quantize; moe_sum. Typical fixes:
+   more parallelism for single-row reductions (split across blocks + tiny combine, or one warp per row), fewer passes
+   over the 2304-wide vector, keep data in registers/shared memory, avoid atomics on the critical path, right-size
+   grids for 82 SMs. Re-measure after each, paired ABBA runs.
+Same rules (GPU0 only; never touch ~/llama.cpp-fast or GPU1; exactness or PPL gate; DSpark rows exact; tags
+`p7l3r4-*`; cite sources; keep HANDOFF_LEVER3.md current). **Stop and report by 07:30 local** so the result can be
+merged into the release before the morning.
