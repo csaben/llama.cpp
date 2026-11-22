@@ -1,0 +1,12 @@
+8600 x 2304 layout 0: 16.36 us, 681.4 GB/s
+8600 x 2304 layout 1: 16.58 us, 672.2 GB/s
+8600 x 2304 layout 2: 16.02 us, 695.6 GB/s
+8600 x 2304 layout 0: 16.37 us, 681.0 GB/s
+2304 x 3072 layout 0: 7.24 us, 550.2 GB/s
+2304 x 3072 layout 1: 7.23 us, 550.8 GB/s
+2304 x 3072 layout 2: 7.21 us, 551.9 GB/s
+2304 x 3072 layout 0: 7.19 us, 554.0 GB/s
+201024 x 2304 layout 0: 300.28 us, 867.6 GB/s
+201024 x 2304 layout 1: 301.38 us, 864.4 GB/s
+201024 x 2304 layout 2: 302.21 us, 862.1 GB/s
+201024 x 2304 layout 0: 301.05 us, 865.4 GB/s

@@ -1,0 +1,84 @@
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -3562,6 +3562,8 @@
+ }
+
+ // end the capture of chunk `idx`, update or create its executable and launch it
++void ik_control_stream(cudaStream_t stream, bool start);
++
+ static void ggml_cuda_graph_launch_chunk(ggml_backend_cuda_context * cuda_ctx, ggml_cuda_graph * graph, size_t idx) {
+     cudaGraph_t cuda_graph = nullptr;
+     CUDA_CHECK(cudaStreamEndCapture(cuda_ctx->stream(), &cuda_graph));
+@@ -5728,6 +5730,7 @@
+     }
+ #endif // USE_CUDA_GRAPH
+
++    ik_control_stream(cuda_ctx->stream(), true);
+     if (use_cuda_graph && cuda_graph_update_required) {
+         // Start CUDA graph capture
+         {
+@@ -5739,6 +5742,7 @@
+     }
+
+     ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
++    ik_control_stream(cuda_ctx->stream(), false);
+
+     return GGML_STATUS_SUCCESS;
+ }
+--- a/ggml/src/ggml-cuda/inkling-fmv.cu
++++ b/ggml/src/ggml-cuda/inkling-fmv.cu
+@@ -960,3 +960,54 @@
+             (float *) dst->data, ggml_nelements(dst)/slots, mode == 1);
+     return true;
+ }
++
++static __global__ void ik_ideal_init(uint4 * buf, int n) {
++    for (int i = blockIdx.x*blockDim.x + threadIdx.x; i < n; i += blockDim.x*gridDim.x) {
++        uint32_t x = (i+1u)*2654435761u;
++        buf[i] = make_uint4(x,x*31u,x ^ (x>>13),x*69069u);
++    }
++}
++static __global__ void ik_ideal_read(const uint4 * buf, int n) {
++    const int stride = blockDim.x*gridDim.x;
++    for (int i = blockIdx.x*blockDim.x + threadIdx.x; i < n; i += 8*stride) {
++#pragma unroll
++        for (int j=0;j<8;++j) {
++            const int idx=i+j*stride;
++            if (idx<n) {
++                uint4 v;
++                asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(v.x),"=r"(v.y),"=r"(v.z),"=r"(v.w):"l"(buf+idx));
++            }
++        }
++    }
++}
++void ik_control_stream(cudaStream_t stream, bool start) {
++    static int blocks = getenv("IK_IDEAL_BLOCKS") ? atoi(getenv("IK_IDEAL_BLOCKS")) : 0;
++    if (!blocks) { return; }
++    static uint4 * buf;
++    static cudaStream_t other;
++    static cudaEvent_t ready, done;
++    static int count;
++    constexpr int vectors = 2006510000/16;
++    if (!buf) {
++        CUDA_CHECK(cudaMalloc(&buf,size_t(vectors)*16));
++        CUDA_CHECK(cudaStreamCreateWithFlags(&other,cudaStreamNonBlocking));
++        CUDA_CHECK(cudaEventCreateWithFlags(&ready,cudaEventDisableTiming));
++        CUDA_CHECK(cudaEventCreateWithFlags(&done,cudaEventDisableTiming));
++        ik_ideal_init<<<1024,256,0,other>>>(buf,vectors);
++        CUDA_CHECK(cudaStreamSynchronize(other));
++        atexit([]{fprintf(stderr,"optimistic stream: %d graph launches, 2006510000 bytes each\n",count);});
++    }
++    if (!start) {
++        if (blocks>0) { CUDA_CHECK(cudaStreamWaitEvent(stream,done)); }
++        return;
++    }
++    ++count;
++    CUDA_CHECK(cudaEventRecord(ready,stream));
++    CUDA_CHECK(cudaStreamWaitEvent(other,ready));
++    if (blocks>0) {
++        ik_ideal_read<<<blocks,256,0,other>>>(buf,vectors);
++        CUDA_CHECK(cudaEventRecord(done,other));
++    } else {
++        ik_ideal_read<<<-blocks,256,0,stream>>>(buf,vectors);
++    }
++}
