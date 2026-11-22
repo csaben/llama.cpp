@@ -4373,6 +4373,234 @@ static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long 
     return key;
 }
 
+struct ik_plain_ctrl {
+    const float * cur, * msg, * down;
+    const half * gain, * forget;
+    float * applied;
+    int * flags;
+};
+
+template<int mode, int rows>
+static __global__ void __launch_bounds__(256, 2) ik_controlled_router(ik_router_args args, ik_plain_ctrl ctrl) {
+    constexpr int router_blocks = 128/rows;
+    const int tid = threadIdx.x, lane = tid%32, warp = tid/32, tile = blockIdx.x;
+    const int producers = mode == 1 ? 72 : router_blocks;
+    if constexpr (mode == 1) {
+        if (tile >= router_blocks) {
+            const int c = (tile - router_blocks)*32 + tid/8;
+            float y = ik_ctrl_apply_channel(ctrl.cur, ctrl.msg, ctrl.down, ctrl.gain, ctrl.forget, 2304, 0, 0, c, 0);
+            if (tid%8 == 0) { ctrl.applied[c] = y; }
+            __syncthreads();
+            if (!tid && ik_atomic_add_acq_rel(ctrl.flags, 1) == producers-1) {
+                for (int i = 0; i < router_blocks; ++i) { ik_st_release(ctrl.flags+1+i, 1); }
+                ik_st_relaxed(ctrl.flags, 0);
+            }
+            return;
+        }
+    }
+    float4 weight[rows][3];
+    const float4 * gates = (const float4 *) args.gate_inp;
+#pragma unroll
+    for (int r = 0; r < rows; ++r) {
+#pragma unroll
+        for (int j = 0; j < 3; ++j) {
+            const int k = tid + 256*j;
+            if (k < 576) { weight[r][j] = gates[(tile*rows+r)*576 + k]; }
+        }
+    }
+    if constexpr (mode == 2) {
+        for (int g = tile; g < 72; g += producers) {
+            const int c = g*32 + tid/8;
+            float y = ik_ctrl_apply_channel(ctrl.cur, ctrl.msg, ctrl.down, ctrl.gain, ctrl.forget, 2304, 0, 0, c, 0);
+            if (tid%8 == 0) { ctrl.applied[c] = y; }
+        }
+        __syncthreads();
+        if (!tid && ik_atomic_add_acq_rel(ctrl.flags, 1) == producers-1) {
+            for (int i = 0; i < router_blocks; ++i) { ik_st_release(ctrl.flags+1+i, 1); }
+            ik_st_relaxed(ctrl.flags, 0);
+        }
+    }
+    if constexpr (mode) {
+        if (!tid) {
+            while (!ik_ld_acquire(ctrl.flags+1+tile)) {}
+            ik_st_relaxed(ctrl.flags+1+tile, 0);
+        }
+        __syncthreads();
+    }
+    const float4 * state = (const float4 *) (mode ? ctrl.applied : args.st.p[0]);
+    float4 x[3], norm[3];
+    float sum = 0;
+#pragma unroll
+    for (int j = 0; j < 3; ++j) {
+        int k = tid+256*j;
+        if (k < 576) {
+            float4 v = state[k];
+            x[j] = v;
+            norm[j] = ((const float4 *)args.norm_w)[k];
+            sum += v.x*v.x + v.y*v.y + v.z*v.z + v.w*v.w;
+        }
+    }
+    sum = warp_reduce_sum(sum);
+    __shared__ float partial[8], scale;
+    if (!lane) { partial[warp] = sum; }
+    __syncthreads();
+    if (!tid) {
+        float total = 0;
+#pragma unroll
+        for (int w = 0; w < 8; ++w) { total += partial[w]; }
+        scale = rsqrtf(total/2304 + args.norm_eps);
+    }
+    __syncthreads();
+    __shared__ float dots[rows][576];
+#pragma unroll
+    for (int j = 0; j < 3; ++j) {
+        int k = tid+256*j;
+        const bool mine = k < 576 && (k/8)%router_blocks == tile;
+        float4 v{};
+        if (k < 576) {
+            const float4 a = x[j], n = norm[j];
+            v = make_float4(scale*a.x*n.x, scale*a.y*n.y, scale*a.z*n.z, scale*a.w*n.w);
+#pragma unroll
+            for (int r = 0; r < rows; ++r) {
+                const float4 w = weight[r][j];
+                dots[r][k] = w.x*v.x + w.y*v.y + w.z*v.z + w.w*v.w;
+            }
+            if (mine) { ((float4 *)args.dst)[k] = v; }
+        }
+        ik_store_q8_1_vec4(v, args.xq, k, mine);
+    }
+    __syncthreads();
+    if (warp < rows) {
+        float dot = 0;
+#pragma unroll
+        for (int j = 0; j < 18; ++j) { dot += dots[warp][j*32+lane]; }
+        dot = warp_reduce_sum(dot);
+        if (!lane) { args.logits[tile*rows+warp] = dot; }
+    }
+    __shared__ int last;
+    __syncthreads();
+    if (!tid) { last = ik_atomic_add_acq_rel(args.counter, 1) == router_blocks-1; }
+    __syncthreads();
+    if (!last) { return; }
+    __shared__ float s_prob[128], s_sel[128], s_selected[8];
+    // ===== the selection by the last block: the rank of every expert (ties: the smaller id first) =====
+    const int n_expert = args.n_expert;
+    if (tid < n_expert) {
+        const float p = 1.0f/(1.0f + expf(-args.logits[tid]));
+        s_prob[tid] = p;
+        s_sel[tid]  = p + args.probs_b[tid];
+    }
+    __syncthreads();
+    if (!__syncthreads_or(tid < n_expert && isnan(s_sel[tid]))) {
+        __shared__ unsigned long long winners[32];
+        if (tid < 128) {
+            const float score = s_sel[tid];
+            const unsigned bits = __float_as_uint(score == 0.0f ? 0.0f : score);
+            const unsigned ordered = bits ^ (bits & 0x80000000u ? 0xffffffffu : 0x80000000u);
+            // Descending keys break tied scores in favor of the smaller expert id.
+            const unsigned long long key = (static_cast<unsigned long long>(ordered) << 32) | (127u - tid);
+            const auto best = ik_sort_warp(key, lane);
+            if (lane < 8) { winners[warp*8 + lane] = best; }
+        }
+        __syncthreads();
+        if (warp == 0) {
+            const auto best = ik_sort_warp(winners[lane], lane);
+            const int id = 127 - (uint32_t) best;
+            const float prob = s_prob[id];
+            float sum = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) { sum += __shfl_sync(0xffffffffu, prob, i); }
+            if (lane < 8) {
+                args.route[lane] = id;
+                args.route[8 + lane] = __float_as_int(prob/(sum + args.w_eps)*args.w_scale);
+            }
+            if (lane == 0) { ik_st_relaxed(args.counter, 0); }
+        }
+        return;
+    }
+    int rank = n_expert;
+    if (tid < n_expert) {
+        const float mine = s_sel[tid];
+        rank = 0;
+#pragma unroll 16
+        for (int e = 0; e < n_expert; ++e) {
+            const float o = s_sel[e];
+            rank += (o > mine || (o == mine && e < tid)) ? 1 : 0;
+        }
+        if (rank < args.n_used) {
+            args.route[rank] = tid;
+            s_selected[rank] = s_prob[tid];
+        }
+    }
+    __syncthreads();
+    if (rank < args.n_used) {
+        // Normalize in top-k order, independent of which warp won the atomic race.
+        float sum = 0.0f;
+        for (int i = 0; i < args.n_used; ++i) {
+            sum += s_selected[i];
+        }
+        const float w = s_prob[tid]/(sum + args.w_eps)*args.w_scale;
+        args.route[args.n_used + rank] = __float_as_int(w);
+    }
+    if (tid == 0) {
+        *args.counter = 0;
+    }
+
+}
+
+bool ggml_cuda_controlled_route(ggml_backend_cuda_context & ctx, ggml_tensor * apply, ggml_tensor * dst, int setting) {
+    const int states = ggml_get_op_params_i32(dst, 6);
+    if (!ik_dependency_fusion(ctx) || dst->ne[0] != 2304 || !ggml_is_vector(dst) || states != 1 ||
+            dst->src[0] || ggml_get_op_params_i32(dst, 10) || ggml_get_op_params_i32(dst, 3) != 8 ||
+            dst->src[3]->ne[1] != 128 || !dst->src[5] || dst->src[5]->type != GGML_TYPE_Q8_1) { return false; }
+    if (apply && (dst->src[1] != apply || !ggml_is_vector(apply) || apply->ne[0] != 2304 ||
+            apply->type != GGML_TYPE_F32 || apply->src[5] || apply->src[2]->ne[0] != 64 ||
+            apply->src[3]->type != GGML_TYPE_F16 || apply->src[4]->type != GGML_TYPE_F16 ||
+            (uintptr_t)apply->src[2]->data%16 || (uintptr_t)apply->src[3]->data%8 || (uintptr_t)apply->src[4]->data%8)) { return false; }
+    ik_router_args a{};
+    a.n_used = 8;
+    a.n_expert = 128;
+    a.norm_eps = ggml_get_op_params_f32(dst, 2);
+    a.w_scale = ggml_get_op_params_f32(dst, 4);
+    a.w_eps = ggml_get_op_params_f32(dst, 5);
+    a.norm_w = (const float *)dst->src[2]->data;
+    a.probs_b = a.norm_w + 2304;
+    a.gate_inp = (const float *)dst->src[3]->data;
+    a.route = (int *)dst->src[4]->data;
+    a.xq = (block_q8_1 *)dst->src[5]->data;
+    a.dst = (float *)dst->data;
+    a.st.p[0] = (const float *)dst->src[1]->data;
+    ggml_cuda_pool_alloc<float> logits(ctx.pool(), 128), applied(ctx.pool());
+    a.logits = logits.get();
+    a.counter = ik_counters(ctx, 8, 1);
+    ik_plain_ctrl c{};
+    if (apply) {
+        applied.alloc(2304);
+        c = {(const float *)apply->src[0]->data, (const float *)apply->src[1]->data,
+            (const float *)apply->src[2]->data, (const half *)apply->src[3]->data, (const half *)apply->src[4]->data,
+            applied.get(), ik_counters(ctx, 850, 65)};
+    }
+    const int rows = abs(setting) == 3 ? 8 : abs(setting) == 4 ? 2 : 4;
+    const int mode = !apply ? 0 : setting < 0 ? 2 : 1;
+    auto launch = [&](auto count) {
+        constexpr int R = decltype(count)::value;
+        const int grid = 128/R + (mode == 1 ? 72 : 0);
+        if (!mode) {
+            ik_controlled_router<0,R><<<grid,256,0,ctx.stream()>>>(a,c);
+            return true;
+        }
+        auto kernel = mode == 1 ? ik_controlled_router<1,R> : ik_controlled_router<2,R>;
+        int resident;
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, kernel, 256, 0));
+        if (resident*82 < grid) { return false; }
+        void * params[] = {&a,&c};
+        CUDA_CHECK(cudaLaunchCooperativeKernel((void *)kernel, grid, 256, params, 0, ctx.stream()));
+        return true;
+    };
+    if (rows == 8) { return launch(std::integral_constant<int,8>{}); }
+    if (rows == 2) { return launch(std::integral_constant<int,2>{}); }
+    return launch(std::integral_constant<int,4>{});
+}
 template <int NS, int NC, bool MR = false, bool register_rows = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
@@ -4767,6 +4995,8 @@ static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_rou
 }
 
 void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    static const int plain = getenv("IK_CONTROLLED_ROUTER") ? atoi(getenv("IK_CONTROLLED_ROUTER")) : 0;
+    if (plain == 1 && ggml_cuda_controlled_route(ctx, nullptr, dst, 1)) { return; }
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
     const ggml_tensor * consts   = dst->src[1 + n_states];

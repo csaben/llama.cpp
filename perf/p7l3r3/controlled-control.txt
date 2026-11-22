@@ -1,0 +1,2 @@
+r3-control.sqlite                24.0 controller/router pairs per token, 8.687 us/pair
+r3-selected-final.sqlite         24.0 controller/router pairs per token, 8.870 us/pair

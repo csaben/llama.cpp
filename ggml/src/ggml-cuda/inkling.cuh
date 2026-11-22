@@ -22,3 +22,4 @@ bool ggml_cuda_inkling_segmented_projection_rows(ggml_backend_cuda_context & ctx
 bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst);
 bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml_tensor * down);
+bool ggml_cuda_controlled_route(ggml_backend_cuda_context & ctx, ggml_tensor * apply, ggml_tensor * router, int mode);
