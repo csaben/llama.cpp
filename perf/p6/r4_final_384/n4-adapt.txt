@@ -1,0 +1,4 @@
+n4-adapt       code      prompt     47   384 tok   221.7 tok/s    1320 chars  accepted/proposed 137/250  runs 215/222/224
+n4-adapt       edit      prompt   1025   384 tok   300.2 tok/s    1115 chars  accepted/proposed 284/308  runs 299/300/302
+n4-adapt       prose     prompt     36   384 tok   205.0 tok/s    1474 chars  accepted/proposed 46/100  runs 204/205/206
+n4-adapt       edit@16K  prompt  16044   384 tok   273.1 tok/s    1196 chars  accepted/proposed 289/315  runs 271/273/273

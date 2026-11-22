@@ -821,37 +821,39 @@ The first edit discrepancy is **generated token 1689** (index 1688, absolute pos
 
 All **24/24** drafted configurations and prompts matched their non-drafting reference at each token budget. At 3000 tokens that covers 72,000 emitted token IDs. At 384 tokens every one of the three repetitions also matched. The required reference, `plain-mr`, uses the same target flags as DSpark (`IK_MR=1 IK_MMA=3`) and the same backend sampler. The flag-free plain row uses the earlier short-context attention schedule and batched prompt kernels. Its long answers differ on all four prompts; it supplies a throughput comparison only.
 
-Inference commit `06d9abb`, GPU1 only, one fresh 32K-slot server per row, prompt caching off, temperature 0, seed 1, backend sampling. Drafter: `dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf`, minimum draft probability zero. Each entry gives decode tok/s followed by accepted/proposed drafts and mean target input rows per decode step, including plain steps. Mean width is `1 + proposed / (generated - 1 - accepted)`; the first token comes from prefill. Long rates are one run per prompt. Short rates are the median of three, with draft counts from that same run. Adaptive policy decisions depend on the times measured within that server.
+Final inference commit `399b61a`, GPU1 only, one fresh 32K-slot server per row, prompt caching off, temperature 0, seed 1, backend sampling. Drafter: `dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf`, minimum draft probability zero. Each entry gives decode tok/s followed by accepted/proposed drafts and mean target input rows per decode step, including plain steps. Mean width is `1 + proposed / (generated - 1 - accepted)`; the first token comes from prefill. Long rates are one run per prompt. Short rates are the median of three, with draft counts from that same run. Adaptive policy decisions depend on the times measured within that server.
 
 #### 3000 generated tokens
 
 | Configuration | Code | Edit | Prose | Edit@16K |
 |---|---:|---:|---:|---:|
-| plain | 204.0 | 199.8 | 203.8 | 184.8 |
-| plain-mr | 200.0 | 196.1 | 200.0 | 182.3 |
-| n2 | 239.9 (1780/2438, 3.00) | 255.1 (1899/2200, 3.00) | 228.3 (1731/2535, 3.00) | 227.3 (1905/2186, 3.00) |
-| n3 | 244.7 (1988/3033, 4.00) | 267.0 (2113/2657, 4.00) | 225.5 (1888/3331, 4.00) | 240.0 (2135/2592, 4.00) |
-| n4 | 228.0 (2091/3628, 5.00) | 261.3 (2245/3014, 5.00) | 207.5 (1996/4011, 5.00) | 234.1 (2262/2944, 4.99) |
-| n2-adapt | 230.2 (1367/1720, 2.05) | 250.1 (1774/1988, 2.62) | 232.9 (1438/1757, 2.13) | 223.9 (1660/1766, 2.32) |
-| n3-adapt | 239.8 (1492/1953, 2.30) | 262.3 (1888/2208, 2.99) | 238.7 (1502/2032, 2.36) | 236.8 (1836/1946, 2.67) |
-| n4-adapt | 239.6 (1536/2042, 2.40) | 260.8 (1862/2114, 2.86) | 232.0 (1343/1621, 1.98) | 222.9 (1632/1733, 2.27) |
+| plain | 205.0 | 199.9 | 203.0 | 184.4 |
+| plain-mr | 200.0 | 196.1 | 199.9 | 181.8 |
+| n2 | 239.6 (1780/2438, 3.00) | 259.2 (1899/2200, 3.00) | 233.9 (1731/2535, 3.00) | 243.1 (1905/2186, 3.00) |
+| n3 | 249.8 (1988/3033, 4.00) | 273.6 (2113/2657, 4.00) | 228.7 (1888/3331, 4.00) | 259.3 (2135/2592, 4.00) |
+| n4 | 230.1 (2091/3628, 5.00) | 266.2 (2245/3014, 5.00) | 210.6 (1996/4011, 5.00) | 249.9 (2262/2944, 4.99) |
+| n2-adapt | 235.1 (1426/1822, 2.16) | 259.5 (1891/2192, 2.98) | 235.5 (1461/1917, 2.25) | 241.8 (1786/1941, 2.60) |
+| n3-adapt | 242.2 (1502/2007, 2.34) | 266.6 (1928/2292, 3.14) | 238.8 (1412/1912, 2.20) | 250.5 (1828/2014, 2.72) |
+| n4-adapt | 237.2 (1394/1762, 2.10) | 263.9 (1805/1980, 2.66) | 243.3 (1551/2058, 2.42) | 255.8 (1926/2060, 2.92) |
 
 #### 384 generated tokens
 
 | Configuration | Code | Edit | Prose | Edit@16K |
 |---|---:|---:|---:|---:|
-| plain | 212.9 | 203.3 | 213.0 | 186.1 |
-| plain-mr | 209.8 | 200.4 | 209.5 | 183.1 |
-| n2 | 229.4 (203/357, 2.98) | 276.3 (250/264, 2.98) | 183.8 (159/445, 2.99) | 234.7 (247/270, 2.99) |
-| n3 | 226.7 (227/463, 3.97) | 302.1 (281/306, 4.00) | 167.3 (172/627, 3.97) | 251.6 (277/318, 4.00) |
-| n4 | 204.6 (239/568, 4.94) | 298.4 (297/341, 4.97) | 142.4 (178/811, 4.96) | 240.8 (293/359, 4.99) |
-| n2-adapt | 204.1 (2/2, 1.01) | 274.5 (249/262, 2.96) | 207.2 (38/70, 1.20) | 235.6 (241/258, 2.82) |
-| n3-adapt | 223.1 (137/247, 2.00) | 298.7 (278/300, 3.86) | 201.7 (38/108, 1.31) | 249.6 (267/294, 3.53) |
-| n4-adapt | 212.7 (67/112, 1.35) | 293.0 (276/297, 3.78) | 201.2 (38/99, 1.29) | 249.4 (277/299, 3.82) |
+| plain | 212.3 | 202.9 | 212.5 | 186.2 |
+| plain-mr | 210.0 | 200.1 | 209.3 | 183.8 |
+| n2 | 224.1 (203/357, 2.98) | 280.4 (250/264, 2.98) | 184.8 (159/445, 2.99) | 253.4 (247/270, 2.99) |
+| n3 | 223.2 (227/463, 3.97) | 308.4 (281/306, 4.00) | 167.4 (172/627, 3.97) | 271.1 (277/318, 4.00) |
+| n4 | 204.3 (239/568, 4.94) | 303.5 (297/341, 4.97) | 143.7 (178/811, 4.96) | 264.6 (293/359, 4.99) |
+| n2-adapt | 213.7 (164/281, 2.28) | 278.3 (249/262, 2.96) | 207.7 (38/70, 1.20) | 246.4 (246/268, 2.96) |
+| n3-adapt | 222.0 (131/234, 1.93) | 310.7 (281/297, 3.91) | 205.1 (57/132, 1.40) | 246.9 (246/268, 2.96) |
+| n4-adapt | 221.7 (137/250, 2.02) | 300.2 (284/308, 4.11) | 205.0 (46/100, 1.30) | 273.1 (289/315, 4.35) |
 
 With natural stopping, the n3 run on the first cache fix (`dca9008`) matched all four full messages. Plain-mr and n3 generated 3000 code tokens (201.8 vs 244.3 tok/s), 3000 edit tokens (197.0 vs 265.8), 2838 prose tokens (200.9 vs 223.3) and 1318 edit@16K tokens (183.3 vs 224.6). The fixed-length tables above suppress EOS and verify the entire token stream, including tokens after the parsed answer.
 
-Reproduce with `bash perf/p6/r4_spec.sh perf/p6/r4_3000` and `SPEC_MAXT=384 SPEC_REPS=3 bash perf/p6/r4_spec.sh perf/p6/r4_384`. The outputs include timing logs, full JSON messages, raw little-endian int32 token IDs and `equality.txt`. Compare either directory with `SPEC_KINDS=code,edit,prose,edit@16K SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py DIR plain-mr n2 n3 n4 n2-adapt n3-adapt n4-adapt`.
+Reproduce with `bash perf/p6/r4_spec.sh perf/p6/r4_final_3000` and `SPEC_MAXT=384 SPEC_REPS=3 bash perf/p6/r4_spec.sh perf/p6/r4_final_384`. The first correctness build at `06d9abb` has its own tables in `p6/r4_3000/` and `p6/r4_384/`. All 64 message files and all 64 token arrays from the final build matched those earlier captures at the same budget and configuration. The outputs include timing logs, full JSON messages, raw little-endian int32 token IDs and `equality.txt`. Compare either directory with `SPEC_KINDS=code,edit,prose,edit@16K SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py DIR plain-mr n2 n3 n4 n2-adapt n3-adapt n4-adapt`.
+
+Fixed n3 recorded the fastest long edits in this sweep, 273.6 tok/s on edit and 259.3 on edit@16K (matched plain 196.1 and 181.8). Adaptive n3 gained 21% / 36% / 19% / 38% over matched plain on the four long prompts. On short prose it gave up 2% (205.1 vs 209.3), and fixed n3 gave up 20% (167.4). Adaptive n3 reached 310.7 tok/s on short edit. The 3000-token table is the standard for long replies.
 
 #### Plain sampler and regression checks
 
