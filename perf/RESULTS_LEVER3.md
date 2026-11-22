@@ -265,3 +265,26 @@ The winning mixed-state down dot recomputes the 2304-channel state mix in shared
 Real graph branches split the independent message half from the state half of the controller dot. Moving the fork from the mix to the preceding projection/FFN sum, then before attention, gave 3.071, 3.468 and 4.862 us of concurrent work per matched controller. The earliest fork had the most overlap and ran at 222.80 tok/s, below the 224.14 tok/s mix-local fork. Another schedule batched message halves from a complete pass into a 64-by-48 grid, twice per token. The side stream ran about 19.51 us per pass, with 4.21 us of measured overlap. Both exact pass schedules ran near 221 tok/s. Combining those prepared terms with the mixed-state down dot changed the logits with graphs both enabled and disabled. The default excludes that variant. [Branch screens](p7l3r3/branches.txt), [measured overlap](p7l3r3/controller-trace.txt), [pass timings](p7l3r3/layer-and-pass.txt), [pass screen](p7l3r3/pass-screen.txt)
 
 A further 20 projection/attention schedules let the last projection tile for each KV head continue directly into attention. The fastest took 26.059 us against about 23.24 us for the two graph kernels. The exact FFN state-update-to-residual-mix experiment took 6.426-8.324 us against 6.064 us for the same 46 graph pairs, depending on the residence and tile schedule. These stages and the cross-pass branches remain reproducible at their experiment tags. [Dense continuation sweep](p7l3r3/drain.txt), [control](p7l3r3/control-edges.txt), [FFN sum/mix](p7l3r3/tail-mix.txt), [matched site timings](p7l3r3/matched-edges.txt)
+
+### Reproducing the Round 3 measurements
+
+The archived baseline is the Release sm_86 build of 16264c6 described in Round 2. Round 3 benchmarks launch that executable with its own shared libraries. The test driver selects the 3090 before starting a CUDA process. Its four-depth run and its off/on/on/off comparisons start at or below 63 C. Each per-depth mean in the paired comparison pools two runs with three tg128 repetitions each. Quality, DSpark and operator commands use the same Q2 model and corpus. Full Nsight databases are under `build/p7l3/r3-*.sqlite`. [Test driver](p7l3r3/validate.sh), [reference build instructions](#round-2-on-gpu0), [logit driver](p7l3/logits.cpp), [DSpark trace checker](p6/mr_check.cpp), [CUDA operator fixtures](../tests/test-backend-ops.cpp)
+
+```bash
+. perf/p5env.sh
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0
+export LD_LIBRARY_PATH="$PWD/build/bin"
+mkdir -p build/p7l3r3
+"$HOME/opt/cuda-12.8/bin/nvcc" -O3 -std=c++17 -arch=sm_86 -rdc=true perf/p7l3r3/dependency.cu -o build/p7l3r3/dependency
+build/p7l3r3/dependency
+for stage in bench quality mr ops guards; do perf/p7l3r3/validate.sh "$stage" || break; done
+```
+
+At `p7l3r3-complete-layer`, set `IK_ROUTE_VISIT=3 IK_COMPLETE_LAYER=1` to exercise the 19 eligible layers. At `p7l3r3-full-ffn`, use `IK_ROUTE_VISIT=3 IK_FULL_FFN=1` for the 42 FFN visits. At `p7l3r3-resident-route`, set only `IK_ROUTE_VISIT=3`. Values 1-3 request resident blocks per SM, subject to the reported occupancy and whole-expert-grid rounding. Use `IK_ROUTER_TILE=-4` at `p7l3r3-register-router`, `IK_CTRL_BRANCH=-1` or `IK_CTRL_PAIR=1` at `p7l3r3-ctrl-pair`, and `IK_APPLY_PACK=1` at `p7l3r3-apply-pack`. The earlier `p7l3r3-mix-down` prototype predates the shared-memory alignment fix. [Route sweep](p7l3r3/route-visit.txt), [layer timing](p7l3r3/layer-and-pass.txt), [controller measurements](p7l3r3/controller-trace.txt)
+
+At `p7l3r3-controller-branches`, `IK_CTRL_BRANCH=1, 2, 3` select progressively earlier forks (set one integer per run). At `p7l3r3-message-pass`, use `IK_MESSAGE_PASS=1` for serial, `2` for the side stream. At `p7l3r3-projection-drain`, `IK_DENSE_DRAIN=-2 IK_DRAIN_CTAS=16` selects the best dense continuation. At `p7l3r3-tail-mix`, use `IK_TAIL_MIX=-4`. The Nsight commands profile CUDA graph nodes and export SQLite for matched-site analysis. [Branch overlap](p7l3r3/controller_trace.py), [layer spans](p7l3r3/layer_spans.py), [matched sites](p7l3r3/matched_edges.py), [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)
+
+```bash
+"$HOME/opt/cuda-12.8/nsight-systems-2024.6.2/bin/nsys" profile -t cuda --sample=none --cpuctxsw=none --cuda-graph-trace=node --export=sqlite -o build/p7l3r3/repro build/bin/llama-bench -m "$Q2" -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 0 -n 128 -d 0 -r 1
+python3 perf/p7l3r3/edges.py build/p7l3r3/repro.sqlite
+```
