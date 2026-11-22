@@ -4608,6 +4608,38 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
+
+    static const int dense_mode = ggml_cuda_env_int("IK_DENSE_VISIT", 0);
+    if (dense_mode && !ggml_cuda_env_flag("IK_MR") && node->op == GGML_OP_MUL_MAT && cuda_ctx->stream_context().concurrent_events.empty() &&
+            node->src[0]->type == GGML_TYPE_IQ4_NL && node->src[0]->ne[0] == 2304 && ggml_is_contiguous(node->src[0]) &&
+            ggml_is_matrix(node) && (node->ne[1] == 1 || node->ne[1] == 3) && node->src[1]->type == GGML_TYPE_Q8_1 &&
+            ggml_is_contiguous(node->src[1]) && ggml_node_has_n_uses(cgraph, i, 1)) {
+        auto next = [&](int j) {
+            do { ++j; } while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j]));
+            return j;
+        };
+        const int j = next(i), k = next(j);
+        if (k < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_INKLING_ATTN && cgraph->nodes[j]->src[0] == node &&
+                cgraph->nodes[j]->src[4]->ne[2] == 256 && ggml_node_has_n_uses(cgraph, j, 1) &&
+                cgraph->nodes[k]->op == GGML_OP_MUL_MAT && cgraph->nodes[k]->src[1] == cgraph->nodes[j]) {
+            const int end = ik_projection_conv_end(*cuda_ctx, cgraph, k);
+            ik_dense_visit v{};
+            if (end > k && ggml_cuda_inkling_projection_conv(*cuda_ctx, cgraph->nodes[k], cgraph->nodes[end], &v.conv)) {
+                v.wi = (const block_iq4_nl *) node->src[0]->data;
+                v.x = (const block_q8_1 *) node->src[1]->data;
+                v.wo = (const block_iq4_nl *) cgraph->nodes[k]->src[0]->data;
+                v.out = (float *) cgraph->nodes[end]->data;
+                v.mode = dense_mode;
+                v.prefetch = ggml_cuda_env_int("IK_DENSE_PREFETCH", 1);
+                // The two-stage variant publishes attention before the input projection has drained.
+                const uintptr_t x = uintptr_t(v.x), y = uintptr_t(cgraph->nodes[j]->data);
+                if ((dense_mode != 2 || x + ggml_nbytes(node->src[1]) <= y || y + ggml_nbytes(cgraph->nodes[j]) <= x) &&
+                        ggml_cuda_inkling_dense_visit(*cuda_ctx, cgraph->nodes[j], v)) {
+                    return (dense_mode == 2 ? j : end) - i;
+                }
+            }
+        }
+    }
     if (node->op == GGML_OP_MUL_MAT && cuda_ctx->stream_context().concurrent_events.empty()) {
         const int j = ik_projection_conv_end(*cuda_ctx, cgraph, i);
         if (j > i && ggml_cuda_inkling_projection_conv(*cuda_ctx, node, cgraph->nodes[j])) {

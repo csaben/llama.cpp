@@ -2371,7 +2371,7 @@ static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float 
 #define IK_A2_MIN_BLOCKS 1
 #endif
 template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
-static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in) {
+static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
@@ -2432,8 +2432,6 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     }
     const ik_attn_args & args = MR || HAS_TAPS >= 0 ? args_m : args_in;
 
-    const int g     = MR ? blockIdx.y : blockIdx.x;
-    const int split = MR ? blockIdx.z : blockIdx.y;
     const int tid   = threadIdx.x;
     const int lane  = tid % WARP_SIZE;
     const int warp  = tid / WARP_SIZE;
@@ -2999,6 +2997,13 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     IK_DBG_T(7);
 }
 
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
+static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args) {
+    ik_attention_tile<cache_t, q8_out, G, MMA, MR, HAS_TAPS, SHORT_SCAN>(args, MR ? blockIdx.y : blockIdx.x, MR ? blockIdx.z : blockIdx.y);
+}
+
+#include "inkling-visit.cuh"
+
 // ---------------------------------------------------------------------------------------------------------------------
 // inkling_attn_scan: the scan of a long Q8_0 cache as its own launch. A (cell, kv head) row is 136 bytes, so it lies
 // across two 128-byte lines that it shares with the rows of the neighbouring heads. With one block per kv head (the
@@ -3226,7 +3231,7 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
     }
 }
 
-void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ik_dense_visit * visit) {
     const ggml_tensor * proj    = dst->src[0];
     const ggml_tensor * consts  = dst->src[1];
     ggml_tensor       * state   = dst->src[2];
@@ -3364,6 +3369,15 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
 
     cudaStream_t stream = ctx.stream();
     const int gqa = a.n_head/a.n_head_kv;
+    if (visit) {
+        if (!short_scan || (proj->ne[0] != (a.has_taps ? 8664 : 8600))) { return false; }
+        ggml_cuda_pool_alloc<float> projection(ctx.pool(), proj->ne[0]);
+        ggml_cuda_pool_alloc<block_q8_1> activation(ctx.pool(), 3072/QK8_1);
+        a.proj = projection.get();
+        a.dst = visit->mode == 2 ? dst->data : activation.get();
+        visit->counters = ik_counters(ctx, 192, 10);
+        return a.has_taps ? ik_launch_dense<1>(ctx, a, *visit) : ik_launch_dense<0>(ctx, a, *visit);
+    }
 
     ggml_cuda_pool_alloc<float> part(ctx.pool());
     a.part = nullptr; a.counters = nullptr;
@@ -3400,14 +3414,14 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
                 if (q8) { inkling_attn2_launch<block_q8_0, true, false, true>(a, grid_mr, stream); } else { inkling_attn2_launch<block_q8_0, false, false, true>(a, grid_mr, stream); }
             }
         }
-        return;
+        return true;
     }
     if (ext) {
         inkling_attn_scan_launch(a, n_ext, stream);
         a.ext_scan = 1;
         const dim3 grid1(a.n_head_kv, 1, 1);
         if (q8) { inkling_attn2_launch<block_q8_0, true>(a, grid1, stream); } else { inkling_attn2_launch<block_q8_0, false>(a, grid1, stream); }
-        return;
+        return true;
     }
     const dim3 grid(a.n_head_kv, a.n_split, 1);
     if (fixed) {
@@ -3418,7 +3432,7 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 1><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
             else            { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 0><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
         }
-        return;
+        return true;
     }
     if (!v1) {
         if (k_cache->type == GGML_TYPE_F16) {
@@ -3430,7 +3444,7 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
                 if (q8) { inkling_attn2_launch<block_q8_0, true>(a, grid, stream); } else { inkling_attn2_launch<block_q8_0, false>(a, grid, stream); }
             }
         }
-        return;
+        return true;
     }
     if (k_cache->type == GGML_TYPE_F16) {
         if (q8) {
@@ -3445,6 +3459,15 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             inkling_attn_kernel<block_q8_0, false><<<grid, IK_ATTN_BLOCK, 0, stream>>>(a);
         }
     }
+    return true;
+}
+
+void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    ik_dispatch_attention(ctx, dst, nullptr);
+}
+
+bool ggml_cuda_inkling_dense_visit(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ik_dense_visit visit) {
+    return ik_dispatch_attention(ctx, dst, &visit);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

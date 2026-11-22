@@ -1,0 +1,10 @@
+head-to-head 5.13822 ms
+full visit          48.0 visits/token    37.779 us/visit
+head-to-head 5.25349 ms
+head-prefix         29.0 visits/token    40.319 us/visit
+prefix + output     29.0 visits/token    47.266 us/visit
+graph prefix        19.0 visits/token    24.753 us/visit
+graph visit         19.0 visits/token    31.468 us/visit
+graph qkv           19.0 visits/token    15.831 us/visit
+graph attention     19.0 visits/token     8.985 us/visit
+graph output        19.0 visits/token     6.761 us/visit
