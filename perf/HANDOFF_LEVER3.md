@@ -1,5 +1,11 @@
 # GPU0 Phase 7 handoff
 
+## Round 4 in progress
+
+The starting source is the Round 3 default. GPU0 traces at both depths rank gate/attention, router and mixed-state controller down first. The table includes one actual mid-run step and a 120-step mean. The local traces are in build/p7l3r4. [Single-token table](p7l3r4/latency-single.md), [mean table](p7l3r4/latency-mean.md), [commands](p7l3r4/run.sh)
+
+## Round 3
+
 Round 3 selected source is **812b439**, tagged **p7l3r3-selected-grid-225tok**. It uses two-rank mixed-state down dots, a cooperative controller RMS/pack barrier, and four-row register routing for queried states. Set `IK_DEPENDENCY_FUSION=0` for the Round 2 control. Final local tag **p7l3r3-final-225tok**. Validation finished at 04:53 EST on November 22, 2026. [Round 3 results](RESULTS_LEVER3.md#round-3-on-gpu0), [crossover](p7l3r3/sync-pairs.txt)
 
 Final default tg128 measured **224.77 / 206.57 / 193.43 / 178.68 tok/s** at 0 / 4096 / 16384 / 32768 on GPU0. The same-binary gains over Round 2 were +0.92% / +1.00% / +0.82% / +0.93%. The depth-zero target still needs 1.116 ms/token. All 88 logit rows, 2,834 DSpark rows and 3,988 supported operator cases passed. PPL was 3.0530 for prefill and 4.1979 for decode. [Default benchmark](p7l3r3/final/official-on.txt), [paired control](p7l3r3/final/paired.txt), [PPL](p7l3r3/final/ppl.txt), [logits](p7l3r3/final/logits.txt), [DSpark](p7l3r3/final/mr.txt), [ops](p7l3r3/final/ops.txt)
