@@ -1,6 +1,19 @@
 # Phase 8
 
-Stream A in progress on physical GPU1. The controller pack now assigns one warp per output stripe. The first paired test gained 0.57% at depth zero with identical full logits at prefixes 113 and 1129. Scalar glue also passed the first MR/MMA crossover and logit checks (+3.05% at zero and +2.79% at 16K). Single-row MR attention also passed the depth crossover and shallow split checks, including 324 exact boundary rows. The long attention gate warp reuses permuted Q8 input across rows (18.53 us/token saved at 16K). Source `66eadaf` (`p8a-runtime`) is built. The main 384-token matrix passed all 90 drafted replies and 34,560 emitted IDs. Adaptive cap 3 measured 350.4 tok/s on short edit. On short prose it measured 224.9 versus 226.8 plain. Combined plain decode gained 0.64-1.10% over frozen p7c at the four depths. Single-token MR/MMA gained 7.32-9.07%. Both correctness batteries, all 1,024 depth rows, 432 frozen full-logit rows, the expanded 3,988-case operator suite and four synchronization checks passed. All 30 guarded 3,000-token replies and 90,000 IDs on the five main prompts matched both controls. The 90 supplemental prose replies also matched. All 60 fixed-width controls also passed. The verified nine-file snapshot is undergoing independent server probes. Frozen source `401460d` passed its nine-file manifest. Fresh tg128 node traces rank gate/attention, routing and controller down first at both depths. [Ranked baseline](p8/base/latency-mean.md), [results](RESULTS.md#phase-8).
+**Staged and verified on GPU1.** Source `66eadaf` (`p8a-runtime`), local release tag `p8a-release`, snapshot `~/inkling-live-bin-p8-66eadaf`. All nine hashes passed and all eight project libraries resolved inside the snapshot. The manual deploy script was syntax-checked and left unexecuted. It uses guarded adaptive cap 3, the folded 32K drafter and one 64K slot on GPU1, with Phase 5 fallback. [Manual deploy](live/deploy-p8.sh), [SHA-256 manifest](p8/snapshot.sha256), [results and reproduction](RESULTS.md#phase-8).
+
+| Paired GPU1 tg128, tok/s | 0 | 4,096 | 16,384 | 32,768 |
+|---|---:|---:|---:|---:|
+| Plain p7c | 239.28 | 218.79 | 205.51 | 189.61 |
+| Plain p8 | 240.80 | 221.19 | 207.44 | 191.35 |
+| MR/MMA p7c | 214.32 | 199.70 | 188.29 | 173.54 |
+| MR/MMA p8 | 230.00 | 217.81 | 204.50 | 188.53 |
+
+The controller pack saved 23.5-25.0 us/token in the final traces, and long attention saved 14.8 us/token at 16K. Single-row MR decode uses the scalar glue and fused attention paths. [Frozen rankings](p8/base/latency-mean.md), [release kernel deltas](p8/final/kernel-deltas.md), [isolated experiments](p8/screenings.md).
+
+All 270 drafted matrix replies and 260,640 IDs matched same-flags plain and frozen p7c. The snapshot matched another 20 drafted replies and 7,680 IDs. At 3,000 tokens, adaptive cap 3 measured 279.5 / 307.6 / 299.0 / 298.8 / 304.3 tok/s on code / edit / prose / edit at 16K / edit at 32K. All 45 guarded long comparisons beat plain. Eleven of 45 short comparisons trailed plain by up to 1.25%. [All six matrices](p8/release/matrices.md), [snapshot probes](p8/release/snapshot-probes/).
+
+Both flag batteries matched all 2,714 rollback/boundary rows apiece, six greedy outputs and PPL. Another 1,024 depth rows and 432 full-vocabulary rows matched. Both 1,108-case batteries, the expanded 3,988-case CUDA suite and all four synchronization checks passed. [Exactness results](RESULTS.md#exactness-checks).
 
 # Phase 7c hand-off
 

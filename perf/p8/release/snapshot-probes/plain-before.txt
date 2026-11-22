@@ -1,0 +1,2 @@
+plain-before   edit      prompt   1025   384 tok   221.8 tok/s    1115 chars  runs 221/222/222/222/222
+plain-before   prose     prompt     36   384 tok   225.5 tok/s    1474 chars  runs 225/225/226/226/226

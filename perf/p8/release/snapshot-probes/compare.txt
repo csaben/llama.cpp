@@ -1,0 +1,6 @@
+n3           edit      identical (1228 bytes)
+n3-adapt     edit      identical (1228 bytes)
+plain-after  edit      identical (1228 bytes)
+n3           prose     identical (1569 bytes)
+n3-adapt     prose     identical (1569 bytes)
+plain-after  prose     identical (1569 bytes)

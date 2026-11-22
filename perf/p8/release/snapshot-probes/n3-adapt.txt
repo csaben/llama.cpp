@@ -1,0 +1,2 @@
+n3-adapt       edit      prompt   1025   384 tok   351.5 tok/s    1115 chars  accepted/proposed 274/281  runs 349/349/351/352/352
+n3-adapt       prose     prompt     36   384 tok   225.2 tok/s    1474 chars  accepted/proposed 127/183  runs 225/225/225/225/225

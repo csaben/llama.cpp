@@ -1,0 +1,2 @@
+n3             edit      prompt   1025   384 tok   351.6 tok/s    1115 chars  accepted/proposed 274/281  runs 350/350/352/352/353
+n3             prose     prompt     36   384 tok   224.7 tok/s    1474 chars  accepted/proposed 127/187  runs 224/224/225/225/226
