@@ -3,6 +3,7 @@
 set -eu -o pipefail
 cd "$(dirname "$0")/../.."
 . perf/p8bc/env.sh
+if [[ -n ${P8_LIBS:-} ]]; then export LD_LIBRARY_PATH="$P8_LIBS:$LD_LIBRARY_PATH"; fi
 out=${1:?usage: matrix.sh OUTPUT_DIRECTORY}
 for budget in 384 3000; do
     export SPEC_MAXT=$budget

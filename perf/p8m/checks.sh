@@ -3,8 +3,8 @@
 set -euo pipefail
 source perf/p5env.sh
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CHECKS_GPU=1 LD_LIBRARY_PATH="$PWD/build/bin"
-export VERIFY_WORK=build/p8m VERIFY_CORE_OPS=1110 VERIFY_MATRIX_OPS=3779
-out=perf/p8m/checks
+export VERIFY_WORK=${VERIFY_WORK:-build/p8m} VERIFY_CORE_OPS=1110 VERIFY_MATRIX_OPS=3779
+out=${2:-perf/p8m/checks}
 mkdir -p "$out" "$VERIFY_WORK"
 case "${1:?stage}" in
     checks|checks-default|depth|logits|ops|sync)

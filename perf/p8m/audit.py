@@ -2,12 +2,14 @@
 import csv
 import hashlib
 import re
+import sys
 from pathlib import Path
 
-root = Path("perf/p8m/matrix")
+root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("perf/p8m/matrix")
 with (root / "cells.tsv").open() as f:
     cells = list(csv.DictReader(f, delimiter="\t"))
-with Path("perf/p8bc/matrix/cells.tsv").open() as f:
+baseline = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("perf/p8bc/matrix/cells.tsv")
+with baseline.open() as f:
     frozen = {(c["suite"], c["budget"], c["prompt"]): c for c in csv.DictReader(f, delimiter="\t") if c["setting"] == "plain"}
 replies = ids = 0
 for c in cells:
