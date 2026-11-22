@@ -128,7 +128,7 @@ common_speculative_init_result_ptr common_speculative_init_from_params(common_pa
 
 // LLAMA_SPEC_PROF=1: wall time of the parts of a speculative round, printed per request (perf/p6, round 3)
 enum common_spec_prof_slot { SPEC_PROF_DRAFT, SPEC_PROF_DRAFT_DECODE, SPEC_PROF_DRAFT_READ, SPEC_PROF_TARGET, SPEC_PROF_INJECT,
-                             SPEC_PROF_INJECT_DECODE, SPEC_PROF_ACCEPT, SPEC_PROF_COUNT };
+                             SPEC_PROF_INJECT_DECODE, SPEC_PROF_ACCEPT, SPEC_PROF_SUBMIT, SPEC_PROF_WAIT, SPEC_PROF_BATCH, SPEC_PROF_COUNT };
 bool common_spec_prof_on();
 void common_spec_prof_add(int slot, int64_t us, int n = 1);
 void common_spec_prof_dump(int n_tokens);

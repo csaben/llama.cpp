@@ -4187,7 +4187,7 @@ void common_spec_prof_dump(int n_tokens) {
     if (!common_spec_prof_on() || g_spec_prof_t0 == 0) {
         return;
     }
-    static const char * names[SPEC_PROF_COUNT] = { "draft", "draft.decode", "draft.read", "target", "inject", "inject.decode", "accept" };
+    static const char * names[SPEC_PROF_COUNT] = { "draft", "draft.decode", "draft.read", "target", "inject", "inject.decode", "accept", "target.submit", "target.wait", "batch.build" };
     const double wall = (ggml_time_us() - g_spec_prof_t0)/1e3;
     const double steps = (double) std::max<int64_t>(1, g_spec_prof_n[SPEC_PROF_TARGET]);
     fprintf(stderr, "spec_prof: %d tokens, %.0f target steps, wall %.1f ms (%.3f ms/step)\n", n_tokens, steps, wall, wall/steps);

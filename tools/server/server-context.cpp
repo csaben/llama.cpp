@@ -3889,6 +3889,7 @@ private:
             if (t_prof) { common_spec_prof_add(SPEC_PROF_DRAFT, ggml_time_us() - t_prof); }
         }
 
+        const int64_t t_prof_batch = common_spec_prof_on() && !drafting.empty() ? ggml_time_us() : 0;
         // make checkpoints if needed
         iterate(drafting, [&](server_slot & slot) {
             auto & draft = slot.spec_draft;
@@ -3941,6 +3942,8 @@ private:
         iterate(generating, [&](server_slot & slot) {
             slot.handle_last_sampled_token(batch);
         });
+
+        if (t_prof_batch) { common_spec_prof_add(SPEC_PROF_BATCH, ggml_time_us() - t_prof_batch); }
 
         // process in chunks of params.n_batch
         int32_t n_batch  = llama_n_batch(ctx_tgt);
@@ -4662,8 +4665,11 @@ private:
         const int64_t t_prof_tgt = common_spec_prof_on() && spec ? ggml_time_us() : 0;
         queue_tasks.yield_to_queue([&]() {
             ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
+            const int64_t submitted = t_prof_tgt && batch.view.size() <= 16 ? ggml_time_us() : 0;
+            if (submitted) { common_spec_prof_add(SPEC_PROF_SUBMIT, submitted - t_prof_tgt); }
             if (ret == 0 && has_output) {
                 llama_synchronize(ctx_tgt);
+                if (submitted) { common_spec_prof_add(SPEC_PROF_WAIT, ggml_time_us() - submitted); }
             }
         });
         if (t_prof_tgt && batch.view.size() <= 16) { common_spec_prof_add(SPEC_PROF_TARGET, ggml_time_us() - t_prof_tgt); }
