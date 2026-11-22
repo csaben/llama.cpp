@@ -1,0 +1,6 @@
+release3       code      prompt     47   384 tok   241.9 tok/s    1320 chars  accepted/proposed 190/242  runs 241/242/243
+release3       edit      prompt   1025   384 tok   327.7 tok/s    1115 chars  accepted/proposed 274/281  runs 326/328/331
+release3       prose     prompt     36   384 tok   209.1 tok/s    1474 chars  accepted/proposed 129/182  runs 209/209/211
+release3       edit@16K  prompt  16044   384 tok   278.8 tok/s    1196 chars  accepted/proposed 266/289  runs 278/279/279
+release3       edit@32K  prompt  32045   384 tok   243.5 tok/s    1321 chars  accepted/proposed 249/276  runs 239/243/247
+release3       agent     prompt   2025   384 tok   280.0 tok/s    1284 chars  accepted/proposed 252/284  runs 276/280/281
