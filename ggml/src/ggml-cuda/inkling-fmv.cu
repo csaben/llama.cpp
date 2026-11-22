@@ -150,6 +150,9 @@ bool ggml_cuda_inkling_segmented_projection_rows(ggml_backend_cuda_context & ctx
             case 2:  launch(std::integral_constant<int, 2>{}); break;
             case 3:  launch(std::integral_constant<int, 3>{}); break;
             case 4:  launch(std::integral_constant<int, 4>{}); break;
+            case 5:  launch(std::integral_constant<int, 5>{}); break;
+            case 6:  launch(std::integral_constant<int, 6>{}); break;
+            case 7:  launch(std::integral_constant<int, 7>{}); break;
             default: launch(std::integral_constant<int, 0>{}); break;
         }
     }
