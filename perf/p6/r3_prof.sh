@@ -6,7 +6,7 @@ N=$1; KINDS=${2:-edit}; shift; shift; [ "$1" = "--" ] && shift
 L=${PROF_LOG:-/tmp/claude-1000/-home-arelius-deploy/453a4d12-6978-485f-8868-dd0a2e664559/scratchpad/r3prof.log}
 EXTRA="--backend-sampling"
 [ "$N" != 0 ] && EXTRA="$EXTRA --spec-type draft-dspark --spec-draft-model ${DRAFT_FILE:-$DRAFT_FOLD} --spec-draft-n-max $N --spec-draft-p-min ${PMIN:-0}"
-IK_MMA=${IK_MMA-3} IK_MR=${IK_MR-1} LLAMA_SPEC_PROF=1 build/bin/llama-server -m $Q2 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 32768 -np 1 --port 8043 --host 127.0.0.1 $EXTRA "$@" >$L 2>&1 &
+IK_MMA=${IK_MMA-3} IK_MR=${IK_MR-1} LLAMA_SPEC_PROF=${PROF-1} build/bin/llama-server -m $Q2 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 32768 -np 1 --port 8043 --host 127.0.0.1 $EXTRA "$@" >$L 2>&1 &
 for i in $(seq 1 240); do curl -sf -m1 http://127.0.0.1:8043/health >/dev/null && break; sleep 0.5; done
 python3 - $KINDS <<'PY'
 import json, sys, urllib.request, os

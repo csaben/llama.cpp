@@ -78,7 +78,7 @@ static __device__ __forceinline__ dspark_pick_part dspark_pick_block_reduce(dspa
     return p;
 }
 
-static __global__ void dspark_pick_scan(const float * base, const float * bias, const int * ids, dspark_pick_part * parts,
+static __global__ void dspark_pick_scan(const float * base, const float * bias, const float * ids, dspark_pick_part * parts,
         const int n_valid, const float cap) {
     __shared__ dspark_pick_part sh[DSPARK_PICK_BLOCK/32];
     dspark_pick_part p = { -INFINITY, INT_MAX, -INFINITY };
@@ -89,7 +89,7 @@ static __global__ void dspark_pick_scan(const float * base, const float * bias, 
         if (r >= n_valid) {
             break;
         }
-        const int t = ids ? ids[r] : r;
+        const int t = ids ? (int) ids[r] : r;
         if (t < 0) {
             continue;
         }
@@ -135,7 +135,7 @@ void ggml_cuda_op_dspark_pick(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     ggml_cuda_pool_alloc<dspark_pick_part> parts(ctx.pool(), n_parts);
 
     dspark_pick_scan<<<n_parts, DSPARK_PICK_BLOCK, 0, stream>>>((const float *) base->data, bias ? (const float *) bias->data : nullptr,
-            ids ? (const int *) ids->data : nullptr, parts.get(), n_valid, cap);
+            ids ? (const float *) ids->data : nullptr, parts.get(), n_valid, cap);
     dspark_pick_final<<<1, DSPARK_PICK_BLOCK, 0, stream>>>(parts.get(), n_parts, prev ? (const int *) prev->data : nullptr,
             prev ? (int) ggml_nelements(prev) : 0, (int *) dst->data);
 }

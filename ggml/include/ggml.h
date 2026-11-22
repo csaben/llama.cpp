@@ -2629,7 +2629,7 @@ extern "C" {
     // One draft position of the DSpark head: v[r] = softcap(base[r] + bias[r]) (softcap(x) = tanh(x/cap)*cap, cap <= 0: none)
     // over the rows r < n_valid whose ids[r] >= 0; the result is prev followed by { token, bits of (v1 - v2) }: the token
     // of the largest v (ties: the smallest token id), and its margin over the second largest v.
-    //   base [n] F32, bias [n] F32 or NULL, ids [n] I32 or NULL (row -> token id; NULL: the row index),
+    //   base [n] F32, bias [n] F32 or NULL, ids [n] F32 or NULL (row -> token id, a weight tensor; NULL: the row index),
     //   prev [2k] I32 or NULL -> dst [2k + 2] I32
     GGML_API struct ggml_tensor * ggml_dspark_pick(
             struct ggml_context * ctx,

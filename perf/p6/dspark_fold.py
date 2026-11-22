@@ -9,7 +9,14 @@ full-vocabulary matvec over the target head (201,024 x 2,304 IQ4_NL, 261 MB). Wi
 it is  fold @ latent + fold_bias.  The target still verifies every draft with its full head, so only the drafts
 (not the output) can change.
 
-usage: .venv/bin/python perf/p6/dspark_fold.py TARGET.gguf DRAFTER.gguf OUT.gguf
+With RANK.bin (token ids by descending frequency, perf/p6/shortlist_rank.py) the file also gets a shortlist head
+(round 3; after ingine's shortlist head, Apache-2.0, https://github.com/satellitedown/inkling-2-mini-abliterated-ingine
+native/src/model/drafter.h; the idea only, no code or data copied): the K most frequent tokens and the control tokens,
+by ascending id, as  dspark_short_head.weight  (their rows of target.output, bytes copied as stored),
+dspark_short_fold.weight / .bias  (their rows of the fold) and  dspark_short_ids.weight  (row -> token id as F32, -1 = unused).
+The drafter then scores a draft position over these rows only.
+
+usage: .venv/bin/python perf/p6/dspark_fold.py TARGET.gguf DRAFTER.gguf OUT.gguf [RANK.bin [K=32768]]
 """
 import os
 import sys
@@ -35,6 +42,8 @@ def to_f32(t):
 
 def main():
     target_path, draft_path, out_path = sys.argv[1:4]
+    rank_path = sys.argv[4] if len(sys.argv) > 4 else None
+    short_k = int(sys.argv[5]) if len(sys.argv) > 5 else 32768
     if os.path.exists(out_path):
         raise SystemExit(f'{out_path} exists')
     target = gguf.GGUFReader(target_path)
@@ -51,6 +60,25 @@ def main():
     err = np.abs(gguf.quants.dequantize(fold_q, gguf.GGMLQuantizationType.Q8_0) - fold).max()
     print(f'fold {fold.shape}, |fold| max {np.abs(fold).max():.4f}, Q8_0 max error {err:.5f}', file=sys.stderr)
 
+    short = None
+    if rank_path:
+        n_vocab = int(out_t.shape[1])
+        rank = np.fromfile(rank_path, dtype='<u4')
+        ids = set(int(t) for t in rank[:short_k] if t < n_vocab)
+        types = target.fields['tokenizer.ggml.token_type'].contents()
+        control = [i for i, t in enumerate(types) if t == 3 and i < n_vocab]  # LLAMA_TOKEN_TYPE_CONTROL
+        ids.update(control)
+        ids = np.array(sorted(ids), dtype=np.int64)
+        rows = (len(ids) + 255)//256*256
+        raw = np.asarray(out_t.data).reshape(n_vocab, -1)                              # the stored bytes of each row
+        head_s = np.zeros((rows, raw.shape[1]), dtype=raw.dtype); head_s[:len(ids)] = raw[ids]
+        fq = fold_q.reshape(n_vocab, -1)
+        fold_s = np.zeros((rows, fq.shape[1]), dtype=fq.dtype); fold_s[:len(ids)] = fq[ids]
+        bias_s = np.zeros(rows, dtype=np.float32); bias_s[:len(ids)] = fold_b[ids]
+        ids_s = np.full(rows, -1, dtype=np.float32); ids_s[:len(ids)] = ids  # F32: exact below 2^24
+        short = (head_s, out_t.tensor_type, fold_s, bias_s, ids_s)
+        print(f'shortlist: {len(ids)} tokens ({len(control)} control), {rows} rows, head {head_s.nbytes/1e6:.1f} MB, fold {fold_s.nbytes/1e6:.1f} MB', file=sys.stderr)
+
     arch = draft.fields[gguf.Keys.General.ARCHITECTURE].contents()
     writer = gguf.GGUFWriter(out_path, arch=arch, endianess=draft.endianess)
     for field in draft.fields.values():
@@ -64,6 +92,12 @@ def main():
         writer.add_tensor_info(t.name, t.data.shape, t.data.dtype, t.data.nbytes, t.tensor_type)
     writer.add_tensor_info('dspark_head_fold.weight', fold_q.shape, fold_q.dtype, fold_q.nbytes, gguf.GGMLQuantizationType.Q8_0)
     writer.add_tensor_info('dspark_head_fold.bias', fold_b.shape, fold_b.dtype, fold_b.nbytes, gguf.GGMLQuantizationType.F32)
+    if short:
+        head_s, head_type, fold_s, bias_s, ids_s = short
+        writer.add_tensor_info('dspark_short_head.weight', head_s.shape, head_s.dtype, head_s.nbytes, head_type)
+        writer.add_tensor_info('dspark_short_fold.weight', fold_s.shape, fold_s.dtype, fold_s.nbytes, gguf.GGMLQuantizationType.Q8_0)
+        writer.add_tensor_info('dspark_short_fold.bias', bias_s.shape, bias_s.dtype, bias_s.nbytes, gguf.GGMLQuantizationType.F32)
+        writer.add_tensor_info('dspark_short_ids.weight', ids_s.shape, ids_s.dtype, ids_s.nbytes, gguf.GGMLQuantizationType.F32)
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
     writer.write_ti_data_to_file()
@@ -71,6 +105,9 @@ def main():
         writer.write_tensor_data(t.data, tensor_endianess=draft.endianess)
     writer.write_tensor_data(fold_q)
     writer.write_tensor_data(fold_b.astype(np.float32))
+    if short:
+        for a in (head_s, fold_s, bias_s, ids_s):
+            writer.write_tensor_data(a)
     writer.close()
     print(f'wrote {out_path}', file=sys.stderr)
 

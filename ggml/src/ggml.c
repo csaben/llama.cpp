@@ -6413,7 +6413,7 @@ struct ggml_tensor * ggml_dspark_pick(
     const int64_t n = ggml_nelements(base);
     GGML_ASSERT(base->type == GGML_TYPE_F32 && ggml_is_contiguous(base));
     GGML_ASSERT(bias == NULL || (bias->type == GGML_TYPE_F32 && ggml_nelements(bias) >= n && ggml_is_contiguous(bias)));
-    GGML_ASSERT(ids  == NULL || (ids->type  == GGML_TYPE_I32 && ggml_nelements(ids)  >= n && ggml_is_contiguous(ids)));
+    GGML_ASSERT(ids  == NULL || (ids->type  == GGML_TYPE_F32 && ggml_nelements(ids)  >= n && ggml_is_contiguous(ids)));
     GGML_ASSERT(prev == NULL || (prev->type == GGML_TYPE_I32 && ggml_is_contiguous(prev)));
     GGML_ASSERT(n_valid >= 1 && n_valid <= n && n < INT32_MAX);
 

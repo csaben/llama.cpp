@@ -941,6 +941,11 @@ struct llama_model {
     struct ggml_tensor * dspark_hidden_out_b = nullptr;
     struct ggml_tensor * dspark_head_fold    = nullptr; // target.output x dspark_hidden_out [rank, n_vocab] (perf/p6/dspark_fold.py)
     struct ggml_tensor * dspark_head_fold_b  = nullptr;
+    // shortlist head (perf/p6/dspark_fold.py with a ranking): rows of target.output and of the fold for the listed tokens
+    struct ggml_tensor * dspark_short_head   = nullptr; // [n_embd, n_short], the type of target.output
+    struct ggml_tensor * dspark_short_fold   = nullptr; // [rank, n_short]
+    struct ggml_tensor * dspark_short_fold_b = nullptr; // [n_short]
+    struct ggml_tensor * dspark_short_ids    = nullptr; // [n_short] F32: row -> token id, -1 = unused
 
     // zaya1
     struct ggml_tensor * res_scale_in   = nullptr;

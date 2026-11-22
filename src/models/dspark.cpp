@@ -233,6 +233,13 @@ void llama_model_dflash::load_tensors_inkling2() {
     // optional: the vocabulary correction folded for one target head (the file names the target it was made for)
     dspark_head_fold   = create_tensor(tn(LLM_TENSOR_DSPARK_HEAD_FOLD, "weight"), {rank, hparams.n_vocab_padded}, TENSOR_NOT_REQUIRED);
     dspark_head_fold_b = create_tensor(tn(LLM_TENSOR_DSPARK_HEAD_FOLD, "bias"), {hparams.n_vocab_padded}, dspark_head_fold ? 0 : TENSOR_NOT_REQUIRED);
+    if (const auto * t = ml->get_tensor_meta(tn(LLM_TENSOR_DSPARK_SHORT_IDS, "weight").str().c_str())) {
+        const int64_t n_short = t->ne[0];
+        dspark_short_head   = create_tensor(tn(LLM_TENSOR_DSPARK_SHORT_HEAD, "weight"), {n_embd, n_short}, 0);
+        dspark_short_fold   = create_tensor(tn(LLM_TENSOR_DSPARK_SHORT_FOLD, "weight"), {rank, n_short}, 0);
+        dspark_short_fold_b = create_tensor(tn(LLM_TENSOR_DSPARK_SHORT_FOLD, "bias"), {n_short}, 0);
+        dspark_short_ids    = create_tensor(tn(LLM_TENSOR_DSPARK_SHORT_IDS, "weight"), {n_short}, 0);
+    }
     for (int i = 0; i < n_layer; ++i) {
         auto & l = layers[i];
         const int64_t hd = hparams.n_embd_head_k(i);
@@ -969,7 +976,10 @@ static ggml_tensor * build_inkling2_head(llm_graph_context & g, const llama_mode
     // LLAMA_DSPARK_FOLD=0: ignore a folded head in the drafter file
     static const bool fold_on = getenv("LLAMA_DSPARK_FOLD") == nullptr || atoi(getenv("LLAMA_DSPARK_FOLD")) != 0;
     ggml_tensor * bias;
-    if (fold_on && model.dspark_head_fold && target.output_s == nullptr) {
+    if (bias_only && base->ne[0] == (model.dspark_short_ids ? model.dspark_short_ids->ne[0] : -1)) {
+        // the shortlist rows of the fold
+        bias = ggml_add(ctx0, ggml_mul_mat(ctx0, model.dspark_short_fold, latent), model.dspark_short_fold_b);
+    } else if (fold_on && model.dspark_head_fold && target.output_s == nullptr) {
         // target.output x (hidden_out x latent + b) as one [rank -> n_vocab] matvec (54 MB instead of the 261 MB head)
         bias = ggml_add(ctx0, ggml_mul_mat(ctx0, model.dspark_head_fold, latent), model.dspark_head_fold_b);
     } else {
@@ -1091,7 +1101,10 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
     // h_nextn rows and no logits. The anchor's base logits are not computed (they are never read).
     const bool pick_on = getenv("LLAMA_DSPARK_PICK") != nullptr && atoi(getenv("LLAMA_DSPARK_PICK")) == 1;
     if (pick_on && nb == 1 && n_head < block - 1 && target->output_s == nullptr) {
-        auto * base = build_lora_mm(target->output, ggml_view_2d(ctx0, cur, n_embd, n_head, cur->nb[1], cur->nb[1]));
+        // LLAMA_DSPARK_SHORT=0: score the whole vocabulary although the drafter file has a shortlist head
+        const bool short_on = model.dspark_short_ids != nullptr && model.dspark_short_head->type == target->output->type &&
+                (getenv("LLAMA_DSPARK_SHORT") == nullptr || atoi(getenv("LLAMA_DSPARK_SHORT")) != 0);
+        auto * base = build_lora_mm(short_on ? model.dspark_short_head : target->output, ggml_view_2d(ctx0, cur, n_embd, n_head, cur->nb[1], cur->nb[1]));
         ggml_prec_set_acc(base, GGML_PREC_F32);
         auto * state   = ggml_fill(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, rank, nb), 0.0f);
         auto * context = ggml_cont(ctx0, ggml_view_2d(ctx0, f_rnn, f_rnn->ne[0], 1, f_rnn->nb[1], 0));
@@ -1101,7 +1114,9 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
             auto * hidden = ggml_cont(ctx0, ggml_view_2d(ctx0, cur, n_embd, 1, cur->nb[1], i*cur->nb[1]));
             auto * bias   = build_inkling2_head(*this, model, *target, prev, state, hidden, base, context, true);
             auto * col    = ggml_view_1d(ctx0, base, base->ne[0], (i - 1)*base->nb[1]);
-            picks = ggml_dspark_pick(ctx0, col, bias, nullptr, picks, hparams.n_vocab_unpadded, model.hparams.f_final_logit_softcapping);
+            picks = short_on
+                ? ggml_dspark_pick(ctx0, col, bias, model.dspark_short_ids, picks, base->ne[0], model.hparams.f_final_logit_softcapping)
+                : ggml_dspark_pick(ctx0, col, bias, nullptr, picks, hparams.n_vocab_unpadded, model.hparams.f_final_logit_softcapping);
             prev  = ggml_view_1d(ctx0, picks, 1, 2*(i - 1)*sizeof(int32_t));
         }
         res->t_logits  = nullptr;

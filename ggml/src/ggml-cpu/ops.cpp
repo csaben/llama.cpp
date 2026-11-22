@@ -13932,7 +13932,7 @@ void ggml_compute_forward_dspark_pick(const ggml_compute_params * params, ggml_t
     const float   cap     = ggml_get_op_params_f32(dst, 1);
     const float * b0 = (const float *) base->data;
     const float * b1 = bias ? (const float *) bias->data : nullptr;
-    const int32_t * id = ids ? (const int32_t *) ids->data : nullptr;
+    const float * id = ids ? (const float *) ids->data : nullptr;
     int32_t * out = (int32_t *) dst->data;
     const int64_t n_prev = prev ? ggml_nelements(prev) : 0;
     if (prev) {
@@ -13941,7 +13941,7 @@ void ggml_compute_forward_dspark_pick(const ggml_compute_params * params, ggml_t
     float v1 = -INFINITY, v2 = -INFINITY;
     int32_t t1 = INT32_MAX;
     for (int32_t r = 0; r < n_valid; ++r) {
-        const int32_t t = id ? id[r] : r;
+        const int32_t t = id ? (int32_t) id[r] : r;
         if (t < 0) {
             continue;
         }
