@@ -1,0 +1,24 @@
+cap3           code      prompt     47   384 tok   242.3 tok/s    1320 chars  accepted/proposed 191/249  runs 241/242/243
+cap3           edit      prompt   1025   384 tok   334.0 tok/s    1115 chars  accepted/proposed 274/281  runs 333/334/334
+cap3           prose     prompt     36   384 tok   205.3 tok/s    1474 chars  accepted/proposed 124/201  runs 201/205/207
+cap3           agent     prompt   2025   384 tok   280.2 tok/s    1284 chars  accepted/proposed 253/286  runs 275/280/283
+cap3         code      identical (1415 bytes)
+cap3         edit      identical (1228 bytes)
+cap3         prose     identical (1569 bytes)
+cap3         agent     identical (1365 bytes)
+cap6           code      prompt     47   384 tok   242.7 tok/s    1320 chars  accepted/proposed 191/249  runs 239/243/243
+cap6           edit      prompt   1025   384 tok   324.8 tok/s    1115 chars  accepted/proposed 289/298  runs 323/325/326
+cap6           prose     prompt     36   384 tok   202.2 tok/s    1474 chars  accepted/proposed 127/209  runs 201/202/205
+cap6           agent     prompt   2025   384 tok   273.2 tok/s    1284 chars  accepted/proposed 263/295  runs 271/273/277
+cap6         code      identical (1415 bytes)
+cap6         edit      identical (1228 bytes)
+cap6         prose     identical (1569 bytes)
+cap6         agent     identical (1365 bytes)
+cap4           code      prompt     47   384 tok   239.6 tok/s    1320 chars  accepted/proposed 191/249  runs 239/240/243
+cap4           edit      prompt   1025   384 tok   322.8 tok/s    1115 chars  accepted/proposed 289/298  runs 321/323/323
+cap4           prose     prompt     36   384 tok   204.8 tok/s    1474 chars  accepted/proposed 124/204  runs 201/205/206
+cap4           agent     prompt   2025   384 tok   277.8 tok/s    1284 chars  accepted/proposed 263/295  runs 274/278/280
+cap4         code      identical (1415 bytes)
+cap4         edit      identical (1228 bytes)
+cap4         prose     identical (1569 bytes)
+cap4         agent     identical (1365 bytes)
