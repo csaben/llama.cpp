@@ -1122,6 +1122,12 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
         res->t_logits  = nullptr;
         res->t_h_nextn = picks;
         ggml_build_forward_expand(gf, picks);
+        if (h_nextn_dev && getenv("LLAMA_DSPARK_ROUND") && atoi(getenv("LLAMA_DSPARK_ROUND")) && n_head + 1 <= h_nextn_dev->ne[0]) {
+            auto * ids = ggml_cont_1d(ctx0, ggml_view_2d(ctx0, picks, 1, n_head, 2*sizeof(int32_t), 0), n_head);
+            ids = ggml_concat(ctx0, ggml_view_1d(ctx0, tokens, 1, 0), ids, 0);
+            auto * dst = ggml_view_1d(ctx0, h_nextn_dev, n_head + 1, (h_nextn_dev->ne[1] - 1)*h_nextn_dev->nb[1]);
+            ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_cast(ctx0, ids, GGML_TYPE_F32), dst));
+        }
         return;
     }
     auto * base = build_lora_mm(target->output, n_head < block - 1 ? ggml_view_2d(ctx0, cur, n_embd, n_head + 1, cur->nb[1], 0) : cur, target->output_s);

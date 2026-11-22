@@ -136,7 +136,8 @@ void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
         const int64_t n_tokens = ubatch->n_tokens;
 
-        ggml_backend_tensor_set(tokens, ubatch->token, 0, n_tokens*ggml_element_size(tokens));
+        const int32_t * ids = device_draft ? ubatch->data->embd_state_row.data() : ubatch->token;
+        ggml_backend_tensor_set(tokens, ids, 0, n_tokens*ggml_element_size(tokens));
     }
 
     if (ubatch->embd_row && embd_rows) {
@@ -201,6 +202,9 @@ bool llm_graph_input_embd::can_reuse(const llm_graph_params & params) {
 
     res &= (!params.ubatch.token) || (tokens && tokens->ne[0] == params.ubatch.n_tokens);
     res &= (!params.ubatch.embd)  || (embd   &&   embd->ne[1] == params.ubatch.n_tokens);
+    if (params.model->arch == LLM_ARCH_INKLING2_LOOP) {
+        res &= device_draft == (params.ubatch.data && !params.ubatch.data->embd_state_row.empty());
+    }
     res &= (!mixed_tokens) || mixed_tokens->ne[0] == llm_graph_n_tok_rows(params.ubatch);
     res &= (!mixed_embd)   || mixed_embd->ne[1]   == params.ubatch.n_tokens;
     res &= (!scale_rows) || scale_rows->ne[1] == params.ubatch.n_tokens;
@@ -2850,11 +2854,20 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
         }
     }
 
+    ggml_tensor * token_ids = inp->tokens;
+    if (model.arch == LLM_ARCH_INKLING2_LOOP && ubatch.data && !ubatch.data->embd_state_row.empty()) {
+        GGML_ASSERT(h_nextn_src);
+        inp->device_draft = true;
+        auto * row = ggml_view_2d(ctx0, h_nextn_src, 1, h_nextn_src->ne[0], sizeof(float), (h_nextn_src->ne[1] - 1)*h_nextn_src->nb[1]);
+        token_ids = ggml_cast(ctx0, ggml_reshape_1d(ctx0, ggml_get_rows(ctx0, row, inp->tokens), n_tokens), GGML_TYPE_I32);
+        res->t_inp_tokens = token_ids;
+    }
+
     // the embeddings placeholders for the 3 paths
     // we use ggml_build_forward_order to make the GET_ROWS ops stick at the beginning of the compute graph
     // this way the embeddings remain in the host buffer, and the GET_ROWS run before any other computations
     {
-        embd0 = ggml_get_rows(ctx0, tok_embd, inp->tokens);
+        embd0 = ggml_get_rows(ctx0, tok_embd, token_ids);
         ggml_build_forward_order(gf, embd0);
 
         embd1 = inp->embd;
@@ -2909,7 +2922,7 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
     std::array<ggml_tensor *, 3> inps = {};
 
     // token embeddings path (ubatch.token != nullptr)
-    inps[0] = build_tok(embd0, inp->tokens);
+    inps[0] = build_tok(embd0, token_ids);
 
     // vector embeddings path (ubatch.embd != nullptr)
     inps[1] = embd1;

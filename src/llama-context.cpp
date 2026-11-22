@@ -1671,13 +1671,16 @@ bool llama_context::set_ctx_state_src(llama_context * ctx_src) {
 bool llama_context::supports_state_row() const {
     // the MTP graphs read the rows, see llm_graph_context::build_inp_embd_state()
     const bool dspark = model.hparams.dflash_variant == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2 && cparams.ctx_state_src == this;
-    if (!dspark && cparams.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+    const bool verify = model.arch == LLM_ARCH_INKLING2_LOOP && cparams.ctx_state_src &&
+            cparams.ctx_state_src->cparams.ctx_other == this && cparams.ctx_state_src->model.hparams.dflash_variant == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2 &&
+            model.hparams.n_pos_per_embd() == 1 && !model.hparams.ple_n_heads;
+    if (!dspark && !verify && cparams.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
         return false;
     }
 
     // the rows replace the host state rows, so they must have the width the graph takes for those
     const ggml_tensor * src = cparams.ctx_state_src ? cparams.ctx_state_src->get_h_nextn_dev() : nullptr;
-    if (src == nullptr || src->ne[0] != (int64_t) llama_batch_ext_select_n_embd_state(cparams.ctx_type, model.hparams)) {
+    if (src == nullptr || (!verify && src->ne[0] != (int64_t) llama_batch_ext_select_n_embd_state(cparams.ctx_type, model.hparams))) {
         return false;
     }
 
@@ -2216,6 +2219,15 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         return -1;
     }
 
+    if (has_state_row && model.arch == LLM_ARCH_INKLING2_LOOP) {
+        const int64_t width = cparams.ctx_state_src->model.hparams.dflash_block_size;
+        for (const auto & t : batch_inp.tokens) {
+            if (t.state_row < 0 || t.state_row >= width || t.state_row >= cparams.ctx_state_src->h_nextn_dev->ne[0]) {
+                return -1;
+            }
+        }
+    }
+
     const auto & vocab   = model.vocab;
     const auto & hparams = model.hparams;
 
@@ -2387,7 +2399,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     if (state_src) {
         state_backend = backend_from_dev(state_src->h_nextn_dev_dev);
         if (state_src->ev_h_nextn_written_recorded) {
-            if (state_src == this && state_backend) {
+            if ((state_src == this || model.arch == LLM_ARCH_INKLING2_LOOP) && state_backend) {
                 ggml_backend_event_wait(state_backend, state_src->ev_h_nextn_written.get());
             } else {
                 ggml_backend_event_synchronize(state_src->ev_h_nextn_written.get());
@@ -2397,7 +2409,8 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         }
     }
     const bool write_h_nextn = cparams.embeddings_nextn_dev && h_nextn_dev != nullptr && !(model.hparams.dflash_variant == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2 && batch_inp.tokens.front().id != LLAMA_TOKEN_NULL);
-    if (write_h_nextn && ev_h_nextn_read_recorded) {
+    const bool write_draft = has_state_row && state_src == this && cparams.embeddings_nextn_dev;
+    if ((write_h_nextn || write_draft) && ev_h_nextn_read_recorded) {
         ggml_backend_event_wait(h_nextn_backend, ev_h_nextn_read.get());
     }
 
@@ -2592,7 +2605,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     if (layer_inp_dev && ev_layer_inp_written) {
         ggml_backend_event_record(ev_layer_inp_written.get(), layer_inp_backend);
     }
-    if (write_h_nextn) {
+    if (write_h_nextn || write_draft) {
         ggml_backend_event_record(ev_h_nextn_written.get(), h_nextn_backend);
         ev_h_nextn_written_recorded = true;
     }

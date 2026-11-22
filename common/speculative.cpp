@@ -1388,6 +1388,8 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
     // the drafter graph returns { token, margin } per draft position in place of logits (LLAMA_DSPARK_PICK)
     bool pick = false;
 
+    bool device_draft = false;
+    llama_tokens * pending_ids = nullptr;
     llama_pos dev_pos0 = -1;
     int32_t dev_count = 0;
     size_t context_rows = 0;
@@ -1468,6 +1470,13 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
                 llama_set_embeddings_nextn_dev(ctx, false);
                 llama_set_embeddings_layer_inp_dev(this->params.ctx_tgt, false);
                 use_dev_features = false;
+            }
+        }
+        const char * round = getenv("LLAMA_DSPARK_ROUND");
+        if (dev_anchor && use_dev_features && round && atoi(round) && params.p_min == 0 && head_n < block_size - 1) {
+            device_draft = llama_set_ctx_state_src(this->params.ctx_tgt, this->params.ctx_dft);
+            if (!device_draft) {
+                llama_set_ctx_state_src(this->params.ctx_tgt, nullptr);
             }
         }
         if (has_rnn_context) {
@@ -1782,6 +1791,13 @@ protected:
 public:
 
     bool process(const common_batch & batch_in) override {
+        if (pending_ids) {
+            const float * picks = llama_get_embeddings_nextn(params.ctx_dft);
+            for (size_t i = 0; i < pending_ids->size(); ++i) {
+                std::memcpy(&(*pending_ids)[i], picks + 2*i, sizeof(llama_token));
+            }
+            pending_ids = nullptr;
+        }
         if (batch_in.size() > 0 && batch_in.has_token() != batch_in.has_embd() && defer_features(batch_in)) {
             return true;
         }
@@ -1854,6 +1870,14 @@ public:
         int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
         if (ret != 0) {
             LOG_WRN("%s: llama_process returned %d\n", __func__, ret);
+            return;
+        }
+        auto & first = dparams[0];
+        if (device_draft && first.allow_device_draft && !adapt.on) {
+            first.result->assign(params.n_max, first.id_last);
+            first.device_draft = true;
+            pending_ids = first.result;
+            if (t_prof) { common_spec_prof_add(SPEC_PROF_DRAFT_DECODE, ggml_time_us() - t_prof); }
             return;
         }
         if (t_prof) {
@@ -1958,6 +1982,9 @@ public:
     }
 
     ~common_speculative_impl_draft_dspark() override {
+        if (device_draft) {
+            llama_set_ctx_state_src(params.ctx_tgt, nullptr);
+        }
         if (has_rnn_context && use_dev_features) {
             llama_set_ctx_state_src(params.ctx_dft, nullptr);
             llama_set_embeddings_nextn_dev(params.ctx_dft, false);

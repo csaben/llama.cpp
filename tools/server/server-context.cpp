@@ -3870,6 +3870,9 @@ private:
                             /* .result_q = */ spec_reject ? &slot.spec_draft_q : nullptr,
                             /* .temp     = */ slot.task->params.sampling.temp,
                             /* .seed     = */ slot.task->params.sampling.seed,
+                            /* .allow_device_draft = */ slots.size() == 1 && !use_ckpt_tgt && !use_ckpt_dft &&
+                                !getenv("IK_TRACE") && n_draft_max <= (int) llama_n_rs_seq(ctx_tgt),
+
                         };
 
                         drafting.push_back(&slot);
@@ -4640,6 +4643,15 @@ private:
             }
         }
 
+        if (spec && slots.size() == 1 && !slots.front().spec_i_batch.empty()) {
+            auto & dp = common_speculative_get_draft_params(spec.get(), slots.front().id);
+            if (dp.device_draft) {
+                for (int i = 0; i < batch.view.size(); ++i) {
+                    GGML_ASSERT(batch.view.set_embd_state_row(i, off + i));
+                }
+            }
+        }
+
         bool has_output = false;
         for (int i = off; i < off + batch.view.size(); ++i) {
             has_output |= batch.tokens[i].output;
@@ -4885,6 +4897,7 @@ private:
             }
 
             // save the original draft size
+            common_speculative_get_draft_params(spec.get(), slot.id).device_draft = false;
             const size_t n_draft = slot.spec_draft.size();
 
             GGML_ASSERT(n_draft > 0);
