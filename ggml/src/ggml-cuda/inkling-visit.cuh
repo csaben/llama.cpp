@@ -133,6 +133,62 @@ static __global__ void __launch_bounds__(384) ik_dense_warp_roles(ik_attn_args a
     }
 }
 
+static __global__ void ik_gate_and_scores(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x, int tiles_per_cta) {
+    const int t = threadIdx.x, warp = t/32, lane = t%32;
+    if (blockIdx.x >= 8*((a.n_kv+128*tiles_per_cta-1)/(128*tiles_per_cta))) {
+        const int tile = blockIdx.x - 8*((a.n_kv+128*tiles_per_cta-1)/(128*tiles_per_cta));
+        ik_project_row(w, x, (float *) a.proj, a.off_gate + tile*8 + warp);
+        return;
+    }
+    const int g = blockIdx.x%8;
+    __shared__ float q[3][128], rel[3][32], sink[3], sums[3][5];
+    const float tau = a.pos ? 1.0f + a.tau_alpha*logf(fmaxf(1.0f,(a.pos[0]+1.0f)/a.tau_floor)) : 1.0f;
+    float v[3];
+#pragma unroll
+    for (int hh = 0; hh < 3; ++hh) {
+        const int h = 3*g+hh;
+        v[hh] = t < 128 ? a.proj[h*128+t]*a.consts[h*128+t] :
+                warp == 4 && lane < 16 ? a.proj[a.off_rel+h*16+lane]*a.consts[a.c_relclip+h*16+lane] : 0.0f;
+        const float sum = warp_reduce_sum(v[hh]*v[hh]);
+        if (lane == 0 && warp < 5) { sums[hh][warp] = sum; }
+        if (t == 0) { sink[hh] = a.proj[a.off_sink+h]; }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int hh = 0; hh < 3; ++hh) {
+        if (t < 128) {
+            const float ss = sums[hh][0]+sums[hh][1]+sums[hh][2]+sums[hh][3];
+            q[hh][t] = v[hh]*fminf(fmaxf(a.qk_clip/(sqrtf(ss)+a.clip_eps),0.0f),1.0f)*tau;
+        } else if (warp == 4) {
+            rel[hh][lane] = v[hh]*fminf(fmaxf(a.rel_clip/(sqrtf(sums[hh][4])+a.clip_eps),0.0f),1.0f)*tau;
+        }
+    }
+    __syncthreads();
+    ik_mma_lane<3> st;
+    ik_mma_init(st, q, sink);
+    a.n_rel = 16;
+    a.n_extent = 1024;
+    const int64_t current = a.kv_idxs[0];
+    for (int i = 0; i < tiles_per_cta; ++i) {
+        const int cell = ((blockIdx.x/8*tiles_per_cta+i)*8+warp)*16;
+        if (cell >= a.n_kv) { break; }
+        float scores[2];
+        ik_mma_scores(a, st, rel, a.k_cache + g*136, 1088, 0, a.n_kv-1, cell, a.n_kv, current, scores);
+        if (lane%4 < 3) {
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                a.scan_scores[(g*a.n_kv + cell + lane/4 + j*8)*4 + lane%4] = scores[j];
+            }
+        }
+    }
+}
+
+template<int taps, bool short_scan>
+static __global__ void __launch_bounds__(256) ik_value_scan(ik_attn_args a) {
+    a.proj_ncols = 1;
+    ik_attention_tile<block_q8_0, true, 3, true, false, taps, short_scan, false, false, false, true>(a, blockIdx.x, blockIdx.y);
+}
+
 template<int taps>
 static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
@@ -150,6 +206,19 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
         return;
     }
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+    static const int score_tiles = getenv("IK_SCORE_TILES") ? atoi(getenv("IK_SCORE_TILES")) : 0;
+    if (score_tiles > 0 && a.n_kv%128 == 0) {
+        const int tiles = std::min(16, score_tiles);
+        ggml_cuda_pool_alloc<float> scores(ctx.pool(), size_t(8)*a.n_kv*4);
+        a.scan_scores = scores.get();
+        ik_gate_and_scores<<<8*((a.n_kv+128*tiles-1)/(128*tiles)) + 384, 256, 0, ctx.stream()>>>(a, w, x, tiles);
+        if (short_scan) {
+            ik_value_scan<taps, true><<<8, 256, 0, ctx.stream()>>>(a);
+        } else {
+            ik_value_scan<taps, false><<<dim3(8, a.n_split), 256, 0, ctx.stream()>>>(a);
+        }
+        return;
+    }
     if (short_scan) {
         ggml_cuda_pool_alloc<float> values(ctx.pool(), 3072);
         ik_dense_gate_scan<taps><<<8*(1 + IK_GATE_BLOCKS), 256, 0, ctx.stream()>>>(a, w, x, values.get(), counters);

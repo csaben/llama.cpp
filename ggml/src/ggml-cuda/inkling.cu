@@ -1788,6 +1788,7 @@ struct ik_attn_args {
     float qk_clip, rel_clip, norm_eps, tau_alpha, tau_floor, kq_scale, clip_eps;
     int64_t off_rel, off_sink, off_gate, off_k, off_ktaps, off_v, off_vtaps;
     int64_t c_relclip, c_kconv, c_vconv, c_table;
+    float * scan_scores;
     float * part;  // [n_head_kv, n_split, gqa, HD + 2]: the partial sums, max and denominator of each split
     int   * counters;
     int     ext_scan; // the cells were scanned by inkling_attn_scan_kernel (parts 0 .. n_split - 2); this kernel adds the current cell
@@ -2446,15 +2447,13 @@ static __device__ __forceinline__ void ik_mma_init(ik_mma_lane<G> & st, const fl
 // yet) count. The Q8_0 rows of the kv head are at kb + row*k_nb2 and vb + row*v_nb2, row = min(cell - row0, row_max):
 // the cache itself, or a tile of it in shared memory.
 template <int G>
-static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
-        const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
-        const int kt, const int w1, const int64_t kv_idx) {
-    constexpr float PS = IK_MMA_PS;
+static __device__ __forceinline__ void ik_mma_scores(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
+        const char * kb, const int64_t k_nb2, const int row0, const int row_max,
+        const int kt, const int w1, const int64_t kv_idx, float (&s)[2]) {
     const int  lane = threadIdx.x % WARP_SIZE;
     const int  gr = lane >> 2, tq = lane & 3;
-    const int  hq = min(gr >> 1, G - 1), ht = min(tq, G - 1);
-    const bool col_ok = (gr >> 1) < G, head_ok = tq < G;
-    const bool lo_limb = gr & 1;
+    const int ht = min(tq, G - 1);
+    const bool head_ok = tq < G;
     const float * table = args.consts + args.c_table;
     const int     n_rel = args.n_rel;
     const int     last  = args.n_kv - 1;
@@ -2484,23 +2483,8 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
         mk[i] = head_ok && cell < w1 && cell != kv_idx ? mv : -INFINITY;
         dk[i] = args.rel_pos[cc];
     }
-    uint32_t vh[4][2], vl[4][2], vq[4][4];
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
-        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
-#pragma unroll
-        for (int P = 0; P < 2; ++P) {
-            vh[i][P] = r.head(P);
-            vl[i][P] = r.tail(P);
-        }
-#pragma unroll
-        for (int b = 0; b < 4; ++b) {
-            vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
-        }
-    }
     // ---- Q K^T: C[16 cells][8 columns] += A[16 cells][16 dims] B[16 dims][8 columns], block by block ----
-    float s[2] = { 0.0f, 0.0f };
+    s[0] = 0; s[1] = 0;
 #pragma unroll
     for (int b = 0; b < 4; ++b) {
         float cb[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -2534,6 +2518,43 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
 #pragma unroll
     for (int i = 0; i < 2; ++i) {
         s[i] = mk[i] == -INFINITY ? -INFINITY : args.kq_scale*s[i] + bias[i] - st.sink + mk[i];
+    }
+}
+
+template <int G, bool cached = false>
+static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
+        const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
+        const int kt, const int w1, const int64_t kv_idx, int group = 0) {
+    constexpr float PS = IK_MMA_PS;
+    const int  lane = threadIdx.x % WARP_SIZE;
+    const int  gr = lane >> 2, tq = lane & 3;
+    const int hq = min(gr >> 1, G - 1);
+    const bool col_ok = (gr >> 1) < G, head_ok = tq < G;
+    const bool lo_limb = gr & 1;
+    float s[2];
+    if constexpr (cached) {
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            const int cell = kt + gr + j*8;
+            s[j] = head_ok && cell < w1 ? args.scan_scores[(group*args.n_kv + cell)*4 + tq] : -INFINITY;
+        }
+    } else {
+        ik_mma_scores(args, st, s_r, kb, k_nb2, row0, row_max, kt, w1, kv_idx, s);
+    }
+    uint32_t vh[4][2], vl[4][2], vq[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
+        const ik_q8row r = { (const uint32_t *) (vb + (int64_t) min(cell - row0, row_max)*v_nb2) };
+#pragma unroll
+        for (int P = 0; P < 2; ++P) {
+            vh[i][P] = r.head(P);
+            vl[i][P] = r.tail(P);
+        }
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+            vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
+        }
     }
     float mx = fmaxf(s[0], s[1]); // over the lanes of the same head
 #pragma unroll
@@ -2622,7 +2643,7 @@ static __device__ __forceinline__ void ik_scan_sync() {
     }
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool prepared = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool prepared = false, bool cached = false>
 static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -2956,12 +2977,12 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 #pragma unroll
                 for (int tile = warp; tile < 16; tile += IK_A2_WARPS) {
                     if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
-                        ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
+                        ik_mma_step<G, cached>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx, g);
                     }
                 }
             } else {
                 for (int kt = w0; kt < w1; kt += 16) {
-                    ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                    ik_mma_step<G, cached>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx, g);
                 }
             }
         }
@@ -3507,6 +3528,7 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
     const ggml_tensor * pos     = dst->src[9];
 
     ik_attn_args a;
+    a.scan_scores = nullptr;
     a.n_head     = ggml_get_op_params_i32(dst, 0);
     a.n_head_kv  = ggml_get_op_params_i32(dst, 1);
     const int hd = ggml_get_op_params_i32(dst, 2);
