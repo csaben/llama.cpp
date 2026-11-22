@@ -17,7 +17,8 @@ label = args[0]
 extra = args[args.index("--") + 1:] if "--" in args else []
 no_long = "--no-long" in args
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-URL = "http://127.0.0.1:8041"
+port = os.environ.get("SPEC_PORT", "8041")
+URL = f"http://127.0.0.1:{port}"
 SNIP = open(os.path.join(ROOT, "perf", "bench.py")).read() + "\n" + open(os.path.join(ROOT, "perf", "kernsum.py")).read()
 PROMPTS = [
     ("code",  "Write a Python module that implements an LRU cache with per-entry time-to-live, thread safety and hit/miss statistics. Include unit tests."),
@@ -37,7 +38,7 @@ def post(path, body):
         raise RuntimeError(f"{path}: HTTP {error.code}: {error.read().decode(errors='replace')}") from error
 M = os.path.expanduser(os.environ["MODEL"])
 cmd = [os.environ.get("SPEC_SERVER_BIN", os.path.join(ROOT, "build/bin/llama-server")), "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", os.environ.get("SPEC_CTX", "32768"),
-       "-np", "1", "--port", "8041", "--host", "127.0.0.1"] + extra
+       "-np", "1", "--port", port, "--host", "127.0.0.1"] + extra
 with open(os.environ.get("SPEC_SERVER_LOG", os.devnull), "wb") as log:
     proc = subprocess.Popen(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=os.environ.get("GPU", "1")), stdout=subprocess.DEVNULL, stderr=log)
 try:
@@ -57,13 +58,15 @@ try:
         for depth in depths:
             doc = post("/detokenize", {"tokens": toks[:depth*1000]})["content"]
             PROMPTS.append((f"edit@{depth}K", doc + "\n\nCopy the first function defined in the source above exactly, then add a one-line comment above each of its statements. Output only the code."))
+    if "agent" in kinds:
+        PROMPTS.append(("agent", "Read perf/longctx.py, then update its command-line help to document the --reply option."))
     if "read-tool" in kinds:
         PROMPTS.append(("read-tool", "Read perf/longctx.py and explain how it measures time to first token. Identify the statement that stops the timer."))
     for kind, p in PROMPTS:
         if kind not in kinds:
             continue
         body = {"model": "x", "messages": [{"role": "user", "content": p}], "max_tokens": int(os.environ.get("SPEC_MAXT", "384")), "temperature": 0, "seed": 1, "cache_prompt": False}
-        if kind == "read-tool":
+        if kind in ("read-tool", "agent"):
             name = "perf/longctx.py"
             with open(os.path.join(ROOT, name)) as source:
                 lines = "".join(f"{i}: {line}" for i, line in enumerate(source, 1))
@@ -74,6 +77,12 @@ try:
                     "function": {"name": "read", "arguments": json.dumps({"filePath": name})}}]},
                 {"role": "tool", "tool_call_id": "call_read", "content": lines},
             ])
+            if kind == "agent":
+                body["messages"].extend([
+                    {"role": "assistant", "content": "The parser already accepts --reply and defaults to 500 tokens."},
+                    {"role": "user", "content": "Return the complete updated file, preserving the code and existing comments. Only update the usage comment."},
+                ])
+                del body["tools"]  # The next turn returns a file without calling tools.
         if os.environ.get("SPEC_FIXED_LENGTH") == "1":
             body["ignore_eos"] = True
         if body.get("ignore_eos") or os.environ.get("SPEC_TOKEN_IDS") == "1":
