@@ -1,0 +1,2 @@
+plain-a        edit      prompt   1025   384 tok   201.9 tok/s    1115 chars  runs 201/201/202/202/202
+plain-a        prose     prompt     36   384 tok   209.9 tok/s    1474 chars  runs 209/210/210/210/210

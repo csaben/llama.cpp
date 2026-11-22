@@ -1,0 +1,2 @@
+policy-on      edit      prompt   1025   384 tok   338.8 tok/s    1115 chars  accepted/proposed 274/281  runs 336/338/339/340/340
+policy-on      prose     prompt     36   384 tok   216.0 tok/s    1474 chars  accepted/proposed 130/191  runs 209/215/216/217/218
