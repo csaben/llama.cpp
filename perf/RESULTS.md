@@ -1799,3 +1799,22 @@ Source `72fd097e` (`p9-runtime`) includes all three upstream fixes, the direct Q
 The final bracket changed prefill by +0.20% / +0.79% / +1.52%; short prefill is within the variation between the two frozen controls. The independent first Q8_0 sweep reached 3,486.9 / 3,185.5 / 2,864.7 tok/s and F16 reached 3,493.7 / 3,186.6 / 2,861.7. The final Q8_0 compute buffers were 520 / 952 / 1,816 MiB at 16K / 32K / 64K. Warm target-only process memory was 10,660 / 11,364 / 12,772 MiB. At 64K this saves 262 MiB over frozen Q8_0 and 1,072 MiB over frozen F16 process memory. [Release measurements](p9/release/), [frozen before](p9/final-frozen-before/), [release repeat](p9/release-repeat/), [frozen after](p9/final-frozen-after/).
 
 Both flag batteries passed 2,714 rollback/boundary rows each, six frozen greedy completions each and 1,110 CUDA cases each. Decode PPL matched the release baseline at 4.1979 / 4.2038 (plain / MR). The deep verifier matched all 1,024 rows, and the mixed verifier widths matched another 1,456. The expanded suites passed 4,232 distinct CUDA cases plus the seven new FlashAttention cases. Four historical synccheck runs and six targeted memcheck/synccheck runs reported zero errors. [Verification evidence](p9/checks/), [GPU1 runner](p9/verify.sh).
+
+### Reproduction
+
+Run the commands serially from the repository root with the SM86 Release build, the calibrated target and the folded Q8_0 drafter from Phase 8. Both Phase 9 runners select physical GPU1 in PCI bus order. The benchmark binary comes from `build/bin`; the third argument selects the runtime libraries. For an independent snapshot, set `SPEC_SERVER_BIN` to its server for the memory and TTFT stages. The release uses a 65,536-token slot, logical batch 2,048, target and draft microbatches 512, and adaptive cap 6. The memory stage records the warmed server PID; the near-full stage samples whole-device free VRAM throughout three uncached 64,587-token requests.
+
+```sh
+libs="$PWD/build/bin"
+out=build/p9/repeat
+for kv in q8_0 f16; do
+    perf/p9/measure.sh prefill "$out" "$libs" "$kv"
+    perf/p9/measure.sh memory "$out" "$libs" "$kv"
+done
+for stage in decode ppl ttft near-full; do perf/p9/measure.sh "$stage" "$out" "$libs"; done
+P9_PROFILE_TOKENS=16384 perf/p9/measure.sh profile "$out" "$libs"
+for stage in checks checks-default depth wide logits interleave tiles ops sync extra-ops; do perf/p9/verify.sh "$stage"; done
+perf/p9/verify.sh matrix build/p9/repeat-matrix
+```
+
+For each upstream-only matrix the same runner used `P8_LIBS` and `SPEC_SERVER_BIN` pointing at that stage's isolated runtime. Its nine-file manifest is stored alongside the stage's measurements. Each matrix checks repeat consistency, complete assistant-message bytes and ordered token IDs against same-flags plain and the frozen P8m reference. The separate snapshot runner compares four fresh localhost server processes against the release matrix.
