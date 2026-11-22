@@ -3778,6 +3778,7 @@ struct ik_router_args {
     float       * logits;             // [n_expert] scratch
     int         * counter;
     int n_embd, n_expert, n_used;
+    bool warp_topk;
     float eps, scale, norm_eps, w_scale, w_eps;
     // the optional attention-output convolution producing the last state
     const float   * wo_out;          // nullptr: no convolution
@@ -4060,6 +4061,19 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
 #define IK_R2_MAX_STATES 5
 #define IK_R2_MAX_EXPERT 256
 
+static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long long key, int lane) {
+#pragma unroll
+    for (int size = 2; size <= 32; size *= 2) {
+#pragma unroll
+        for (int delta = size/2; delta; delta /= 2) {
+            const unsigned long long other = __shfl_xor_sync(0xffffffffu, key, delta);
+            const bool higher = ((lane & size) == 0) == ((lane & delta) == 0);
+            key = higher ? max(key, other) : min(key, other);
+        }
+    }
+    return key;
+}
+
 template <int NS, int NC, bool MR = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
@@ -4334,6 +4348,34 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         s_sel[tid]  = p + args.probs_b[tid];
     }
     __syncthreads();
+    if (!MR && args.warp_topk && !__syncthreads_or(tid < n_expert && isnan(s_sel[tid]))) {
+        const int warp = tid/WARP_SIZE;
+        __shared__ unsigned long long winners[32];
+        if (tid < 128) {
+            const float score = s_sel[tid];
+            const unsigned bits = __float_as_uint(score == 0.0f ? 0.0f : score);
+            const unsigned ordered = bits ^ (bits & 0x80000000u ? 0xffffffffu : 0x80000000u);
+            // Descending keys break tied scores in favor of the smaller expert id.
+            const unsigned long long key = (static_cast<unsigned long long>(ordered) << 32) | (127u - tid);
+            const auto best = ik_sort_warp(key, lane);
+            if (lane < 8) { winners[warp*8 + lane] = best; }
+        }
+        __syncthreads();
+        if (warp == 0) {
+            const auto best = ik_sort_warp(winners[lane], lane);
+            const int id = 127 - (uint32_t) best;
+            const float prob = s_prob[id];
+            float sum = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) { sum += __shfl_sync(0xffffffffu, prob, i); }
+            if (lane < 8) {
+                args.route[lane] = id;
+                args.route[8 + lane] = __float_as_int(prob/(sum + args.w_eps)*args.w_scale);
+            }
+            if (lane == 0) { *args.counter = 0; }
+        }
+        return;
+    }
     int rank = n_expert;
     if (tid < n_expert) {
         const float mine = s_sel[tid];
@@ -4461,6 +4503,7 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     a.mr_route_rs = route->nb[1]/sizeof(int32_t);
     a.mr_dst_rs   = dst->nb[1]/sizeof(float);
     a.mr_xq_rs    = xq ? xq->nb[1]/sizeof(block_q8_1) : 0;
+    static const bool warp_topk = !getenv("IK_ROUTER_WARP_TOPK") || atoi(getenv("IK_ROUTER_WARP_TOPK"));
     static const int dbg_skip = getenv("IK_ROUTER_SKIP") ? atoi(getenv("IK_ROUTER_SKIP")) : 0;
     a.dbg_skip = dbg_skip;
     static long long * dbg_times = [] () -> long long * {
@@ -4479,6 +4522,8 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
         return t;
     }();
     a.dbg_times = dbg_times;
+    a.warp_topk = warp_topk && !a.dbg_skip && !a.dbg_times && a.n_expert == 128 && a.n_used == 8 &&
+            ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X;
 
     static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
