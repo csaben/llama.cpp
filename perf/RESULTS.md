@@ -1480,3 +1480,7 @@ CHECKS_OUT="$out/checks" bash perf/p6/r4_checks.sh
 ```
 
 For the default battery, use a fresh shell with only `perf/p5env.sh` and `CUDA_DEVICE_ORDER=PCI_BUS_ID`. The bytewise cross-build reference driver is `perf/p7l3/logits.cpp`. Compile it against `build/bin` and select frozen or release libraries with `LD_LIBRARY_PATH`. Pass `"$Q2" perf/ppl.txt PREFIX ROWS`, using 200/64, 4096/8, 16384/8 and 32768/8. The depth scan used two consecutive copies of `perf/ppl.txt`, `mr_check` with 32 windows, `IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=4 MR_SIZES=4 MR_ROLLBACK=0 MR_CTX=34816`, and both settings of `IK_WINDOW_COLS`.
+
+## Phase 7c
+
+Part A started at 06:15 EST on GPU1 against the frozen Phase 7b snapshot. Controls use the 64K release preset, greedy backend sampling, uncached prompts and exact-length token-ID captures.

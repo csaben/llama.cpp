@@ -1,3 +1,7 @@
+# Phase 7c hand-off
+
+06:16 EST, in progress on physical GPU1. Starting release is `p7b-release`; its verified snapshot remains staged. Lever 3 is active. Part A is testing history acceptance, confidence thresholds and the cost of paid drafts and verification. The merge gate is the inactive lever 3 unit. The release decision is due at 08:50 and the report at 09:00.
+
 # Phase 7b hand-off
 
 Phase 7b is staged locally at `~/inkling-live-bin-p7b-a9cdc61`, source `a9cdc61` (`p7b-release-policy`), release tag `p7b-release`. Merge `1a45f6d` contains lever 3 round 2 (`e03d993`) and Phase 7's four-row verifier. The release uses the original folded 32K drafter, an adaptive cap of three and one 64K slot on physical GPU1. The manual deploy script was syntax-checked and left unexecuted. It falls back to Phase 5 on startup or health failure. [Deploy script](live/deploy-p7b.sh), [nine-file manifest](p7b/snapshot.sha256).
