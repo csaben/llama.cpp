@@ -122,6 +122,8 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
     attn_inp_norm_qkv.assign(n_layer_phys(), nullptr);
     attn_consts.assign(n_layer_phys(), nullptr); // filled by load_arch_tensors_post (not run by a memory-fit pass)
     ffn_consts.assign(n_layer_phys(), nullptr);
+    ffn_gate_bf16.assign(n_layer_phys(), nullptr);
+    attn_gate_tiles.assign(n_layer_phys(), nullptr);
 
     for (int i = 0; i < n_layer_phys(); ++i) {
         auto & layer = layers[i];
@@ -444,6 +446,64 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         }
     }
 
+    std::vector<std::pair<ggml_tensor *, std::vector<uint8_t>>> decode_copies;
+    const bool bf16 = getenv("IK_ROUTER_BF16") && atoi(getenv("IK_ROUTER_BF16"));
+    const bool tiles = getenv("IK_GATE_LAYOUT") && atoi(getenv("IK_GATE_LAYOUT"));
+    if (fuse_weights && (bf16 || tiles) && n_embd == 2304) {
+        for (int i = 0; i < n_layer_phys(); ++i) {
+            const auto & layer = layers[i];
+            auto dev = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(layer.wo->buffer));
+            if (!dev || strncmp(ggml_backend_dev_name(dev), "CUDA", 4) != 0) { continue; }
+            const auto * gate = layer.ffn_gate_inp;
+            if (bf16 && gate && gate->type == GGML_TYPE_F32 && gate->ne[1] == 128 && ggml_is_contiguous(gate)) {
+                const size_t n = ggml_nelements(gate);
+                std::vector<uint32_t> words(n);
+                ggml_backend_tensor_get(gate, words.data(), 0, n*4);
+                if (std::all_of(words.begin(), words.end(), [](uint32_t word) { return (word & 0xffffu) == 0; })) {
+                    auto * copy = ggml_new_tensor_2d(fused_context(), GGML_TYPE_BF16, n_embd, gate->ne[1]);
+                    ggml_format_name(copy, "blk.%d.ffn_gate_bf16", i);
+                    std::vector<uint8_t> data(n*2);
+                    for (size_t k = 0; k < n; ++k) {
+                        const uint16_t high = words[k] >> 16;
+                        memcpy(data.data()+k*2, &high, 2);
+                    }
+                    ffn_gate_bf16[i] = copy;
+                    decode_copies.emplace_back(copy, std::move(data));
+                    fused_pending.push_back({copy, layer.wo, {}, false});
+                }
+            }
+            const auto & fa = fused_attn[i];
+            if (tiles && fa.w && fa.w->type == GGML_TYPE_IQ4_NL && fa.off_gate == 3480 && fa.n_q == 6552) {
+                constexpr int rows = 3072, blocks = 72;
+                const size_t bytes = rows*blocks*18;
+                std::vector<uint8_t> src(bytes), data(bytes);
+                ggml_backend_tensor_get(fa.w, src.data(), fa.off_gate*fa.w->nb[1], bytes);
+                for (int r = 0; r < rows; ++r) {
+                    for (int b = 0; b < blocks; ++b) {
+                        const uint8_t * raw = src.data() + 18*(r*blocks+b);
+                        const int group = b/16*16;
+                        const int slot = r/8*(8*blocks) + group*8 + (r%8)*std::min(16,blocks-group) + b%16;
+                        memcpy(data.data()+16*rows*blocks+2*(r*blocks+b), raw, 2);
+                        for (int j = 0; j < 4; ++j) {
+                            uint32_t word = 0;
+                            for (int k = 0; k < 4; ++k) {
+                                const uint32_t v = raw[2+j*4+k];
+                                word |= (v & 15) << (4*k);
+                                word |= (v >> 4) << (16+4*k);
+                            }
+                            memcpy(data.data()+16*slot+4*j, &word, 4);
+                        }
+                    }
+                }
+                auto * copy = ggml_new_tensor_1d(fused_context(), GGML_TYPE_I8, bytes);
+                ggml_format_name(copy, "blk.%d.attn_gate_tiles", i);
+                attn_gate_tiles[i] = copy;
+                decode_copies.emplace_back(copy, std::move(data));
+                fused_pending.push_back({copy, layer.wo, {}, false});
+            }
+        }
+    }
+
     // the constants of the fused router op
     if (fuse_weights) {
         for (int i = 0; i < n_layer_phys(); ++i) {
@@ -469,6 +529,8 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
     }
 
     load_fused(ml);
+
+    for (const auto & copy : decode_copies) { ggml_backend_tensor_set(copy.first, copy.second.data(), 0, copy.second.size()); }
 
     // the cache slots past the physical layers share the weights
     for (int il = n_layer_phys(); il < (int) hparams.n_layer(); ++il) {
@@ -1025,6 +1087,9 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                             n_head, n_head_kv, n_embd_head, hp.n_relative, hp.n_shortconv_l_cache, !is_swa, recr->mctx->get_head(),
                             hp.f_qk_clip, hp.f_relative_clip, hp.f_norm_rms_eps, hp.f_log_scale_alpha, (float) hp.n_log_scale_floor,
                             1.0f/sqrtf(n_embd_head), a_type);
+                    if (!mr && n_tokens == 1 && proj->op == GGML_OP_MUL_MAT && proj->src[0] == fa.w) {
+                        cur->src[11] = static_cast<const llama_model_inkling2 &>(model).attn_gate_tiles[ip];
+                    }
                     if (mr) {
                         cur->src[10] = inp->window_kv_before;
                         ik_set_param(cur, 14, mr_planes);
@@ -1217,6 +1282,9 @@ attn_done:
         } else {
             cur = ggml_inkling_router(ctx0, query, states.data(), (int) states.size(), ffn_consts, layer.ffn_gate_inp, route, x_q8,
                     1e-6f, 1.0f/sqrtf(n_embd), hparams.f_norm_rms_eps, n_expert_used, hparams.expert_weights_scale, hparams.expert_weights_norm_eps);
+        }
+        if (!mr && !wo_out_pending && n_tokens == 1 && states.size() <= 5) {
+            cur->src[5 + states.size()] = static_cast<const llama_model_inkling2 &>(model).ffn_gate_bf16[ip];
         }
         cb(cur, "ffn_norm", il);
         // the op writes route and x_q8 as side outputs: it must be in the graph even when its F32 result is not consumed

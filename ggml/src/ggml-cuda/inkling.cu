@@ -1798,6 +1798,7 @@ void ggml_cuda_op_moe_sum(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 struct ik_attn_args {
     const float   * proj;    int64_t proj_s1; int proj_ncols; // proj_s1: floats per column
     const float   * consts;
+    const uint8_t * gate_tiles;
     float         * state;   int64_t state_s1;                // floats per cell
     const int32_t * rs_ids;  int write_cell;
     char          * k_cache; int64_t kc_nb1, kc_nb2;
@@ -3693,6 +3694,8 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
     a.mr_part_rs     = 0;
     a.proj       = (const float *) proj->data; a.proj_s1 = proj->nb[1]/sizeof(float); a.proj_ncols = proj->ne[1]/n_rows;
     a.consts     = (const float *) consts->data;
+    a.gate_tiles = dst->src[11] && dst->src[11]->type == GGML_TYPE_I8 && ggml_nbytes(dst->src[11]) == 3072*72*18 ?
+            (const uint8_t *) dst->src[11]->data : nullptr;
     a.state      = (float *) state->data; a.state_s1 = state->nb[1]/sizeof(float);
     a.rs_ids     = (const int32_t *) rs_ids->data;
     a.k_cache    = (char *) k_cache->data; a.kc_nb1 = k_cache->nb[1]; a.kc_nb2 = k_cache->nb[2];
@@ -4283,6 +4286,7 @@ struct ik_router_args {
     int n_embd, n_expert, n_used;
     bool warp_topk;
     int select_mode;
+    const uint16_t * bf16;
     float eps, scale, norm_eps, w_scale, w_eps;
     // the optional attention-output convolution producing the last state
     const float   * wo_out;          // nullptr: no convolution
@@ -4678,7 +4682,7 @@ static __device__ __forceinline__ void ik_finish_route(const ik_router_args & ar
     if (args.dbg_times && tid == 0) { args.dbg_times[6] = clock64(); }
 }
 
-template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false, bool input_only = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false, bool input_only = false, bool bf16 = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
     if constexpr (MR) {
@@ -4742,7 +4746,13 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
             for (int j = 0; j < C4; ++j) {
                 const int k = tid + IK_R2_BLOCK*j;
                 if (k < 576) {
+                    if constexpr (bf16) {
+                        const uint2 bits = ((const uint2 *) args.bf16)[(e0+r)*576+k];
+                        weights[r][j] = make_float4(__uint_as_float(bits.x << 16), __uint_as_float(bits.x & 0xffff0000u),
+                                __uint_as_float(bits.y << 16), __uint_as_float(bits.y & 0xffff0000u));
+                    } else {
                     weights[r][j] = ((const float4 *) args.gate_inp)[(e0 + r)*576 + k];
+                    }
                 }
             }
         }
@@ -5038,6 +5048,10 @@ static void inkling_router2_launch_rows(ggml_backend_cuda_context & ctx, const i
 
 template <int NS>
 static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_router_args & a) {
+    if (a.bf16 && a.warp_topk && !a.wo_out && ik_dependency_fusion(ctx)) {
+        inkling_router2_kernel<NS,0,false,true,true,false,true><<<32,256,4*576*sizeof(float),ctx.stream()>>>(a);
+        return;
+    }
     if (a.select_mode >= 2) {
         inkling_router2_kernel<NS,0,false,false,true,true><<<1,256,0,ctx.stream()>>>(a);
         if (a.select_mode >= 8) { ik_router_weights<4><<<32,256,0,ctx.stream()>>>(a); }
@@ -5100,6 +5114,9 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     }
     a.norm_w   = (const float *) consts->data;
     a.gate_inp = (const float *) gate_inp->data;
+    const ggml_tensor * packed = !has_conv && n_states <= 5 ? dst->src[5+n_states] : nullptr;
+    a.bf16 = packed && packed->type == GGML_TYPE_BF16 && ggml_are_same_shape(packed, gate_inp) && ggml_is_contiguous(packed) ?
+            (const uint16_t *) packed->data : nullptr;
     a.probs_b  = (const float *) consts->data + dst->ne[0];
     a.route    = (int32_t *) route->data;
     a.dst      = (float *) dst->data;

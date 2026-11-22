@@ -28,9 +28,51 @@ static __global__ void ik_dense_scan_inputs(ik_attn_args a, const block_iq4_nl *
     ik_project_row(w, x + col*(2304/QK8_1), (float *) a.proj, row);
 }
 
+static __device__ __forceinline__ int2 ik_gate_lookup(uint32_t word) {
+    const uint32_t * table = (const uint32_t *) kvalues_iq4nl;
+    const uint32_t select = 0x32103210u | ((word & 0x88888888u) >> 1);
+    const uint32_t lo = __byte_perm(__byte_perm(table[0],table[1],word), __byte_perm(table[2],table[3],word), select);
+    word >>= 16;
+    const uint32_t hi = __byte_perm(__byte_perm(table[0],table[1],word), __byte_perm(table[2],table[3],word), select>>16);
+    return make_int2(lo,hi);
+}
+
+template<int rows, bool packed>
+static __device__ __forceinline__ void ik_gate_dot_tile(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x, int row) {
+    const int lane = threadIdx.x%32, iqs = 2*(lane%2);
+    float part[rows][4]{};
+#pragma unroll
+    for (int tile = 0; tile < 5; ++tile) {
+        const int b = 16*tile + lane/2;
+        if (b < 72) {
+#pragma unroll
+            for (int r = 0; r < rows; ++r) {
+                const int y = row+r;
+                ik_iq4_nl_w wi;
+                if constexpr (packed) {
+                    const int k = (y/8)*576 + tile*128 + (y%8)*(tile == 4 ? 8 : 16) + lane/2;
+                    const uint2 codes = ((const uint2 *) a.gate_tiles)[k*2+lane%2];
+                    wi.v[0] = ik_gate_lookup(codes.x);
+                    wi.v[1] = ik_gate_lookup(codes.y);
+                    wi.d = __half2float(((const half *) (a.gate_tiles+3072*72*16))[y*72+b]);
+                } else {
+                    wi = ik_iq4_nl_decode(w, (a.off_gate+y)*72+b, iqs);
+                }
+                const float d = __fmul_rn(wi.d,__low2float(x[b].ds));
+                part[r][tile%4] = __fmaf_rn(d,float(ik_iq4_nl_sumi(wi,x+b,iqs)),part[r][tile%4]);
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < rows; ++r) {
+        const float y = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(part[r][0],part[r][1]),part[r][2]),part[r][3]));
+        if (lane == (row+r)%2) { ((float *)a.proj)[a.off_gate+row+r] = y; }
+    }
+}
+
 static constexpr int IK_GATE_BLOCKS = 12;
 
-template<int taps, bool fast_tail = false>
+template<int taps, bool fast_tail = false, int rows = 0, bool packed = false>
 static __global__ void __launch_bounds__(256) ik_dense_gate_scan(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x,
         float * values, int * counters) {
     const int tid = threadIdx.x;
@@ -41,8 +83,14 @@ static __global__ void __launch_bounds__(256) ik_dense_gate_scan(ik_attn_args a,
         a.dst = values;
         ik_attention_tile<block_q8_0, false, 3, true, false, taps, true, true, false, fast_tail>(a, head, 0);
     } else {
+        if constexpr (rows != 0) {
+            for (int i = (((blockIdx.x-8)%IK_GATE_BLOCKS)*8+tid/32)*rows; i < 384; i += 8*IK_GATE_BLOCKS*rows) {
+                ik_gate_dot_tile<rows,packed>(a,w,x,head*384+i);
+            }
+        } else {
         for (int i = ((blockIdx.x - 8)%IK_GATE_BLOCKS)*8 + tid/32; i < 384; i += 8*IK_GATE_BLOCKS) {
             ik_project_row(w, x, (float *) a.proj, a.off_gate + head*384 + i);
+        }
         }
     }
     __shared__ int last;
@@ -59,15 +107,21 @@ static __global__ void __launch_bounds__(256) ik_dense_gate_scan(ik_attn_args a,
     }
 }
 
-template<int taps, bool fast_tail = false, bool mask_tiles = false>
+template<int taps, bool fast_tail = false, bool mask_tiles = false, int rows = 0, bool packed = false>
 static __global__ void __launch_bounds__(384) ik_dense_warp_roles(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x, int * counters) {
     const int head = blockIdx.x, split = blockIdx.y;
     if (threadIdx.x < 256) {
         a.proj_ncols = 1;
         ik_attention_tile<block_q8_0, true, 3, true, false, taps, false, false, true, fast_tail, mask_tiles>(a, head, split, counters + head, a.n_split);
     } else {
+        if constexpr (rows != 0) {
+            for (int i = (split*4+(threadIdx.x-256)/32)*rows; i < 384; i += a.n_split*4*rows) {
+                ik_gate_dot_tile<rows,packed>(a,w,x,head*384+i);
+            }
+        } else {
         for (int i = split*4 + (threadIdx.x - 256)/32; i < 384; i += a.n_split*4) {
             ik_project_row(w, x, (float *) a.proj, a.off_gate + 384*head + i);
+        }
         }
         asm volatile("bar.sync 2, 128;" ::: "memory");
         if (threadIdx.x == 256) { ik_atomic_add_acq_rel(counters + head, 1); }
@@ -98,6 +152,27 @@ static void ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_a
     int * counters = ik_counters(ctx, 192, 8);
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
     static const int mode = getenv("IK_SCAN_SCHEDULE") ? atoi(getenv("IK_SCAN_SCHEDULE")) : 0;
+    static const int gate_rows = getenv("IK_GATE_ROWS") ? atoi(getenv("IK_GATE_ROWS")) : 0;
+    if (gate_rows || a.gate_tiles) {
+        auto launch = [&](auto row_count, auto packed_flag) {
+            constexpr int rows = decltype(row_count)::value;
+            constexpr bool packed = decltype(packed_flag)::value;
+            if (short_scan) {
+                ggml_cuda_pool_alloc<float> values(ctx.pool(),3072);
+                ik_dense_gate_scan<taps,false,rows,packed><<<8*(1+IK_GATE_BLOCKS),256,0,ctx.stream()>>>(a,w,x,values.get(),counters);
+            } else {
+                ik_dense_warp_roles<taps,false,!taps,rows,packed><<<dim3(8,a.n_split),384,0,ctx.stream()>>>(a,w,x,counters);
+            }
+        };
+        auto select_rows = [&](auto packed) {
+            if (gate_rows == 4) { launch(std::integral_constant<int,4>{},packed); }
+            else if (gate_rows == 2) { launch(std::integral_constant<int,2>{},packed); }
+            else { launch(std::integral_constant<int,1>{},packed); }
+        };
+        if (a.gate_tiles) { select_rows(std::true_type{}); }
+        else { select_rows(std::false_type{}); }
+        return;
+    }
     if (short_scan && (mode & 4) && ggml_cuda_info().devices[ctx.device].supports_cooperative_launch &&
             ctx.curr_stream_no == 0 && ctx.stream_context().concurrent_events.empty()) {
         static const int requested = getenv("IK_SCAN_GATE_BLOCKS") ? atoi(getenv("IK_SCAN_GATE_BLOCKS")) : 12;

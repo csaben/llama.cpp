@@ -2532,6 +2532,7 @@ struct llama_model_inkling2 : public llama_model_base {
     std::vector<ggml_tensor *> attn_consts;
     // the constants of the fused router op per physical layer: ffn_norm | exp_probs_b (zeros when absent)
     std::vector<ggml_tensor *> ffn_consts;
+    std::vector<ggml_tensor *> ffn_gate_bf16, attn_gate_tiles;
 
     // tensors assembled from several file tensors after loading: each piece is a file tensor copied to a byte offset
     struct fused_tensor {
