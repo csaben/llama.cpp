@@ -20,6 +20,49 @@ static __device__ __forceinline__ void ik_project_row(const block_iq4_nl * w, co
     if (lane == row%2) { out[row] = y; }
 }
 
+static __device__ __forceinline__ int ik_gate_code(uint32_t code) {
+    const uint32_t * lut = (const uint32_t *) kvalues_iq4nl;
+    return __byte_perm(__byte_perm(lut[0], lut[1], code), __byte_perm(lut[2], lut[3], code), 0x3210 | ((code & 0x8888) >> 1));
+}
+
+static __device__ __forceinline__ void ik_project_gates(const block_iq4_nl * w, const block_q8_1 * x,
+        float * out, int base, int first, int stride) {
+    constexpr int blocks = 2304/QK4_NL;
+    const int lane = threadIdx.x%32, iqs = 2*(lane%2);
+    // Match Q8 byte order to the IQ4 nibbles once for all gate rows of this warp.
+    int4 input[5];
+    float xd[5];
+#pragma unroll
+    for (int j = 0; j < 5; ++j) {
+        const int b = 16*j + lane/2;
+        if (b < blocks) {
+            const int * q = (const int *) x[b].qs + iqs;
+            input[j] = make_int4(__byte_perm(q[0], q[4], 0x5140), __byte_perm(q[0], q[4], 0x7362),
+                                 __byte_perm(q[1], q[5], 0x5140), __byte_perm(q[1], q[5], 0x7362));
+            xd[j] = __low2float(x[b].ds);
+        }
+    }
+    for (int i = first; i < 384; i += stride) {
+        const int row = base + i;
+        float sum[4]{};
+#pragma unroll
+        for (int j = 0; j < 5; ++j) {
+            const int b = 16*j + lane/2;
+            if (b < blocks) {
+                const block_iq4_nl & block = w[row*blocks + b];
+                const uint32_t c0 = get_int_b2(block.qs, iqs), c1 = get_int_b2(block.qs, iqs + 1);
+                int d = ggml_cuda_dp4a(ik_gate_code(c0), input[j].x, 0);
+                d = ggml_cuda_dp4a(ik_gate_code(c0 >> 16), input[j].y, d);
+                d = ggml_cuda_dp4a(ik_gate_code(c1), input[j].z, d);
+                d = ggml_cuda_dp4a(ik_gate_code(c1 >> 16), input[j].w, d);
+                sum[j%4] = __fmaf_rn(__fmul_rn(__half2float(block.d), xd[j]), float(d), sum[j%4]);
+            }
+        }
+        const float v = warp_reduce_sum(__fadd_rn(__fadd_rn(__fadd_rn(sum[0], sum[1]), sum[2]), sum[3]));
+        if (lane == row%2) { out[row] = v; }
+    }
+}
+
 template<int taps>
 static __global__ void ik_dense_scan_inputs(ik_attn_args a, const block_iq4_nl * w, const block_q8_1 * x) {
     const int i = (blockIdx.x*blockDim.x + threadIdx.x)/32;
@@ -73,8 +116,12 @@ static __global__ void __launch_bounds__(384) ik_dense_warp_roles(ik_attn_args a
         a.proj_ncols = 1;
         ik_attn2<block_q8_0, true, 3, true, false, taps, false, false, false, false, false, true, fast>(a, nullptr, 0, nullptr, head, split, counters + head, a.n_split);
     } else {
-        for (int i = split*4 + (threadIdx.x - 256)/32; i < 384; i += a.n_split*4) {
-            ik_project_row(w, x, (float *) a.proj, a.off_gate + 384*head + i);
+        if constexpr (fast) {
+            ik_project_gates(w, x, (float *) a.proj, a.off_gate + head*384, split*4 + (threadIdx.x - 256)/32, a.n_split*4);
+        } else {
+            for (int i = split*4 + (threadIdx.x - 256)/32; i < 384; i += a.n_split*4) {
+                ik_project_row(w, x, (float *) a.proj, a.off_gate + 384*head + i);
+            }
         }
         asm volatile("bar.sync 2, 128;" ::: "memory");
         if (threadIdx.x == 256) { ik_atomic_add_acq_rel(counters + head, 1); }
