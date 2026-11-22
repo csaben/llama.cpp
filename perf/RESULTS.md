@@ -1732,3 +1732,14 @@ The chunked-mask PR bounds F32 gather, permutation and addition temporaries upst
 Local commits `b3d978f5`, `31753d81` and `0e261ac3` apply the fastdiv shift guard, on-disk GGUF type validation and noncausal batch limit, respectively. Seed 3090 passed 145/145 GGUF cases. The upstream noncausal test ran the tiny D3 fixture on GPU1, with one serial and four concurrent 458-token requests at batch 2,048 and microbatch 512. All four parallel answers matched the serial answer within 1e-6. The new limit is in unsplittable target-slot admission. The DSpark drafter evaluates its noncausal block on its separate draft context. [GGUF test](p9/checks/gguf.txt), [server test](p9/checks/noncausal.txt), [fixture runner](p9/noncausal.py), [fastdiv](https://github.com/ggml-org/llama.cpp/commit/b019be0c86e8adaf8b46627c091c24c1597b95f9), [GGUF](https://github.com/ggml-org/llama.cpp/commit/8d60873dfb8619f2b5ed31adfbab07cccb40db5c), [server](https://github.com/ggml-org/llama.cpp/commit/225a5345bbb0e0c70859af5441ba922beb666fcf).
 
 The frozen / upstream / upstream / frozen tg128 crossover measured 240.78 / 221.07 / 206.83 / 190.90 tok/s on frozen and 240.28 / 220.42 / 206.57 / 191.01 on upstream at 0 / 4K / 16K / 32K (-0.21% / -0.29% / -0.13% / +0.06%). Three uncached 16,459-token tool turns measured median TTFT of 5.742 / 5.869 s frozen and 5.749 / 5.874 s upstream for plain / cap six. [Frozen before](p9/before/), [first candidate](p9/upstream1/), [second candidate](p9/upstream2/), [frozen after](p9/after/), [frozen TTFT](p9/base/), [upstream TTFT](p9/upstream/).
+
+The intermediate builds used the frozen P8m snapshot with just the new CUDA library for fastdiv, then also the new GGML base library for GGUF. Each depth and prefill length ran three times. TTFT is the median of three uncached 16,459-token tool follow-ups per mode.
+
+| Cumulative change | tg128 at 0 / 4K / 16K / 32K (tok/s) | Prefill at 4K / 16K / 32K (tok/s) | Plain / cap 6 TTFT (s) |
+|---|---|---|---|
+| [fastdiv](p9/fastdiv/) | 239.9 / 220.1 / 207.1 / 190.7 | 3,478.7 / 3,159.5 / 2,820.6 | 5.739 / 5.868 |
+| [gguf](p9/gguf/) | 239.9 / 220.0 / 206.0 / 190.9 | 3,464.9 / 3,150.8 / 2,819.2 | 5.744 / 5.868 |
+
+### Loading the bias and KV inside the MMA kernel
+
+The compact-bias prototype kept the original MMA accumulation and F16 KV conversion, looking up the projected relative-position bias while filling the shared mask tile. It measured 3,283 / 2,968 / 2,656 tok/s, with PPL 3.0530. A separate prototype kept the dense bias and unpacked Q8_0 directly into shared memory for every prefill attention layer and length. It measured 3,478 / 3,179 / 2,861 tok/s, with PPL 3.0530. This motivated a narrower dispatch for long caches. [Compact bias](p9/compact/), [direct tiles](p9/direct/), [Unsloth quantized KV reference](https://github.com/unslothai/llama.cpp/commit/7db4a7064).
