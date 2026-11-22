@@ -600,6 +600,8 @@ this build with the same model and flags, run `bash perf/live/switch-to-p5.sh`. 
 
 # Phase 6: speculative verify as a window of rows (2026-11-21)
 
+**Equality correction.** Rounds 1-3 compared empty reply files. See [Round 4](#round-4---long-reply-exactness-gpu1-rtx-3090) for full-message and token-level results, the two cache fixes and current measurements.
+
 Goal: make DSpark pay on one RTX 3090 by verifying 1-8 draft tokens in one step whose rows are bit-identical to
 single-token decode, as the basalt and ingine engines do on an RTX 5090. Brief: `perf/PHASE6_BRIEF.md`. Raw outputs:
 `perf/p6/`. Commit of the numbers: `2359b45` unless a row says otherwise. Everything new is behind `IK_MR=1`
@@ -815,7 +817,43 @@ The first edit discrepancy is **generated token 1689** (index 1688, absolute pos
 - A wrapped SWA cache still had 1536 occupied cells (1024 visible-history limit plus 512 batch slack). Its current physical write index was 1025. The window kernel treated the fully masked high cells as unallocated and chose a smaller padded extent. That changed the grouping of the attention sums. With the cache's actual pre-window extent and each row's writes, the saved failing trace went from **163/1699** different kept rows (max absolute logit error 8.97) to **0/1699**, bit-for-bit. Fix `dca9008`.
 - A separate five-row test rejected cells 1535, 0 and 1. Restarting the search at the lowest physical index misplaced the next token. The Inkling window path now rewinds the ring to the freed cell with the earliest token position. At prefixes 1533 and 3069, **70/73** and **71/73** differing rows became **0/73**. At prefix 4500 all 73 rows matched both before and after. Fix `06d9abb`. This commit also fixes an uninitialized taps flag in the generic window KV kernel; the measured specialized kernels already supplied that flag at compile time.
 
-Measurement in progress. The live deployment recommendation for this round follows the finished checks. Commands and status are in `perf/HANDOFF.md`.
+### Full-message and token equality
+
+All **24/24** drafted configurations and prompts matched their non-drafting reference at each token budget. At 3000 tokens that covers 72,000 emitted token IDs. At 384 tokens every one of the three repetitions also matched. The required reference, `plain-mr`, uses the same target flags as DSpark (`IK_MR=1 IK_MMA=3`) and the same backend sampler. The flag-free plain row uses the earlier short-context attention schedule and batched prompt kernels. Its long answers differ on all four prompts; it supplies a throughput comparison only.
+
+Inference commit `06d9abb`, GPU1 only, one fresh 32K-slot server per row, prompt caching off, temperature 0, seed 1, backend sampling. Drafter: `dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf`, minimum draft probability zero. Each entry gives decode tok/s followed by accepted/proposed drafts and mean target input rows per decode step, including plain steps. Mean width is `1 + proposed / (generated - 1 - accepted)`; the first token comes from prefill. Long rates are one run per prompt. Short rates are the median of three, with draft counts from that same run. Adaptive policy decisions depend on the times measured within that server.
+
+#### 3000 generated tokens
+
+| Configuration | Code | Edit | Prose | Edit@16K |
+|---|---:|---:|---:|---:|
+| plain | 204.0 | 199.8 | 203.8 | 184.8 |
+| plain-mr | 200.0 | 196.1 | 200.0 | 182.3 |
+| n2 | 239.9 (1780/2438, 3.00) | 255.1 (1899/2200, 3.00) | 228.3 (1731/2535, 3.00) | 227.3 (1905/2186, 3.00) |
+| n3 | 244.7 (1988/3033, 4.00) | 267.0 (2113/2657, 4.00) | 225.5 (1888/3331, 4.00) | 240.0 (2135/2592, 4.00) |
+| n4 | 228.0 (2091/3628, 5.00) | 261.3 (2245/3014, 5.00) | 207.5 (1996/4011, 5.00) | 234.1 (2262/2944, 4.99) |
+| n2-adapt | 230.2 (1367/1720, 2.05) | 250.1 (1774/1988, 2.62) | 232.9 (1438/1757, 2.13) | 223.9 (1660/1766, 2.32) |
+| n3-adapt | 239.8 (1492/1953, 2.30) | 262.3 (1888/2208, 2.99) | 238.7 (1502/2032, 2.36) | 236.8 (1836/1946, 2.67) |
+| n4-adapt | 239.6 (1536/2042, 2.40) | 260.8 (1862/2114, 2.86) | 232.0 (1343/1621, 1.98) | 222.9 (1632/1733, 2.27) |
+
+#### 384 generated tokens
+
+| Configuration | Code | Edit | Prose | Edit@16K |
+|---|---:|---:|---:|---:|
+| plain | 212.9 | 203.3 | 213.0 | 186.1 |
+| plain-mr | 209.8 | 200.4 | 209.5 | 183.1 |
+| n2 | 229.4 (203/357, 2.98) | 276.3 (250/264, 2.98) | 183.8 (159/445, 2.99) | 234.7 (247/270, 2.99) |
+| n3 | 226.7 (227/463, 3.97) | 302.1 (281/306, 4.00) | 167.3 (172/627, 3.97) | 251.6 (277/318, 4.00) |
+| n4 | 204.6 (239/568, 4.94) | 298.4 (297/341, 4.97) | 142.4 (178/811, 4.96) | 240.8 (293/359, 4.99) |
+| n2-adapt | 204.1 (2/2, 1.01) | 274.5 (249/262, 2.96) | 207.2 (38/70, 1.20) | 235.6 (241/258, 2.82) |
+| n3-adapt | 223.1 (137/247, 2.00) | 298.7 (278/300, 3.86) | 201.7 (38/108, 1.31) | 249.6 (267/294, 3.53) |
+| n4-adapt | 212.7 (67/112, 1.35) | 293.0 (276/297, 3.78) | 201.2 (38/99, 1.29) | 249.4 (277/299, 3.82) |
+
+With natural stopping, the n3 run on the first cache fix (`dca9008`) matched all four full messages. Plain-mr and n3 generated 3000 code tokens (201.8 vs 244.3 tok/s), 3000 edit tokens (197.0 vs 265.8), 2838 prose tokens (200.9 vs 223.3) and 1318 edit@16K tokens (183.3 vs 224.6). The fixed-length tables above suppress EOS and verify the entire token stream, including tokens after the parsed answer.
+
+Reproduce with `bash perf/p6/r4_spec.sh perf/p6/r4_3000` and `SPEC_MAXT=384 SPEC_REPS=3 bash perf/p6/r4_spec.sh perf/p6/r4_384`. The outputs include timing logs, full JSON messages, raw little-endian int32 token IDs and `equality.txt`. Compare either directory with `SPEC_KINDS=code,edit,prose,edit@16K SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py DIR plain-mr n2 n3 n4 n2-adapt n3-adapt n4-adapt`.
+
+Regression checks and deployment status are in progress.
 
 ## Round 3 (2026-11-21, `1c46feb`; flags `IK_MMA=3 IK_MR=1`, drafter file with fold + shortlist head)
 

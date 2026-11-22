@@ -16,6 +16,8 @@ At inference commit `06d9abb` all 24 fixed-length full messages matched plain-mr
 
 Long proof complete: 24/24 messages and 72,000/72,000 emitted token IDs match the same-flags non-drafting server. Fixed n3 gives 244.7 / 267.0 / 225.5 / 240.0 tok/s against 200.0 / 196.1 / 200.0 / 182.3 in code / edit / prose / edit@16K. `perf/p6/r4_3000/equality.txt` and the per-request JSON and little-endian int32 IDs are the evidence. Short median-of-three sweep and quality checks still in flight.
 
+Both tables now complete (48/48 configurations and prompts across the two budgets, three repetitions at 384). RESULTS.md Round 4 has the tables and accepted/proposed counts. Max-3 edit is 302.1 tok/s at 384 and 267.0 tok/s at 3000. Regression checks, 64K smoke, read-tool replay and the optional KV scan scheduling experiment remain in flight.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.
