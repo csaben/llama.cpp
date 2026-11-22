@@ -2294,9 +2294,16 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
     }
 
     constexpr bool need_f16 = std::is_same_v<kv_t, half2>;
+    fattn_kernel_t partition_kernel = nullptr;
+    if constexpr (!need_f16) {
+        // Stream-K reduction order depends on occupancy. Use the same partition as F16.
+        partition_kernel = logit_softcap == 0.0f
+            ? flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, false, V_is_K_view, false, half2>
+            : flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, true,  V_is_K_view, false, half2>;
+    }
     const bool async_kv_preload = nstages == 2 && !use_sparse;
     launch_fattn<DV, ncols1, ncols2>
-        (ctx, dst, fattn_kernel, nwarps, nbytes_shared_total, nbatch_fa, need_f16, need_f16, true, use_sparse, warp_size_host, async_kv_preload);
+        (ctx, dst, fattn_kernel, nwarps, nbytes_shared_total, nbatch_fa, need_f16, need_f16, true, use_sparse, warp_size_host, async_kv_preload, partition_kernel);
 }
 
 
