@@ -678,6 +678,134 @@ Window equality (`perf/p6/mr_check.txt`): 280 rows in 56 windows of 2-8 rows, 24
 rollbacks after a 300-token prefix, 180 rows in 36 windows after 1,500 tokens (crossing the 1,536-cell boundary of both
 caches): 0 rows differ, max logit difference 0. The same tool on the old batched path: every row differs.
 
+## Round 2 (2026-11-21, `d771a28`; flags `IK_MMA=3 IK_MR=1`, drafter file with a folded head)
+
+Goals: tensor-core window matvecs after ingine, and a cheaper drafter head. Raw outputs: `perf/p6/r2_spec.txt`,
+`r2_spec/`, `r2_spec_equal.txt`, `r2_decode.txt`, `r2_mr_check.txt`, `r2_ppl.txt`. Script: `perf/p6/r2_spec.sh`.
+
+**Outcome.** DSpark max 3 now gives **273 tok/s on edits (1.38x plain), 220 at 16K context (1.23x)**, 202 on new code
+(0.96x) and 167 on prose (0.80x); max 2 is at or above plain on three of four prompts (216 / 255 / 183 / 212). Every
+drafted reply is byte-identical to the plain reply of the same build (28 of 28). The tensor-core expert kernel was
+built and works, but on this card it is not the fastest form: see "What the tensor cores did and did not buy".
+
+### DSpark against plain decode (same method as the round 1 table)
+
+| Prompt | Plain (`IK_MMA=0`) | Plain (`IK_MMA=3`) | Round 1 kernels, max 3 | Max 2 | Max 3 | Max 4 | Max 3, original drafter file (no fold) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| New code | 209.4 | 207.7 | 163.5 | **215.6** (214 / 338, 2.26) | 201.9 (233 / 448, 2.54) | 181.0 (243 / 559, 2.72) | 196.3 |
+| Edit of given code | 197.9 | 196.4 | 246.1 | 254.9 (251 / 264, 2.89) | **272.9** (282 / 302, 3.76) | 270.7 (299 / 332, 4.52) | 262.2 |
+| Prose | 208.0 | 206.6 | 146.8 | 182.7 (181 / 402, 1.89) | 167.4 (196 / 556, 2.04) | 140.4 (203 / 716, 2.12) | 160.4 |
+| Edit at 16K context | 178.8 | 178.9 | 204.0 | 212.2 (245 / 276, 2.76) | **219.6** (274 / 325, 3.49) | 219.4 (292 / 361, 4.17) | 215.1 |
+
+In brackets: accepted / proposed draft tokens, tokens per step (384 / (384 - accepted)). "Round 1 kernels" is this
+build with `IK_MR=1` only (it has the dense change below, hence 246 instead of 235 on the edit).
+
+With `LLAMA_DSPARK_ADAPTIVE=1` (unchanged from round 1, not retuned):
+
+| Prompt | Max 2 + policy | Max 3 + policy | Max 4 + policy |
+|---|---:|---:|---:|
+| New code | 201.8 (86 / 136) | 185.1 (39 / 72) | 194.4 (113 / 228) |
+| Edit of given code | 248.0 (247 / 258) | 191.9 (206 / 222) | 274.2 (296 / 328) |
+| Prose | 189.8 (37 / 70) | 191.2 (40 / 99) | 188.3 (43 / 124) |
+| Edit at 16K context | 166.5 (98 / 106) | 216.1 (269 / 320) | 209.6 (289 / 357) |
+
+The policy still protects prose (188-191 instead of 140-183) but it now also switches drafting off where drafting
+wins (max 3 edit: 192 instead of 273; max 2 at 16K: 167 instead of 212): its thresholds and back-off were set for
+round 1's costs and one run per cell shows it is unstable. It needs retuning before it is used.
+
+### Cost of a window
+
+| Rows | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Round 1 (`2359b45`), mixed sizes with rollbacks, ms | 4.80 | 8.92 | 11.02 | 13.13 | 15.70 | 18.32 | 20.68 | 22.88 |
+| Round 2, same run, ms | 4.84 | 8.05 | 9.67 | **11.37** | 13.33 | 15.46 | 16.68 | 18.22 |
+| Round 2, one size per run, no rollbacks, `IK_MMA=0` | | 6.96 | | 10.63 | | | | 19.47 |
+| Round 2, one size per run, no rollbacks, `IK_MMA=3` | | 6.62 | 8.63 | **9.74** | | | | 17.36 |
+
+The brief's target (4 rows well under 10 ms) is met only in the steady single-size run (9.74 ms); in round 1's mixed
+run it is 11.37 ms (from 13.13). Per 4-row window (nsys): experts 3.75 ms (was 5.2; Q2_K 56 us and Q2_0 29 us per
+visit for 20 distinct experts), dense 2.0 ms (was 2.7), attention 1.2, router 0.55.
+
+### Exactness: what was chosen
+
+A window kernel with another fp32 summation order is correct to 1e-6 per matvec (`IK_MMA_CHECK=1`: largest difference
+5e-7 to 1e-6 on outputs of magnitude 2-7), but the model amplifies it: against single-token decode with the dp4a
+kernels **all 120 rows differed, max |logit diff| 3.73** (router top-8 flips and Q8_1 re-quantization). That is not
+"tiny", so the second option of the brief was taken: **single tokens use the same expert kernels** (`IK_MMA` routes
+MUL_MAT_ID of one token to them). Result: 457 rows in 92 windows (2-8 rows, partial rollbacks, across the 1,536-cell
+boundary), 0 rows differ, max |logit diff| 0; 28 of 28 drafted replies identical to plain. Plain decode with
+`IK_MMA=3` is not bit-identical to plain decode without it (the four probe replies happen to be the same text).
+
+### Plain decode regression and quality
+
+| `llama-bench -p 0 -n 128 -r 3` | depth 0 | 4K | 16K | 32K |
+|---|---:|---:|---:|---:|
+| `IK_MMA=0` (default) | 209.98 ± 0.32 | 194.52 ± 2.27 | 182.60 ± 2.00 | 168.11 ± 2.07 |
+| `IK_MMA=3` | 208.65 ± 0.49 | 193.31 ± 2.25 | 182.15 ± 2.13 | 168.47 ± 1.70 |
+
+Default behaviour is unchanged. With `IK_MMA=3` plain decode is 0.6% slower at depth 0 (Q2_K experts 19.2 us per
+visit instead of 18.6, Q2_0 10.7 instead of 11.25) and equal within the spread deeper. Prefill PPL 3.0530 with both
+(prefill does not use these kernels); decode-path PPL 4.2036 (`IK_MMA=0`) and 4.1935 ± 0.28 (`IK_MMA=3`).
+`test-backend-ops` and `perf/greedy.sh` were not rerun: the new kernels are only reached with `IK_MMA` set.
+
+### What the tensor cores did and did not buy
+
+- `ik_mma_moe` (`mmvq.cu`): `mma.sync.aligned.m16n8k32` s8 x s8 -> s32, a 16-row tile per block, a warp per 256 (Q2_K)
+  or 128 (Q2_0) columns, the tokens of the window as the 8 columns, the pairs of a window that picked the same expert
+  sharing one pass (ballot over the ids, the first pair owns it). Q2_K crumbs times the 4-bit sub-block scale and Q2_0
+  crumbs are unpacked to int8 in registers; the integer sums are exact and the block scales are applied in fp32.
+- Q2_0 (down projection): faster than dp4a at one token (10.7 vs 11.25 us) and 29 us for a 4-row visit. Kept.
+- Q2_K (gate|up): 20.9 us at one token against 18.6 for dp4a, 54 us at four. A kernel on CUDA cores with the same
+  tiles and sharing (`ik_q2k_moe`: weights unpacked once per expert, one dp4a per 4 weights and token, one fp32
+  multiply-add per Q8_1 block, activation sums from a prologue) does 19.2 / 56 us and is what `IK_MMA=3` uses.
+  Removing all arithmetic from it leaves 18.3 us: these launches are bound by how the 16-row tiles stream from DRAM
+  (about 710 GB/s for 8 experts, 620 GB/s for the 20 of a 4-row window), not by tensor-core or dp4a work. So tokens
+  as mma columns do make extra tokens free, but an expert of a 4-row window has only 1.6 tokens, and each distinct
+  expert costs as much as in single-token decode: a 4-row visit costs 2.9x a single-token visit for 2.5x the bytes.
+- Tensor-core **dense** matvecs were not built. The single-token dense kernels run at the DRAM floor and add 128
+  per-thread partial sums of 16-weight halves; that order cannot be reproduced from 32-wide mma sums, and a different
+  order is ruled out above unless single-token dense decode changes kernel too, which risks plain speed. Instead the
+  exact window kernels look the IQ4_NL weights up once for all columns (bit-identical): target head 628 -> 388 us,
+  Q|K|V 31.8 -> 26.2 us, output projection 30.2 -> 22.2 us per 4-row launch.
+- Slower variants (measured, removed): one block walking several experts with or without the next expert loaded
+  ahead (59.6 / 70 us vs 56), two rows per lane, 5 blocks per SM forced by `__launch_bounds__`, the Q2_K min term as
+  one f16 mma, the grouped kernel for the four IQ4_NL expert visits.
+
+### Drafter head
+
+`perf/p6/dspark_fold.py TARGET.gguf DRAFTER.gguf OUT.gguf` (12 s) writes a drafter file with
+`dspark_head_fold.weight` = `target.output x dspark_hidden_out` (201,024 x 256, Q8_0, 54 MB; max quantization error
+0.0034 for values up to 0.91) and its bias; `src/models/dspark.cpp` then computes the correction of each draft
+position as one 54 MB matvec (124 us) instead of a pass over the 261 MB target head (about 380 us).
+`LLAMA_DSPARK_FOLD=0` ignores it. The file is tied to the target head it was folded from (KV `dspark.head_fold.target`)
+and older builds cannot load it. Effect at max 3: +3% to +4% (code 196 -> 202, edit 262 -> 273, prose 160 -> 167,
+16K 215 -> 220), same accepted / proposed counts. The base logits of the block (one 4-column pass over the full
+head, 382 us) and the host-side scan remain; ingine's shortlist was not built (it needs a token frequency ranking).
+
+### Sources (round 2)
+
+- ingine (Apache-2.0), read this time: `native/src/kernels/moe/moe.cu` (`moe_up_kernel`, `moe_down_kernel`,
+  `slot_mask`), `native/src/kernels/dense/gemv.cu` (`gemv_mma_kernel`). The tile / lane / fragment layout, the
+  fixed-order shared-memory reduction and the ballot ownership are adapted from it; notice and list of changes in
+  `NOTICE.inkling` and the header comment in `mmvq.cu`.
+- basalt (MIT): the head fold idea (`src/models/inkling2/dspark.hpp`); no code copied.
+
+### Risks (round 2)
+
+- `IK_MMA` changes plain-decode arithmetic (same integer sums, another fp32 order): outputs are equally valid but not
+  bit-identical to the phase 5 build. It needs sm_80+, 8 experts per token, expert rows a multiple of 16, at most
+  2,304 Q2_K or 1,152 Q2_0 columns; anything else falls back to the round 1 kernels.
+- A folded drafter file used with another target head gives wrong drafts (lower acceptance, never wrong output).
+- The on/off policy is not tuned for the new costs (table above).
+
+### Deploy (round 2)
+
+The live server is back on the phase 5 binaries. Recommendation: switch only if the endpoint is used for edits /
+rewrites. Then use max 3 without the policy (edits +38%, 16K edits +23%, new code -4%, prose -20%), or max 2 for
+mixed use (+3% / +29% / -12% / +19%). Command: the round 1 deploy command below with a new snapshot folder,
+`--setenv=IK_MMA=3` added, `--setenv=LLAMA_DSPARK_ADAPTIVE=1` removed, and
+`--spec-draft-model $HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-Q2K.gguf`. Not run at 64K context.
+
 ## What was done
 
 1. **Window graph** (`src/models/inkling2.cpp`, `graph::mr`): a ubatch of 2-8 tokens of one sequence keeps the direct

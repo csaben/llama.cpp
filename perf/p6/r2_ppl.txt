@@ -1,0 +1,6 @@
+IK_MMA=0
+0.08.610.986 I Final estimate: PPL = 3.0530 +/- 0.06532
+0.11.688.925 I Final estimate: PPL = 4.2036 +/- 0.28336
+IK_MMA=3
+0.08.572.729 I Final estimate: PPL = 3.0530 +/- 0.06532
+0.11.669.156 I Final estimate: PPL = 4.1935 +/- 0.28251

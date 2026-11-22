@@ -1,6 +1,6 @@
 # Phase 6 hand-off (keep current; newest status first)
 
-## Round 2 status (2026-11-21, in flight)
+## Round 2 status (2026-11-21, finished)
 
 Brief: "Round 2" at the end of `perf/PHASE6_BRIEF.md`. New flag **`IK_MMA`** (off by default; `IK_MMA=3` is the setting to use,
 together with `IK_MR=1`). Folded drafter file: `~/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-Q2K.gguf` (`$DRAFT_FOLD`).
@@ -27,13 +27,14 @@ Not done / dropped (measured): a block that walks several experts (59.6-70 us vs
 `__launch_bounds__`, the min term as one f16 mma (no gain); tensor-core dense matvecs (the single-token dense kernels are at
 the DRAM floor and their fp32 order cannot be reproduced from 32-wide sums; a different order is not acceptable, see above).
 
-Next: re-run the measurement table (`perf/p6/r2_spec.sh`), plain regression + PPL with `IK_MMA=3`, RESULTS.md "round 2",
-`bash perf/live/restore-p5.sh`.
+Final numbers (`d771a28`, RESULTS.md "Round 2"; raw: `perf/p6/r2_*`): DSpark max 3 code 202 / edit 273 / prose 167 / 16K 220
+tok/s (plain 208 / 196 / 207 / 179), max 2: 216 / 255 / 183 / 212; 28 of 28 replies identical to plain; windows 0 of 457 rows
+differ; plain `IK_MMA=3` 208.65 / 193.31 / 182.15 / 168.47 (default 209.98 / 194.52 / 182.60 / 168.11); PPL 3.0530 / 4.1935.
+Live server restored with `bash perf/live/restore-p5.sh`.
 
-
-Brief: `perf/PHASE6_BRIEF.md`. Environment: `. perf/p5env.sh` (GPU1 only, live flags, `$Q2`, `$DRAFT`). Raw outputs: `perf/p6/`.
-Everything new is behind **`IK_MR=1`** (off by default; plain decode and the old batched path are unchanged without it).
-The user's live server is stopped; at the very end run `bash perf/live/restore-p5.sh`.
+Next, if someone continues: retune `LLAMA_DSPARK_ADAPTIVE` (it now turns drafting off where it wins); the drafter's base
+logits (382 us 4-column pass over the head) and host scan (in-graph argmax + margin, or a shortlist); the DRAM streaming
+of the 16-row expert tiles (620 GB/s at 4 rows); attention and router rows (1.75 ms of a 4-row window).
 
 ## Design (implemented, WIP)
 

@@ -1,0 +1,40 @@
+plain          code      prompt     47   384 tok   209.4 tok/s
+plain          edit      prompt   1025   384 tok   197.9 tok/s
+plain          prose     prompt     36   384 tok   208.0 tok/s
+plain          edit@16K  prompt  16044   384 tok   178.8 tok/s
+plain-mma      code      prompt     47   384 tok   207.7 tok/s
+plain-mma      edit      prompt   1025   384 tok   196.4 tok/s
+plain-mma      prose     prompt     36   384 tok   206.6 tok/s
+plain-mma      edit@16K  prompt  16044   384 tok   178.9 tok/s
+n2             code      prompt     47   384 tok   215.6 tok/s  accepted/proposed 214/338
+n2             edit      prompt   1025   384 tok   254.9 tok/s  accepted/proposed 251/264
+n2             prose     prompt     36   384 tok   182.7 tok/s  accepted/proposed 181/402
+n2             edit@16K  prompt  16044   384 tok   212.2 tok/s  accepted/proposed 245/276
+n3             code      prompt     47   384 tok   201.9 tok/s  accepted/proposed 233/448
+n3             edit      prompt   1025   384 tok   272.9 tok/s  accepted/proposed 282/302
+n3             prose     prompt     36   384 tok   167.4 tok/s  accepted/proposed 196/556
+n3             edit@16K  prompt  16044   384 tok   219.6 tok/s  accepted/proposed 274/325
+n4             code      prompt     47   384 tok   181.0 tok/s  accepted/proposed 243/559
+n4             edit      prompt   1025   384 tok   270.7 tok/s  accepted/proposed 299/332
+n4             prose     prompt     36   384 tok   140.4 tok/s  accepted/proposed 203/716
+n4             edit@16K  prompt  16044   384 tok   219.4 tok/s  accepted/proposed 292/361
+n2-adapt       code      prompt     47   384 tok   201.8 tok/s  accepted/proposed 86/136
+n2-adapt       edit      prompt   1025   384 tok   248.0 tok/s  accepted/proposed 247/258
+n2-adapt       prose     prompt     36   384 tok   189.8 tok/s  accepted/proposed 37/70
+n2-adapt       edit@16K  prompt  16044   384 tok   166.5 tok/s  accepted/proposed 98/106
+n3-adapt       code      prompt     47   384 tok   185.1 tok/s  accepted/proposed 39/72
+n3-adapt       edit      prompt   1025   384 tok   191.9 tok/s  accepted/proposed 206/222
+n3-adapt       prose     prompt     36   384 tok   191.2 tok/s  accepted/proposed 40/99
+n3-adapt       edit@16K  prompt  16044   384 tok   216.1 tok/s  accepted/proposed 269/320
+n4-adapt       code      prompt     47   384 tok   194.4 tok/s  accepted/proposed 113/228
+n4-adapt       edit      prompt   1025   384 tok   274.2 tok/s  accepted/proposed 296/328
+n4-adapt       prose     prompt     36   384 tok   188.3 tok/s  accepted/proposed 43/124
+n4-adapt       edit@16K  prompt  16044   384 tok   209.6 tok/s  accepted/proposed 289/357
+n3-nofold      code      prompt     47   384 tok   196.3 tok/s  accepted/proposed 233/450
+n3-nofold      edit      prompt   1025   384 tok   262.2 tok/s  accepted/proposed 282/302
+n3-nofold      prose     prompt     36   384 tok   160.4 tok/s  accepted/proposed 196/556
+n3-nofold      edit@16K  prompt  16044   384 tok   215.1 tok/s  accepted/proposed 274/325
+n3-r1          code      prompt     47   384 tok   163.5 tok/s  accepted/proposed 219/488
+n3-r1          edit      prompt   1025   384 tok   246.1 tok/s  accepted/proposed 282/303
+n3-r1          prose     prompt     36   384 tok   146.8 tok/s  accepted/proposed 196/556
+n3-r1          edit@16K  prompt  16044   384 tok   204.0 tok/s  accepted/proposed 275/322

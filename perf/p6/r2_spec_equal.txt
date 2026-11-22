@@ -1,0 +1,36 @@
+n2 code: identical to plain-mma
+n2 edit: identical to plain-mma
+n2 prose: identical to plain-mma
+n2 edit@16K: identical to plain-mma
+n3 code: identical to plain-mma
+n3 edit: identical to plain-mma
+n3 prose: identical to plain-mma
+n3 edit@16K: identical to plain-mma
+n4 code: identical to plain-mma
+n4 edit: identical to plain-mma
+n4 prose: identical to plain-mma
+n4 edit@16K: identical to plain-mma
+n2-adapt code: identical to plain-mma
+n2-adapt edit: identical to plain-mma
+n2-adapt prose: identical to plain-mma
+n2-adapt edit@16K: identical to plain-mma
+n3-adapt code: identical to plain-mma
+n3-adapt edit: identical to plain-mma
+n3-adapt prose: identical to plain-mma
+n3-adapt edit@16K: identical to plain-mma
+n4-adapt code: identical to plain-mma
+n4-adapt edit: identical to plain-mma
+n4-adapt prose: identical to plain-mma
+n4-adapt edit@16K: identical to plain-mma
+n3-nofold code: identical to plain-mma
+n3-nofold edit: identical to plain-mma
+n3-nofold prose: identical to plain-mma
+n3-nofold edit@16K: identical to plain-mma
+n3-r1 code: identical to plain
+plain-mma code: same text as plain
+n3-r1 edit: identical to plain
+plain-mma edit: same text as plain
+n3-r1 prose: identical to plain
+plain-mma prose: same text as plain
+n3-r1 edit@16K: identical to plain
+plain-mma edit@16K: same text as plain

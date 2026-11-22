@@ -1,0 +1,17 @@
+IK_MMA=3 IK_MR=1 (d771a28)
+single token: 4.84 ms per step
+window of 2: 8.05 ms per step (7 steps, all logits read back)
+window of 3: 9.67 ms per step (7 steps, all logits read back)
+window of 4: 11.37 ms per step (8 steps, all logits read back)
+window of 5: 13.33 ms per step (4 steps, all logits read back)
+window of 6: 15.46 ms per step (4 steps, all logits read back)
+window of 7: 16.68 ms per step (4 steps, all logits read back)
+window of 8: 18.22 ms per step (10 steps, all logits read back)
+277 rows in 56 windows after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+180 rows in 36 windows after a 1500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+IK_MMA=0 window of 2: 6.96 ms per step (15 steps, all logits read back)
+IK_MMA=0 window of 4: 10.63 ms per step (15 steps, all logits read back)
+IK_MMA=0 window of 8: 19.47 ms per step (15 steps, all logits read back)
+IK_MMA=3 window of 2: 6.62 ms per step (15 steps, all logits read back)
+IK_MMA=3 window of 4: 9.74 ms per step (15 steps, all logits read back)
+IK_MMA=3 window of 8: 17.36 ms per step (15 steps, all logits read back)
