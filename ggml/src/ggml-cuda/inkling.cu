@@ -951,6 +951,44 @@ static __global__ void loop_ctrl_down_f32(const wt * __restrict__ w, const float
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+template<bool message>
+static __global__ void ik_ctrl_half(const half * weights, const float * x, size_t stride, float eps, float2 * terms, float * dst) {
+    const int row = blockIdx.y*64 + blockIdx.x;
+    const half * w = weights + row*4608 + (message ? 2304 : 0);
+    x += blockIdx.y*stride;
+    float sum = 0, dot = 0;
+#pragma unroll
+    for (int j = 0; j < 9; ++j) {
+        int k = j*256 + threadIdx.x;
+        float v = x[k];
+        sum += v*v;
+        dot += v*__half2float(w[k]);
+    }
+    sum = warp_reduce_sum(sum);
+    dot = warp_reduce_sum(dot);
+    __shared__ float2 warp[8];
+    if (threadIdx.x%32 == 0) { warp[threadIdx.x/32] = make_float2(sum, dot); }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        sum = dot = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            sum += warp[j].x;
+            dot += warp[j].y;
+        }
+        float rms = rsqrtf(sum/2304 + eps);
+        if constexpr (message) { terms[row] = make_float2(dot, rms); }
+        else { dst[row] = dot*rms + terms[row].x*terms[row].y; }
+    }
+}
+
+void ggml_cuda_ctrl_half(cudaStream_t stream, ggml_tensor * down, float2 * terms, bool message) {
+    const ggml_tensor * x = down->src[message ? 2 : 1];
+    auto kernel = message ? ik_ctrl_half<true> : ik_ctrl_half<false>;
+    kernel<<<dim3(64, down->ne[2]), 256, 0, stream>>>((const half *)down->src[0]->data, (const float *)x->data,
+            x->ne[2] > 1 ? x->nb[2]/sizeof(float) : 0, ggml_get_op_params_f32(down, 0), terms, (float *)down->data);
+}
+
 // The controllers of a batch (prefill): the per-token kernels above launch a block per (rank, token) and a warp per
 // output element, which was 35% of the prefill time (phase 5 profile). For n_tok >= IK_CTRL_GEMM_MIN the same sums are
 // two GEMMs: D = W_down^T [rmsnorm(a); rmsnorm(msg)] and [G, F] = [W_gain, W_forget] D, in FP32 (the handle's TF32

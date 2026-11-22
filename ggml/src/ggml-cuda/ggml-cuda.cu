@@ -4622,6 +4622,67 @@ static int ik_attention_projection_end(ggml_backend_cuda_context & ctx, const gg
            attn->ne[0] == 3072 && ggml_is_vector(attn) && ggml_is_contiguous(attn) && (attn->flags & GGML_TENSOR_FLAG_COMPUTE) ? j : i;
 }
 
+static int ik_next_compute(const ggml_cgraph * graph, int i) {
+    do { ++i; } while (i < graph->n_nodes && ggml_cuda_is_view_or_noop(graph->nodes[i]));
+    return i;
+}
+
+static int ik_ctrl_branch(ggml_backend_cuda_context & ctx, ggml_cgraph * graph, int i, int mode) {
+    int m = i;
+    int attn = i, proj = i, conv = i;
+    if (mode >= 2 && graph->nodes[i]->op == GGML_OP_INKLING_MOE_SUM_CONV) {
+        m = ik_next_compute(graph, i);
+    } else if (mode >= 2 && graph->nodes[i]->op == GGML_OP_MUL_MAT) {
+        if (mode >= 3) { attn = ik_attention_projection_end(ctx, graph, i); }
+        proj = attn == i ? i : ik_next_compute(graph, attn);
+        if (proj >= graph->n_nodes) { return 0; }
+        conv = ik_projection_conv_end(ctx, graph, proj);
+        if (conv == proj) { return 0; }
+        m = ik_next_compute(graph, conv);
+    }
+    if (m >= graph->n_nodes || graph->nodes[m]->op != GGML_OP_RES_MIX) { return 0; }
+    const int j = ik_next_compute(graph, m);
+    if (j == graph->n_nodes) { return 0; }
+    ggml_tensor * down = graph->nodes[j];
+    if (down->op != GGML_OP_LOOP_CTRL_DOWN || down->ne[1] != 1 || down->ne[0] != 64 ||
+            down->src[0]->type != GGML_TYPE_F16 || down->src[0]->ne[0] != 4608 ||
+            down->src[1]->data != graph->nodes[m]->data ||
+            !(down->flags & GGML_TENSOR_FLAG_COMPUTE) || !(graph->nodes[m]->flags & GGML_TENSOR_FLAG_COMPUTE)) { return 0; }
+    const ggml_tensor * message = down->src[2]->view_src;
+    if (!message || message->op != GGML_OP_RES_MIX) { return 0; }
+    for (int h = i; h <= m; ++h) {
+        if (graph->nodes[h] == message) { return 0; }
+    }
+
+    ggml_cuda_pool_alloc<float2> terms(ctx.pool(), ggml_nelements(down));
+    cudaEvent_t fork, join;
+    cudaStream_t primary = ctx.stream(), side = ctx.stream(ctx.device, 1);
+    CUDA_CHECK(cudaEventCreateWithFlags(&fork, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventCreateWithFlags(&join, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventRecord(fork, primary));
+    CUDA_CHECK(cudaStreamWaitEvent(side, fork));
+    ggml_cuda_ctrl_half(side, down, terms.get(), true);
+    CUDA_CHECK(cudaEventRecord(join, side));
+    if (graph->nodes[i]->op == GGML_OP_INKLING_MOE_SUM_CONV) {
+        ggml_cuda_op_inkling_moe_sum_conv(ctx, graph->nodes[i]);
+    } else if (conv > proj) {
+        if (attn > i && !ggml_cuda_inkling_project_attention(ctx, graph->nodes[attn])) {
+            GGML_ASSERT(ggml_cuda_compute_forward(ctx, graph->nodes[i]));
+            GGML_ASSERT(ggml_cuda_compute_forward(ctx, graph->nodes[attn]));
+        }
+        if (!ggml_cuda_inkling_projection_conv(ctx, graph->nodes[proj], graph->nodes[conv])) {
+            GGML_ASSERT(ggml_cuda_compute_forward(ctx, graph->nodes[proj]));
+            GGML_ASSERT(ggml_cuda_compute_forward(ctx, graph->nodes[conv]));
+        }
+    }
+    ggml_cuda_op_res_mix(ctx, graph->nodes[m]);
+    CUDA_CHECK(cudaStreamWaitEvent(primary, join));
+    ggml_cuda_ctrl_half(primary, down, terms.get(), false);
+    CUDA_CHECK(cudaEventDestroy(join));
+    CUDA_CHECK(cudaEventDestroy(fork));
+    return j - i;
+}
+
 // try and fuse nodes and return the number of nodes to skip
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
@@ -4630,6 +4691,13 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     }
 
     ggml_tensor * node = cgraph->nodes[i];
+
+    static const int ctrl_branch = ggml_cuda_env_int("IK_CTRL_BRANCH", 0);
+    if (ctrl_branch && !ggml_cuda_env_flag("IK_MR") && cuda_ctx->stream_context().concurrent_events.empty() &&
+            cuda_ctx->curr_stream_no == 0 && ggml_cuda_info().devices[cuda_ctx->device].cc == GGML_CUDA_CC_AMPERE_GA10X) {
+        const int skip = ik_ctrl_branch(*cuda_ctx, cgraph, i, ctrl_branch);
+        if (skip) { return skip; }
+    }
 
     static const int route_visit = ggml_cuda_env_int("IK_ROUTE_VISIT", 0);
     if (route_visit > 0 && node->op == GGML_OP_INKLING_ROUTER && !ggml_cuda_env_flag("IK_MR") &&
