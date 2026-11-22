@@ -1,0 +1,12 @@
+IK_ROUTER_WARP=0 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.67 ± 0.33 |
+build: 812b439 (231)
+IK_ROUTER_WARP=2 start_C=85
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        219.97 ± 0.59 |
+build: 812b439 (231)
+IK_ROUTER_WARP=2 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        219.89 ± 0.34 |
+build: 812b439 (231)
+IK_ROUTER_WARP=0 start_C=86
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        221.31 ± 0.33 |
+build: 812b439 (231)

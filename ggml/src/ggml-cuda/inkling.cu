@@ -2532,7 +2532,7 @@ static __device__ __forceinline__ void ik_mma_init(ik_mma_lane<G> & st, const fl
 // One step: the 16 cells kt .. kt + 15, of which the cells below w1 other than kv_idx (the current token's, not stored
 // yet) count. The Q8_0 rows of the kv head are at kb + row*k_nb2 and vb + row*v_nb2, row = min(cell - row0, row_max):
 // the cache itself, or a tile of it in shared memory.
-template <int G>
+template <int G, bool late = false, bool first = false>
 static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
         const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
         const int kt, const int w1, const int64_t kv_idx) {
@@ -2572,6 +2572,7 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
         dk[i] = args.rel_pos[cc];
     }
     uint32_t vh[4][2], vl[4][2], vq[4][4];
+    auto load_v = [&]() {
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
         const int cell = kt + 2*tq + (i & 1) + 8*(i >> 1);
@@ -2586,6 +2587,8 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
             vq[i][b] = r.quad(b, gr, vh[i][b >> 1]);
         }
     }
+    };
+    if constexpr (!late) { load_v(); }
     // ---- Q K^T: C[16 cells][8 columns] += A[16 cells][16 dims] B[16 dims][8 columns], block by block ----
     float s[2] = { 0.0f, 0.0f };
 #pragma unroll
@@ -2627,7 +2630,7 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
     for (int sh = 4; sh < 32; sh <<= 1) {
         mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, sh));
     }
-    if (__ballot_sync(0xffffffffu, mx > st.mm)) { // a new maximum: rescale (rare after the first steps)
+    if constexpr (first) { st.mm = mx; } else if (__ballot_sync(0xffffffffu, mx > st.mm)) { // a new maximum: rescale (rare after the first steps)
         const float mn = fmaxf(st.mm, mx);
         const float c  = st.mm == -INFINITY ? 0.0f : expf(st.mm - mn);
         st.mm  = mn;
@@ -2648,6 +2651,7 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
     const float pv[4] = { __shfl_sync(0xffffffffu, p0, src), __shfl_sync(0xffffffffu, p0, src + 4),
                           __shfl_sync(0xffffffffu, p1, src), __shfl_sync(0xffffffffu, p1, src + 4) };
     const float pvz[4] = { col_ok ? pv[0] : 0.0f, col_ok ? pv[1] : 0.0f, col_ok ? pv[2] : 0.0f, col_ok ? pv[3] : 0.0f };
+    if constexpr (late) { load_v(); }
     // ---- P V: C[16 dims][8 columns] += A[16 dims][16 cells] B[16 cells][8 columns]; an mma takes 16 dims of one block
     //      (two per lane group), so the block's scales ride on P. A cell without weight may be past the end: no scale. ----
 #pragma unroll
@@ -2807,7 +2811,7 @@ static __device__ __forceinline__ bool ik_attention_tail(ik_attn_args a, int g, 
     return true;
 }
 
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false, bool ungated = false, bool warp_split = false, bool fast_tail = false, bool mask_tiles = false, int sched = 0>
 static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & args_in, int g, int split, int * ready = nullptr, int producers = 0) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -2908,8 +2912,11 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     const int     ci     = tid % HD;
     const int     n_conv = args.n_conv;
     const int64_t ch     = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel
+    constexpr bool early = (sched & 4) != 0;
+    constexpr bool owner_only = (sched & 8) != 0;
+    const bool run_kv = !owner_only || kv_idx/args.kv_per_split == split;
     float cur_in, w_c[8], taps[8];
-    if constexpr (!MR) {
+    if (!MR && run_kv) {
         const int64_t off  = which ? args.off_v : args.off_k;
         const int64_t offt = which ? args.off_vtaps : args.off_ktaps;
         const int     col  = args.proj_ncols == 3 ? (which ? 2 : 1) : 0;
@@ -2978,7 +2985,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 
     // ===== round 2: the past inputs of the convolution (after the cell id), consumed after the cell loop =====
     float x[8];
-    if constexpr (!MR) {
+    if (!MR && run_kv) {
         const float * past = args.state + (int64_t) read_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -2986,6 +2993,46 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         }
     }
 
+    float x_new[7], y = 0;
+    auto convolve = [&]() {
+        const float scale = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
+        float out = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            if (j < n_conv) {
+                out += x[j]*w_c[j];
+            }
+        }
+        if (args.has_taps) {
+#pragma unroll
+            for (int lag = 0; lag < 8; ++lag) {
+                if (lag < n_conv) {
+                    out += x[n_conv - 1 - lag]*taps[lag];
+                }
+            }
+        }
+        y = (x[n_conv - 1] + out)*scale;
+#pragma unroll
+        for (int j = 0; j < 7; ++j) {
+            x_new[j] = j < n_conv - 1 ? x[j + 1] : 0.0f;
+        }
+        const float ss = warp_reduce_sum(y*y);
+        if (lane == 0) {
+            s_red[which][warp % 4] = ss;
+        }
+    };
+    auto normalize = [&]() {
+        const float sst = s_red[which][0] + s_red[which][1] + s_red[which][2] + s_red[which][3];
+        float factor;
+        if (which == 0) {
+            const float norm = sqrtf(sst) + args.clip_eps;
+            factor = fminf(fmaxf(args.qk_clip/norm, 0.0f), 1.0f);
+        } else {
+            factor = rsqrtf(sst/HD + args.norm_eps);
+        }
+        y *= factor;
+    };
+    if constexpr (early) { if (run_kv) { convolve(); } }
     // ===== the clipped Q and R of the heads (block reductions), scaled by tau =====
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
@@ -2995,6 +3042,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         }
     }
     ik_scan_sync<warp_split>();
+    if constexpr (early) { if (run_kv) { normalize(); } }
 #pragma unroll
     for (int hh = 0; hh < G; ++hh) {
         if (tid < HD) {
@@ -3141,7 +3189,13 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 #pragma unroll
                 for (int tile = warp; tile < 16; tile += IK_A2_WARPS) {
                     if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
-                        ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
+                        if constexpr (sched & 2) {
+                            if (tile < IK_A2_WARPS) {
+                                ik_mma_step<G,(sched&1)!=0,true>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
+                                continue;
+                            }
+                        }
+                        ik_mma_step<G,(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile+16, kv_idx);
                     }
                 }
             } else if constexpr (mask_tiles) {
@@ -3153,13 +3207,13 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 #pragma unroll
                     for (int j = 0; j < 2; ++j) {
                         if (mask & (0xffffu << (j*16))) {
-                            ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv-1, kt+j*16, w1, kv_idx);
+                            ik_mma_step<G,(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv-1, kt+j*16, w1, kv_idx);
                         }
                     }
                 }
             } else {
                 for (int kt = w0; kt < w1; kt += 16) {
-                    ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                    ik_mma_step<G,(sched&1)!=0>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
                 }
             }
         }
@@ -3173,7 +3227,6 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     IK_DBG_T(4);
 
     // ===== the K/V convolution of the token, the post-normalization, the cache store (split 0), the new state =====
-    float x_new[7];
     if constexpr (MR) {
         const char * row = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
         float yq;
@@ -3186,46 +3239,17 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         }
         (which ? s_v : s_k)[ci] = yq;
     } else {
-        const float scale = 1.0f/sqrtf((args.has_taps ? 2 : 1)*n_conv + 1);
-        float out = 0.0f;
-#pragma unroll
-        for (int j = 0; j < 8; ++j) {
-            if (j < n_conv) {
-                out += x[j]*w_c[j];
-            }
+        if constexpr (!early) {
+            if (run_kv) { convolve(); }
+            ik_scan_sync<warp_split>();
+            if (run_kv) { normalize(); }
         }
-        if (args.has_taps) {
-#pragma unroll
-            for (int lag = 0; lag < 8; ++lag) {
-                if (lag < n_conv) {
-                    out += x[n_conv - 1 - lag]*taps[lag];
-                }
-            }
-        }
-        float y = (x[n_conv - 1] + out)*scale;
-#pragma unroll
-        for (int j = 0; j < 7; ++j) {
-            x_new[j] = j < n_conv - 1 ? x[j + 1] : 0.0f;
-        }
-        const float ss = warp_reduce_sum(y*y);
-        if (lane == 0) {
-            s_red[which][warp % 4] = ss;
-        }
-        ik_scan_sync<warp_split>();
-        const float sst = s_red[which][0] + s_red[which][1] + s_red[which][2] + s_red[which][3];
-        float factor;
-        if (which == 0) {
-            const float norm = sqrtf(sst) + args.clip_eps;
-            factor = fminf(fmaxf(args.qk_clip/norm, 0.0f), 1.0f);
-        } else {
-            factor = rsqrtf(sst/HD + args.norm_eps);
-        }
-        y *= factor;
+        if (run_kv) {
         char * row = (which ? args.v_cache : args.k_cache) + kv_idx*(which ? args.vc_nb2 : args.kc_nb2) + g*(which ? args.vc_nb1 : args.kc_nb1);
         float yq;
         if constexpr (std::is_same<cache_t, half>::value) {
             const half hv = __float2half(y);
-            if (split == 0) {
+            if (owner_only || split == 0) {
                 ((half *) row)[ci] = hv;
             }
             yq = __half2float(hv);
@@ -3235,7 +3259,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             const float id   = d != 0.0f ? 1.0f/d : 0.0f;
             const int   q    = (int) roundf(y*id);
             const half  dh   = __float2half(d);
-            if (split == 0) {
+            if (owner_only || split == 0) {
                 block_q8_0 * b = (block_q8_0 *) row + (warp % 4);
                 b->qs[lane] = (int8_t) q;
                 if (lane == 0) {
@@ -3245,6 +3269,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
             yq = __half2float(dh)*q;
         }
         (which ? s_v : s_k)[ci] = yq;
+        }
     }
     ik_scan_sync<warp_split>();
 
@@ -3296,6 +3321,15 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
         }
     }
 
+    if constexpr (owner_only) { if (run_kv) {
+        float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*(n_conv - 1);
+#pragma unroll
+        for (int j = 0; j < 7; ++j) {
+            if (j < n_conv - 1) {
+                st[j] = x_new[j];
+            }
+        }
+    } }
     // ===== combine the warps =====
     if constexpr (MMA) {
         // the scan left the warp's partial in shared memory; the warp with the current cell merges it in
@@ -3427,7 +3461,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     }
 
     // ===== the new recurrent state of the K and V channels (every block has read the old state by now) =====
-    if constexpr (!MR) {
+    if constexpr (!MR && !owner_only) {
         float * st = args.state + (int64_t) args.write_cell*args.state_s1 + ch*(n_conv - 1);
 #pragma unroll
         for (int j = 0; j < 7; ++j) {
