@@ -2483,8 +2483,8 @@ static __device__ __forceinline__ void ik_mma_init(ik_mma_lane<G> & st, const fl
 // One step: the 16 cells kt .. kt + 15, of which the cells below w1 other than kv_idx (the current token's, not stored
 // yet) count. The Q8_0 rows of the kv head are at kb + row*k_nb2 and vb + row*v_nb2, row = min(cell - row0, row_max):
 // the cache itself, or a tile of it in shared memory.
-template <int G, bool late_values = false>
-static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[32],
+template <int G, bool late_values = false, bool fixed_bias = false>
+static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik_mma_lane<G> & st, const float (* s_r)[fixed_bias ? 36 : 32],
         const char * kb, const int64_t k_nb2, const char * vb, const int64_t v_nb2, const int row0, const int row_max,
         const int kt, const int w1, const int64_t kv_idx) {
     constexpr float PS = IK_MMA_PS;
@@ -2556,17 +2556,33 @@ static __device__ __forceinline__ void ik_mma_step(const ik_attn_args & args, ik
         s[1] += ik_q8row::scale(b, kh[1][b >> 1], kl[1][b >> 1])*(cb[2] + cb[3]);
     }
     // ---- the logits: scale, relative bias (within the extent), sink, mask ----
-    const bool e0 = dk[0] >= 0 && dk[0] < args.n_extent, e1 = dk[1] >= 0 && dk[1] < args.n_extent;
-    float bias[2] = { 0.0f, 0.0f };
-    if (__ballot_sync(0xffffffffu, e0 || e1)) {
-        const float * t0 = table + (int64_t) (e0 ? dk[0] : 0)*n_rel;
-        const float * t1 = table + (int64_t) (e1 ? dk[1] : 0)*n_rel;
+    const bool e0 = unsigned(dk[0]) < unsigned(args.n_extent), e1 = unsigned(dk[1]) < unsigned(args.n_extent);
+    float bias[2] = {0.0f, 0.0f};
+    if (__any_sync(0xffffffffu, e0 || e1)) {
+        const int d0 = e0 ? dk[0] : 0, d1 = e1 ? dk[1] : 0;
+        if constexpr (fixed_bias) {
 #pragma unroll
-        for (int j = 0; j < 16; ++j) {
-            if (j < n_rel) {
-                const float rj = s_r[ht][j];
-                bias[0] += t0[j]*rj;
-                bias[1] += t1[j]*rj;
+            for (int chunk = 0; chunk < 4; ++chunk) {
+                const float4 a = ((const float4 *) table)[4*d0 + chunk];
+                const float4 b = ((const float4 *) table)[4*d1 + chunk];
+                const float4 r = ((const float4 *) s_r[ht])[chunk];
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const float v = ((const float *) &r)[j];
+                    bias[0] += ((const float *) &a)[j]*v;
+                    bias[1] += ((const float *) &b)[j]*v;
+                }
+            }
+        } else {
+            const float * t0 = table + (int64_t) d0*n_rel;
+            const float * t1 = table + (int64_t) d1*n_rel;
+#pragma unroll
+            for (int j = 0; j < 16; ++j) {
+                if (j < n_rel) {
+                    const float rj = s_r[ht][j];
+                    bias[0] += t0[j]*rj;
+                    bias[1] += t1[j]*rj;
+                }
             }
         }
         bias[0] = e0 ? bias[0] : 0.0f;
@@ -2733,7 +2749,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
     __shared__ float s_q[G][HD];
     __shared__ float s_k[HD];
     __shared__ float s_v[HD];
-    __shared__ float s_r[G][32];
+    __shared__ __align__(16) float s_r[G][fast ? 36 : 32];
     __shared__ float s_sink[G];
     __shared__ float s_ssq[G][IK_A2_WARPS];
     __shared__ float s_red[2][IK_A2_WARPS];
@@ -2998,7 +3014,7 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 #pragma unroll
                 for (int tile = warp; tile < 16; tile += IK_A2_WARPS) {
                     if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
-                        ik_mma_step<G, fast>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
+                        ik_mma_step<G, fast, fast>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
                     }
                 }
             } else if constexpr (fast && !HAS_TAPS) {
@@ -3010,13 +3026,13 @@ static __device__ __forceinline__ void ik_attention_tile(const ik_attn_args & ar
 #pragma unroll
                     for (int half = 0; half < 2; ++half) {
                         if (mask & (0xffffu << (16*half))) {
-                            ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt + 16*half, w1, kv_idx);
+                            ik_mma_step<G, false, fast>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt + 16*half, w1, kv_idx);
                         }
                     }
                 }
             } else {
                 for (int kt = w0; kt < w1; kt += 16) {
-                    ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                    ik_mma_step<G, false, fast>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
                 }
             }
         }
