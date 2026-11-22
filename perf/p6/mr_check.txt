@@ -1,2 +1,26 @@
+IK_MR_STATS: windows of 2: 12.67 distinct experts per visit (768 visits; 6.34 per token)
+IK_MR_STATS: windows of 3: 16.31 distinct experts per visit (768 visits; 5.44 per token)
+IK_MR_STATS: windows of 4: 20.15 distinct experts per visit (768 visits; 5.04 per token)
+IK_MR_STATS: windows of 5: 22.84 distinct experts per visit (768 visits; 4.57 per token)
+IK_MR_STATS: windows of 6: 23.93 distinct experts per visit (768 visits; 3.99 per token)
+IK_MR_STATS: windows of 7: 27.92 distinct experts per visit (768 visits; 3.99 per token)
+IK_MR_STATS: windows of 8: 30.99 distinct experts per visit (768 visits; 3.87 per token)
+single token: 4.80 ms per step
+window of 2: 8.92 ms per step (7 steps, all logits read back)
+window of 3: 11.02 ms per step (7 steps, all logits read back)
+window of 4: 13.13 ms per step (7 steps, all logits read back)
+window of 5: 15.70 ms per step (7 steps, all logits read back)
+window of 6: 18.32 ms per step (7 steps, all logits read back)
+window of 7: 20.68 ms per step (7 steps, all logits read back)
+window of 8: 22.88 ms per step (7 steps, all logits read back)
+280 rows in 56 windows after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
+old batched path (no IK_MR):
+single token: 4.78 ms per step
+window of 2: 11.88 ms per step (7 steps, all logits read back)
+window of 3: 13.21 ms per step (7 steps, all logits read back)
+window of 4: 15.42 ms per step (7 steps, all logits read back)
+window of 6: 19.21 ms per step (7 steps, all logits read back)
+window of 8: 24.53 ms per step (7 steps, all logits read back)
+184 rows in 40 windows after a 300-token prefix: 184 rows differ from single-token decode, max |logit diff| 6.93
 240 rows in 48 windows after a 300-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
 180 rows in 36 windows after a 1500-token prefix: 0 rows differ from single-token decode, max |logit diff| 0

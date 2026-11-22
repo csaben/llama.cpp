@@ -148,6 +148,22 @@ MODEL=$Q2 python3 perf/longctx.py --start --short -- --backend-sampling    # ser
 MODEL=$Q2 python3 perf/spec_probe.py plain -- --backend-sampling           # code / edit / prose, plain or DSpark
 ```
 
+## Speculative decoding as a window (phase 6)
+
+With `IK_MR=1` a DSpark verify step of 2-8 tokens goes through the single-token fused kernels row by row, and each row's
+logits are bit-identical to decoding the tokens one at a time (`perf/p6/mr_check.cpp`). With the cheaper drafter of the
+same phase, DSpark is 1.19x plain decode on an edit of given code (235 vs 197 tok/s) and 1.10x at 16K context;
+`LLAMA_DSPARK_ADAPTIVE=1` switches drafting off while it loses (new code and prose: 0.90x instead of 0.7x). The expert
+matvecs are bound by dp4a work per token on this card, so a 4-row window costs 2.3 single tokens. Tables, what did not
+work and the server command are in the phase 6 section of [`perf/RESULTS.md`](perf/RESULTS.md).
+
+```bash
+. perf/p5env.sh
+IK_MR=1 LD_LIBRARY_PATH=build/bin build/bin/mr_check $Q2 perf/ppl.txt 300 48      # windows == single tokens, bit for bit
+IK_MR=1 MODEL=$Q2 python3 perf/spec_probe.py dspark -- --backend-sampling --spec-type draft-dspark \
+  --spec-draft-model $DRAFT --spec-draft-n-max 3 --spec-draft-p-min 0
+```
+
 ## Core code
 
 | file | what |
@@ -191,12 +207,13 @@ cmp "$probe/reference/gen1.txt" "$probe/fused/gen1.txt"
 
 7.1 ms per token: weight matvecs 4.7 ms (about 88% of the 3090's measured 891 GB/s) plus about 2.4 ms of
 latency-bound glue (attention, router, mixes, loop controllers) at about 50 µs per layer pass. The ceiling from
-the bytes read per token (4.12 GB) is 216 tok/s.
+the bytes read per token (4.12 GB) is 216 tok/s. That is the exact-weight model; the 2-bit model reads 2.42 GB per token
+(about 369 tok/s).
 
 Open work:
 - **Glue megakernel** (in progress): persistent kernels that keep the per-pass glue on-chip and overlap it with
   weight streaming. The target is about 0.7 ms of glue, which gives about 185 tok/s exact and 200+ on the variant.
 - **Two-GPU tensor parallel** with the P2P driver (`perf/p2p/`): about 96 all-reduces per token. Estimated
   ~320–380 tok/s once the glue is small, because the glue does not shrink when the model is split.
-- DSpark speculative decoding does not pay off for this MoE. See the "Batched (speculative verify)" section of
-  RESULTS.md.
+- DSpark speculative decoding pays on edits only (phase 6 above); a cheaper drafter head and tensor-core expert
+  matvecs are the open pieces.

@@ -86,6 +86,8 @@ loop ctrl down 170 MB, gain/forget 170 MB, router 57 MB, bias tables 3 MB), outp
 Measured on GPU1: raw read bandwidth 891 GB/s (1 GiB), 737 GB/s for a 2 MB read, 711 GB/s for 8 MB, 831 GB/s for 32 MB
 (ramp/tail of each kernel). Empty kernel in a CUDA graph: 0.65 us; tiny 82x256 kernel: 1.10 us.
 Floor at 891 GB/s: 4.62 ms = 216 tok/s (weights only, exact types). 200 tok/s = 5.0 ms.
+(Correction, phase 6: 216 tok/s is the ceiling of the exact IQ4_NL weights only, 4.12 GB per token. The calibrated 2-bit
+model that the live server runs reads 2.42 GB per token, a ceiling of about 369 tok/s; see the phase 6 section.)
 
 ## Where the 8.0 ms go (nsys, one steady-state token, 1613 launches)
 | part | time | bytes | GB/s |
@@ -168,6 +170,7 @@ down matvec, weighted sum + FFN conv + residual (1). 13-14 launches per pass ins
 | conv+residual, SITU, misc small kernels | 0.30 | |
 | launch gaps | 0.25 | CUDA graph |
 Weights-only floor at the measured 891 GB/s: 4.62 ms (216 tok/s) exact, 4.0 ms with the Q6_K/F16 variants (250 tok/s).
+(These floors are for the exact-weight files. The 2-bit model: 2.42 GB per token, 2.7 ms, about 369 tok/s.)
 The matvecs run at 88% of that peak (ramp/tail of 240 dependent launches per token); the fused glue is ~2.4 ms of
 latency-bound work (ten kernels per layer, each a chain of 3-8 dependent memory round trips at ~0.7 us).
 
@@ -593,3 +596,178 @@ The live unit runs the snapshot in `~/inkling-live-bin` (build `c3ab089`) and wa
 this build with the same model and flags, run `bash perf/live/switch-to-p5.sh`. It snapshots `build/bin` into
 `~/inkling-live-bin-p5`, stops the unit and starts it from the snapshot. `bash perf/live/restore-live.sh` after a
 `systemctl --user stop inkling-3090-experiment` goes back.
+
+
+# Phase 6: speculative verify as a window of rows (2026-11-21)
+
+Goal: make DSpark pay on one RTX 3090 by verifying 1-8 draft tokens in one step whose rows are bit-identical to
+single-token decode, as the basalt and ingine engines do on an RTX 5090. Brief: `perf/PHASE6_BRIEF.md`. Raw outputs:
+`perf/p6/`. Commit of the numbers: `2359b45` unless a row says otherwise. Everything new is behind `IK_MR=1`
+(and `LLAMA_DSPARK_ADAPTIVE=1` for the policy); without them the build behaves as phase 5.
+
+**Outcome in one paragraph.** A verify step is now a "window": every fused single-token operator takes the rows of
+the window, and the logits of each row equal single-token decode bit for bit (700 rows checked, 0 differ; before, a
+batched step differed from single-token decode in every row by up to 6.9 logits). The glue of a 4-row window went
+from about 4.6 ms in 1,637 launches to about 2.7 ms in 728. The drafter's cost per step was cut by about 3 ms. DSpark
+now beats plain decode on edits (**235 vs 197 tok/s, 1.19x; 196 vs 179 at 16K context, 1.10x**) and with the on/off
+policy costs 9-10% on short new-code and prose replies instead of 25-35%. It does not reach the 1.6-1.9x of the 5090
+engines: on Ampere the expert matvecs are bound by the dp4a work per (token, expert) pair, not by weight bytes, so
+reading a shared expert once saves nothing, and a 4-row window costs 2.3 single tokens.
+
+## Correction of the roofline
+
+The 216 tok/s ceiling in the earlier sections and the write-up is for the exact IQ4_NL weights (4.12 GB read per
+token). The calibrated 2-bit model reads 1,135 MB dense + 1,019 MB experts + 261 MB head = **2.42 GB per token**: 2.7 ms
+at 891 GB/s, **about 369 tok/s**. Plain decode at 210 tok/s (4.76 ms) spends about 2.1 ms on latency, not bandwidth.
+
+## Tables
+
+### DSpark against plain decode (`perf/spec_probe.py`, 2-bit model, 384-token replies, temperature 0, fresh server per row group)
+
+`perf/p6/final_spec.txt`. Drafter `dspark-Inkling-2-Mini-Q8_0.gguf`, `--spec-draft-p-min 0`, `--backend-sampling`.
+"Tokens per step" = 384 / (384 - accepted). Every reply of every DSpark row is byte-identical to the plain reply
+(`perf/p6/final_spec_equal.txt`, 20 of 20).
+
+| Prompt | Prompt tokens | Plain tok/s | Old batched verify, max 3 (this build without `IK_MR`) | Window verify, max 3 (`IK_MR=1`) | Accepted / proposed | Tokens per step | Window + policy (`LLAMA_DSPARK_ADAPTIVE=1`) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| New code | 47 | 208.3 | 151.4 | 158.1 (0.76x) | 219 / 488 (45%) | 2.33 | 187.3 (0.90x) |
+| Edit of given code | 1,025 | 197.0 | 210.1 | **235.3 (1.19x)** | 282 / 303 (93%) | 3.76 | 236.6 (1.20x) |
+| Prose | 36 | 207.1 | 126.4 | 139.2 (0.67x) | 196 / 556 (35%) | 2.04 | 188.3 (0.91x) |
+| Edit at 16K context | 16,044 | 178.6 | 155.9 | **195.6 (1.10x)** | 275 / 322 (85%) | 3.52 | 191.2 (1.07x) |
+
+Phase 5 on the same prompts (old drafter, old verify): 128.2 / 191.2 / 107.5 / 136.6 tok/s. The "old batched verify"
+column here already has the cheaper drafter of this phase, which is where its gain over phase 5 comes from.
+
+Longer drafts lose: max 5 with the policy 176.5 / 231.6 / 177.3 / 174.5; max 7 without it 93.8 / 207.6 / 77.8 / 161.5
+(each extra draft position costs a full-vocabulary matvec in the drafter and a row in the window). The confidence
+cutoff (`--spec-draft-p-min` as sigmoid of the top-2 logit margin, `perf/p6/sweep1.txt`) raises acceptance (code: 81%
+of proposed at 0.8) but not speed (161 tok/s on code, 232 on the edit): a step that drafts nothing still pays the drafter.
+An OpenCode-style agent replay was not built.
+
+### Cost of a window (`perf/p6/mr_check.cpp`, real text after a 300-token prefix, logits of every row read back)
+
+| Rows | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Window (`IK_MR=1`), ms | 4.80 | 8.92 | 11.02 | 13.13 | 15.70 | 18.32 | 20.68 | 22.88 |
+| Old batched path, ms | 4.78 | 11.88 | 13.21 | 15.42 | | 19.21 | | 24.53 |
+| Distinct experts per layer visit | 8 | 12.7 | 16.3 | 20.2 | 22.8 | 23.9 | 27.9 | 31.0 |
+
+(With one output row and random tokens, `llama-bench -p N`: 7.3 / 12.2 ms for 2 / 4 rows against 8.45 / 11.8 before;
+random tokens share no experts and that bench never took the all-rows head.) A second token brings 4.7 new experts per
+visit, a fourth 3.9: the overlap ingine reports (4.57) is there, it just does not buy time on this card.
+
+Where a 4-row window of a DSpark step goes (nsys, edit prompt, per step): expert matvecs 5.2 ms (96 launches, 54 us),
+dense matvecs 2.7 ms (target head 0.62, Q|K|V 0.89 + 0.61, output projection 0.57), attention 1.6 ms, router 0.55,
+the rest of the glue about 1 ms; drafter about 2 ms (4 full-vocabulary matvecs 1.34 ms); host about 2.3 ms.
+
+### Plain decode regression and quality
+
+| | depth 0 | 4K | 16K | 32K |
+|---|---:|---:|---:|---:|
+| Before (`d43d1d0`), tok/s | 211.11 ± 0.59 | 195.90 ± 2.22 | 183.87 ± 1.95 | 169.50 ± 1.91 |
+| Now (`26d08df`), tok/s | 209.91 ± 0.78 | 194.09 ± 2.31 | 182.57 ± 2.05 | 168.32 ± 1.63 |
+
+The single-token kernels are the same template instances as before (the window variants are separate instances); the
+0.6-0.9% difference is within the run-to-run spread of these benches (phase 5 final: 210.32 / 194.88 / 182.46 / 168.67).
+Prefill PPL (8x2048) 3.0530 and decode-path PPL (2x1024, `-ub 1`) 4.2036: both identical to phase 5.
+`test-backend-ops`: INKLING_ATTN 16/16, INKLING_ROUTER 11/11 (4 window cases), moe_sum_conv 6/6 (4 window cases, listed
+under CONCAT), SHORTCONV_RES 28/28, LOOP_CTRL_APPLY 23/23, LOOP_CTRL_DOWN 14/14, RES_MIX 70/70, MUL_MAT 2696/2696,
+MUL_MAT_ID 1081/1081. `perf/greedy.sh` was not rerun (the plain path is unchanged and both PPLs are identical).
+
+Window equality (`perf/p6/mr_check.txt`): 280 rows in 56 windows of 2-8 rows, 240 rows in 48 windows with partial
+rollbacks after a 300-token prefix, 180 rows in 36 windows after 1,500 tokens (crossing the 1,536-cell boundary of both
+caches): 0 rows differ, max logit difference 0. The same tool on the old batched path: every row differs.
+
+## What was done
+
+1. **Window graph** (`src/models/inkling2.cpp`, `graph::mr`): a ubatch of 2-8 tokens of one sequence keeps the direct
+   recurrent-state access, the Q8_1 activations and every fused op of single-token decode.
+2. **Row-exact dense matvecs** (`mmvq.cu` `ik_mmvq_mr`): up to 8 activation columns with the warps, blocks per thread
+   and reduction order of `mul_mat_vec_q<type, 1>`; the weight block of an iteration is read once for all columns.
+   `ik_segmented_projection_rows` does the same for the Q|K|V projection. Requested per node with
+   `op_params[15] == GGML_IK_MR_MAGIC`.
+3. **Experts**: `ik_mmvq_mr_pairs`, a warp per (token, slot) pair that walks the blocks of each warp of the
+   single-column kernel in turn and adds the partial sums in its order (bit-identical, no shared memory). The grouped
+   kernel (a device-side plan, the owner pair computes every column of its expert, each distinct expert streamed once)
+   is kept behind `IK_MR_GROUPED=1`; `IK_MR_STATS=1` prints the distinct-expert counts.
+4. **Attention**: `inkling_attn_kv_rows_kernel` writes the K/V of all rows (convolution over the state and the rows so
+   far, post-norm, cache store, state rollback planes); `inkling_attn2_kernel<MR>` then runs a block set per row over the
+   cache, with the row's own mask and distances. A row that sees nothing past the 256-cell pad it would have had as a
+   single token takes the splits of that smaller cache, so its partial sums group identically.
+5. **Router, MoE sum + convolution, output convolution, loop controllers** with a row dimension
+   (`inkling_router2_kernel<MR>`, `inkling_moe_sum_conv_rows_kernel`, `shortconv_res_rows_f32`, `ik_ctrl_apply8_rows`).
+   The state rollback planes follow `build_conv_state_view` (slot k: the state k tokens back).
+6. **Drafter** (`src/models/dspark.cpp`, `common/speculative.cpp`): the Markov head stops at `--spec-draft-n-max`
+   instead of running the whole block (each position is a full-vocabulary matvec plus a first-maximum search), only
+   the read positions' logits are computed and copied, and the first maximum is a scan of the logits instead of a
+   sampler chain over a 200K-entry candidate array. The drafts are unchanged (same accepted / proposed counts).
+7. **Policy**: `--spec-draft-p-min` works for this drafter as a top-2 margin confidence; `LLAMA_DSPARK_ADAPTIVE=1`
+   measures tokens per second of drafted and plain steps online and drafts only while drafting is ahead (32 plain
+   steps after a loss, doubling to 256, then a probe).
+
+## What did not work
+
+- **Reading each distinct expert once.** The grouped kernel took 65-73 us per 4-row launch against 51 us for the old
+  per-token kernel and 54 us for the per-pair kernel, with 20 distinct experts instead of 32 pairs. Per (expert, column)
+  the time is the same as single-token decode (about 1.9 us): the kernel is bound by its dp4a and activation loads per
+  column, which sharing the weight bytes does not reduce. More rows per block (8 instead of 2) and carrying the expert
+  id in the plan changed nothing.
+- **Tensor cores for the experts were not built.** With 2-bit weights unpacked on the fly, an mma step needs about as
+  many operations per element to build its operand as dp4a spends, and only 1.6 columns share an expert in a 4-row
+  window, so the expected gain is small on this card. ingine and basalt read weights stored for their kernels.
+- **The confidence cutoff alone** (see the table notes): shorter windows, same speed.
+- The first grouped kernel (8 guarded columns, plan computed in every block) was 2x slower than the old path.
+
+## Not done
+
+- Workstream 4's shortlist or screened drafter head: the drafter still runs `n_max + 1` full-vocabulary IQ4_NL matvecs
+  per step (1.34 ms at max 3). Folding `output x hidden_out` into one 201K x rank matrix (basalt) is the next cut.
+- The drafter's bookkeeping when no draft is made (target features copied to the host and injected every step) costs
+  3% of plain speed (202 vs 209 tok/s with `LLAMA_DSPARK_ADAPTIVE=2`, never draft).
+- Workstream 6 (single-token slack), the OpenCode replay, window cases for INKLING_ATTN / MUL_MAT in `test-backend-ops`
+  (the end-to-end `mr_check` covers them on the real model), the CPU `shortconv_res` with the state in place.
+
+## Sources
+
+- ingine, <https://github.com/satellitedown/inkling-2-mini-abliterated-ingine> (Apache-2.0): 1-8 token columns per
+  decode kernel for the same weight traffic, expert dedup across the window, verifying only confident drafts, the
+  bit-lock test of M = 1..8 outputs. Ideas only; no code was copied.
+- basalt, <https://github.com/jesdga95/basalt> (MIT): a plan kernel that groups (row, slot) pairs by expert, per-row
+  results bit-identical to single-row calls, a window policy learned online from measured cost. Ideas only; no code
+  was copied. Neither repository was read line by line in this phase; the descriptions in the brief were used.
+- llama.cpp's recurrent-state rollback planes (`build_conv_state_store`, `n_rs_seq`) and its `mul_mat_vec_q` /
+  `mul_mat_vec_q_moe` kernels, which the window kernels mirror.
+
+## Risks
+
+- `IK_MR=1` needs the live configuration: IQ4_NL or Q6_K dense projections with `IK_SEGMENTED_*`, Q8_0 or F16 KV, one
+  sequence, GA10x. Other models fall back to the old batched path (`graph::mr` false).
+- Bit equality with plain decode holds when a row's visible cells and cache size match single-token decode. A row whose
+  later window rows raise the cache pad while other used cells sit in that pad would group its sums differently (not
+  wrong, not bit-equal); not seen in the checks.
+- `LLAMA_DSPARK_HEAD_N` is set by the drafter and makes its graph return `n_max + 1` logit columns; a caller that asks
+  the drafter context for more outputs would read past them.
+- The policy is tuned on 384-token replies; its probes are a larger share of short replies than of long ones.
+
+## Deploy
+
+The live server is back on the phase 5 binaries (`bash perf/live/restore-p5.sh`), unchanged. Plain decode gains nothing
+from this build, so there is no reason to switch for plain serving. DSpark is worth turning on only for edit-heavy use
+(rewrites of given code: +19%, +10% at 16K context); it costs about 10% on short new-code and prose replies with the
+policy and 0.4 GB of VRAM for the drafter. To try it (same model and port, snapshot of this build):
+
+```bash
+systemctl --user stop inkling-3090-experiment
+mkdir -p ~/inkling-live-bin-p6 && cp -a build/bin/. ~/inkling-live-bin-p6/
+systemd-run --user --unit=inkling-3090-experiment --working-directory=$HOME/llama.cpp-fast \
+  --setenv=CUDA_VISIBLE_DEVICES=1 --setenv=LLAMA_INKLING_CTRL_F16=1 --setenv=IK_BATCH_MESSAGES=1 --setenv=IK_SEGMENTED_Q6=1 \
+  --setenv=IK_SEGMENTED_IQ4=1 --setenv=IK_CTRL_APPLY8=1 --setenv=IK_MIX_SPECIALIZE=1 --setenv=IK_MR=1 \
+  --setenv=LLAMA_DSPARK_ADAPTIVE=1 --setenv=LD_LIBRARY_PATH=$HOME/inkling-live-bin-p6 \
+  $HOME/inkling-live-bin-p6/llama-server -m $HOME/models/inkling-2-mini/Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf \
+  -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -c 65536 -np 1 --backend-sampling --host 127.0.0.1 --port 8031 --alias inkling-mini \
+  --spec-type draft-dspark --spec-draft-model $HOME/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0.gguf \
+  --spec-draft-n-max 3 --spec-draft-p-min 0
+```
+
+This command was not run at 64K context in this phase (the measurements used a 32K slot). Back to phase 5:
+`systemctl --user stop inkling-3090-experiment && bash perf/live/restore-p5.sh`.

@@ -32,3 +32,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+--------------------------------------------------------------------------------
+Phase 6 (window verify, perf/RESULTS.md "Phase 6") took ideas, and no code, from:
+  ingine  https://github.com/satellitedown/inkling-2-mini-abliterated-ingine  (Apache-2.0)
+  basalt  https://github.com/jesdga95/basalt                                    (MIT)

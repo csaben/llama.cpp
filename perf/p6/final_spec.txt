@@ -1,0 +1,24 @@
+plain          code      prompt     47   384 tok   208.3 tok/s
+plain          edit      prompt   1025   384 tok   197.0 tok/s
+plain          prose     prompt     36   384 tok   207.1 tok/s
+plain          edit@16K  prompt  16044   384 tok   178.6 tok/s
+old-n3         code      prompt     47   384 tok   151.4 tok/s  accepted/proposed 223/474
+old-n3         edit      prompt   1025   384 tok   210.1 tok/s  accepted/proposed 282/303
+old-n3         prose     prompt     36   384 tok   126.4 tok/s  accepted/proposed 190/575
+old-n3         edit@16K  prompt  16044   384 tok   155.9 tok/s  accepted/proposed 265/352
+mr-n3          code      prompt     47   384 tok   158.1 tok/s  accepted/proposed 219/488
+mr-n3          edit      prompt   1025   384 tok   235.3 tok/s  accepted/proposed 282/303
+mr-n3          prose     prompt     36   384 tok   139.2 tok/s  accepted/proposed 196/556
+mr-n3          edit@16K  prompt  16044   384 tok   195.6 tok/s  accepted/proposed 275/322
+mr-n3-adapt    code      prompt     47   384 tok   187.3 tok/s  accepted/proposed 58/114
+mr-n3-adapt    edit      prompt   1025   384 tok   236.6 tok/s  accepted/proposed 280/297
+mr-n3-adapt    prose     prompt     36   384 tok   188.3 tok/s  accepted/proposed 36/84
+mr-n3-adapt    edit@16K  prompt  16044   384 tok   191.2 tok/s  accepted/proposed 270/316
+mr-n5-adapt    code      prompt     47   384 tok   176.5 tok/s  accepted/proposed 59/150
+mr-n5-adapt    edit      prompt   1025   384 tok   231.6 tok/s  accepted/proposed 283/313
+mr-n5-adapt    prose     prompt     36   384 tok   177.3 tok/s  accepted/proposed 39/125
+mr-n5-adapt    edit@16K  prompt  16044   384 tok   174.5 tok/s  accepted/proposed 200/275
+mr-n7          code      prompt     47   384 tok    93.8 tok/s  accepted/proposed 237/1002
+mr-n7          edit      prompt   1025   384 tok   207.6 tok/s  accepted/proposed 322/420
+mr-n7          prose     prompt     36   384 tok    77.8 tok/s  accepted/proposed 208/1206
+mr-n7          edit@16K  prompt  16044   384 tok   161.5 tok/s  accepted/proposed 314/478

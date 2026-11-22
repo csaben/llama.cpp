@@ -1,0 +1,2 @@
+0.08.506.261 I Final estimate: PPL = 3.0530 +/- 0.06532
+0.11.517.550 I Final estimate: PPL = 4.2036 +/- 0.28336

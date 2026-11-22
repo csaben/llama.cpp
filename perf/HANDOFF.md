@@ -34,39 +34,26 @@ to decoding the tokens one at a time (checked with `perf/p6/mr_check.cpp`).
   moe_sum_conv: row loop). ggml constructors take windows by shape (`ggml.c`: n_tok = mask->ne[1] / a->ne[2] / states->ne[1]).
 - Debug: `IK_DBG_TAP=<tensor name>` (e.g. `l_out-9`) returns that tensor as the logits (graph ends there).
 
-## Status
+## Status: finished (2026-11-21)
 
-### Done / measured
-- Baseline at d43d1d0: `perf/p6/base_decode.txt` (211.1 / 195.9 / 183.9 / 169.5 tok/s at depth 0/4K/16K/32K),
-  `perf/p6/base_ppN.txt` (old batched step: pp2 8.45 ms, pp3 9.9, pp4 11.8, pp6 15.3, pp8 19.7 ms; plain token 4.74 ms).
-- Profile of the old 4-token step (`perf/p6/prof.sh pp4 40 -p 4 -n 0 -r 20`): experts 4.9 ms (mul_mat_vec_q_moe, no
-  dedup), dense ~2.3 ms, glue ~4.6 ms in 1,637 launches. A DSpark request (`perf/p6/prof_server.sh`): 19.5 ms wall per
-  verify step; target head + drafter head matvecs (201K rows) 932 launches x 356 us = 3.2 ms per step: the drafter runs
-  ~6 full-vocab correction matvecs + pool1d/argmax per step (`src/models/dspark.cpp` `build_inkling2_head` loop over the
-  whole block, even with `--spec-draft-n-max 3`), then host sampling of the logits.
-- `mr_check` (build line in the file header): **240 rows in 48 windows (sizes 2..8, with partial rollbacks) after a
-  300-token prefix: 0 rows differ** from single-token decode; also exact at prefixes 250 / 1010 / 1270 / 2040.
+Results, tables, what did not work, sources, risks and the deploy command: phase 6 section of `perf/RESULTS.md`.
+Final numbers at `2359b45` (`perf/p6/final_spec.txt`, `final_decode.txt`, `final_ppl.txt`, `mr_check.txt`, `backend_ops.txt`).
 
-### In flight
-- Windows that cross a 256-cell pad boundary of the full-attention cache at n_kv >= 1536 (prefix 1525 / 1530 / 1786,
-  `MR_SIZES=8 MR_ROLLBACK=0`) differed from single-token decode from layer 9 (first full-attention layer; found with
-  `IK_DBG_TAP=l_out-9`). Fix being tested: per-row n_kv / splits in the MR attention kernel (the `cand` block at the top
-  of `inkling_attn2_kernel`). If it still differs, compare `l_out-9` per row and look at how the tile grouping of
-  `ik_mma_step` changes with `kv_per_split`.
+- Windows of 2-8 rows are bit-identical to single-token decode (`mr_check`: 0 of 700 rows differ).
+- DSpark max 3 with `IK_MR=1`: code 158, edit 235, prose 139, edit@16K 196 tok/s (plain 208 / 197 / 207 / 179);
+  with `LLAMA_DSPARK_ADAPTIVE=1`: 187 / 237 / 188 / 191. Replies identical to plain in all 20 comparisons.
+- Plain decode 209.9 / 194.1 / 182.6 / 168.3 tok/s, PPL 3.0530 / 4.2036 (unchanged).
+- Tools: `perf/p6/mr_check.cpp` (equality + window timing; `MR_SIZES`, `MR_ROLLBACK`, `MR_UBATCH`), `perf/p6/prof.sh`,
+  `prof_server.sh`, `prof_check.sh` (nsys tables), `IK_DBG_TAP`, `IK_MR_STATS`, `IK_MR_GROUPED`, `LLAMA_DSPARK_ADAPTIVE=2`.
 
-### Next
-1. Finish the boundary case above; run `mr_check` at prefixes 300 (48 windows), 1500 (36), 4000.
-2. test-backend-ops cases for the window ops (INKLING_ATTN / INKLING_ROUTER / INKLING_MOE_SUM_CONV with n_tok > 1,
-   MUL_MAT / MUL_MAT_ID with the magic) + existing cases still pass (`-o INKLING_ATTN`, `INKLING_ROUTER`,
-   `INKLING_MOE_SUM_CONV`, `SHORTCONV_RES`, `LOOP_CTRL_APPLY`, `RES_MIX`, `MUL_MAT`, `MUL_MAT_ID`).
-3. Measure: `IK_MR=1 build/bin/llama-bench -m $Q2 -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 2,3,4,6,8 -n 0 -r 20` against
-   `perf/p6/base_ppN.txt`; `perf/p6/prof.sh` for the window profile; count distinct experts per window.
-4. Server: `IK_MR=1 MODEL=$Q2 python3 perf/spec_probe.py dspark -- --backend-sampling --spec-type draft-dspark
-   --spec-draft-model $DRAFT --spec-draft-n-max 3 --spec-draft-p-min 0`; compare the text with the plain run token for token.
-5. Drafter (workstream 4): stop the Markov-head loop at n_max, fold `target.output x dspark_hidden_out` into one
-   201K x rank matrix (basalt, MIT) or use a shortlist (ingine, Apache-2.0), one fused first-max argmax, return ids only.
-6. Window policy (workstream 5), then RESULTS.md phase 6 section, plain-decode regression bench, PPL, greedy checks.
-7. `bash perf/live/restore-p5.sh`.
+### Next (if someone continues)
+1. Drafter head: fold `target.output x dspark_hidden_out` into a 201K x rank matrix or a shortlist (1.34 ms -> ~0.3 ms
+   per step at max 3); skip the feature injection while the policy is not drafting (3% of plain speed).
+2. Expert matvecs are 5.2 ms of a 4-row window and bound by dp4a per (token, expert) pair. A tensor-core kernel needs
+   weights stored for it (unpacking 2-bit blocks on the fly costs as much as dp4a) and must reproduce the float order
+   of `mul_mat_vec_q<type, 1>` from exact integer group sums to stay bit-identical.
+3. Host time per DSpark step is about 2.3 ms (gaps after the drafter graph: logits copy and scan, feature copies).
+4. Window cases for INKLING_ATTN and marked MUL_MAT / MUL_MAT_ID in `test-backend-ops`.
 
 # Phase 5 hand-off (keep current; newest status first)
 

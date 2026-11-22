@@ -1,0 +1,5 @@
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        209.91 ± 0.78 |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |   tg128 @ d4096 |        194.09 ± 2.31 |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d16384 |        182.57 ± 2.05 |
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |  tg128 @ d32768 |        168.32 ± 1.63 |
+build: 26d08df (126)
