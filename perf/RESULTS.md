@@ -1518,3 +1518,5 @@ Tiling the draft shortlist reduction lowered the fixed-n3 draft graph from 0.806
 ### Part B combined release
 
 The lever 3 unit was inactive at 07:10 EST. Merge `401460d` includes `p7l3r4-final-233tok` (`954dd4a`) and the Part A IQ4_NL verifier. The two conflicting attention files were reconciled so that packed verify still uses per-row masks, KV indices and staging, and scalar gate/attention can use the Round 4 scan and barrier schedule. Proof is in progress.
+
+The combined binary reports source `401460d`. Both default and release-flag batteries passed on physical GPU0. Each had zero logit differences over 2,714 rows, six byte-identical greedy outputs against Phase 7b, and 1,108/1,108 supported CUDA cases. Prefill PPL was 3.0530 and decode PPL was 4.1979 for plain and 4.2038 for plain with the multi-row verifier. [Default checks](p7c/release/checks-default/), [release-flag checks](p7c/release/checks/).

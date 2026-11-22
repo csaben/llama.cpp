@@ -1,6 +1,6 @@
 # Phase 7c hand-off
 
-07:11 EST. The lever 3 unit was inactive at 07:10. Combined source `401460d` (`p7c-merged`) merges `p7l3r4-final-233tok` (`954dd4a`), including round 3, with `p7c-verify-windows` (`69443c6`). The merge retains both the four-row packed verifier and the new plain decoder schedule. GPU1 is assigned to the served matrices and paired benchmarks. GPU0 is assigned to rollback, depth, PPL, operator and cross-build logit checks. Phase 7b remains the release pending verification. The release decision is due at 08:50 and the report at 09:00.
+07:20 EST. The lever 3 unit was inactive at 07:10. Combined source `401460d` (`p7c-merged`) merges `p7l3r4-final-233tok` (`954dd4a`), including round 3, with `p7c-verify-windows` (`69443c6`). The merge retains both the four-row packed verifier and the new plain decoder schedule. GPU1 is assigned to the served matrices and paired benchmarks. Both default and release-flag batteries have passed on GPU0. Each matched 2,714 rollback/boundary rows, six greedy outputs, and frozen PPL, with 1,108/1,108 CUDA operator cases. Separate depth and cross-build logit checks are running. Phase 7b remains the release pending verification. The release decision is due at 08:50 and the report at 09:00.
 
 Part A improved cap-3 throughput on all five prompts at 384 and 3,000 tokens. The two clean candidate passes matched plain on 40 replies and 41,520 IDs. The Part A rollback, greedy, PPL and operator battery passed. [Part A results](RESULTS.md#phase-7c).
 
