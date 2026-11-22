@@ -1,0 +1,3 @@
+base2          code      prompt     47   384 tok   254.3 tok/s    1320 chars  accepted/proposed 190/243  runs 254/254/254/257/257
+base2          edit      prompt   1025   384 tok   349.8 tok/s    1115 chars  accepted/proposed 274/281  runs 348/349/350/350/351
+base2          prose     prompt     36   384 tok   220.8 tok/s    1474 chars  accepted/proposed 130/191  runs 219/219/221/221/221

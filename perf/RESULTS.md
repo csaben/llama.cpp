@@ -1508,3 +1508,5 @@ Source `69443c6` (`p7c-verify-windows`). Old uses the frozen `a9cdc61` server an
 | edit@32K | 252.4-252.7 | 257.8-258.5 | 295.6-295.8 | 296.8-300.9 |
 
 Across both candidate passes, all 40 drafted replies and 41,520 IDs matched the freshly rebuilt plain server. Its plain controls also matched the frozen Phase 7b references. The model, drafter and release policy were identical across builds.
+
+The Part A build passed all 2,714 rollback and boundary rows with zero logit difference, matched six frozen greedy outputs and both PPL modes, and passed all 1,108 CUDA operator cases. [Part A battery](p7c/verify-a/checks/). Request-local calibration that updates the predicted acceptance separately at each draft position, including the known next target token after a full acceptance, was tested at three strengths. It did not improve short prose against both surrounding controls. Compacting Q2_K expert work and tiling the IQ4_NL expert kernel were also exact but yielded no consistent additional window speedup. [Calibration](p7c/calibration/), [expert kernel measurements](p7c/windows/).
