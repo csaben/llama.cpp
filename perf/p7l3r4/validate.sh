@@ -10,6 +10,16 @@ unset IK_GLUE_FAST IK_DEPENDENCY_FUSION
 exec 9>build/p7l3r4/gpu0.lock
 flock 9
 case "$1" in
+    metadata)
+        {
+            git rev-parse HEAD
+            nvidia-smi -i 00000000:01:00.0 --query-gpu=name,pci.bus_id,compute_cap,driver_version,power.limit --format=csv
+            "$HOME/opt/cuda-12.8/bin/nvcc" --version
+            "$HOME/opt/cuda-12.8/nsight-systems-2024.6.2/bin/nsys" --version
+            rg '^(CMAKE_BUILD_TYPE|CMAKE_CUDA_ARCHITECTURES|GGML_CUDA|GGML_CUDA_FA|GGML_CUDA_FA_QUANTS|GGML_CUDA_FORCE_MMQ):' build/CMakeCache.txt
+            sha256sum "$Q2" perf/ppl.txt
+        } >"$out/environment.txt"
+        ;;
     quality|mr|ops)
         bash perf/p7l3r3/validate.sh "$1"
         ;;
