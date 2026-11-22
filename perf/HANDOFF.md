@@ -1,6 +1,8 @@
 # Phase 7c hand-off
 
-06:44 EST, physical GPU1. Lever 3 is active. Phase 7b is the staged release. An IQ4_NL verifier specialization improved all three short prompts in both halves of a five-repeat crossover. A clean build is now repeating that comparison against the frozen snapshot at 384 and 3,000 tokens, including edits at 16K and 32K. The alternative confidence, draft reuse and FFN quantization trials did not yield a consistent win. The merge gate is the inactive lever 3 unit. The release decision is due at 08:50 and the report at 09:00. [Part A measurements](RESULTS.md#phase-7c).
+06:54 EST, physical GPU1. Local tag `p7c-verify-windows` (`69443c6`) specializes the dense and segmented IQ4_NL verifier. On 384-token replies, the clean build reached 254.0-255.0 / 348.8-349.6 / 220.1 tok/s on code / edit / prose. Both halves of the frozen-candidate crossover improved on all five prompts at both lengths. All full messages and IDs matched same-flags plain and the frozen Phase 7b reference. [Part A tables and captures](RESULTS.md#phase-7c).
+
+Lever 3 is active. Phase 7b remains staged. Additional probes are measuring request-local confidence calibration, expert tiling and draft shortlist costs. Part B starts when the unit becomes inactive. The release decision is due at 08:50 and the report at 09:00.
 
 # Phase 7b hand-off
 

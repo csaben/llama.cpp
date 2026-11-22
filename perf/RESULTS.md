@@ -1494,3 +1494,17 @@ Computing only the consumed rows in the drafter's last FFN gave 243.8 / 247.2 to
 The dense IQ4_NL verifier now has a candidate kernel for 2-4 columns and 2,304 or 3,072 input features. One warp processes two rows for all columns, preserving the single-token order for all four FP32 partial sums. The segmented IQ4 projection specializes its accumulator count to the same widths. In an old/new/new/old crossover with five uncached 384-token requests per cell, old measured 249.8 / 340.5 / 213.7 and 249.2 / 339.2 / 216.6 tok/s on code / edit / prose. New measured 253.8 / 351.2 / 219.2 and 255.8 / 349.8 / 219.1. Every message and ID matched plain. [Crossover captures](p7c/paired/).
 
 Experiments with the folded drafter kept its embedding and head fixed and requantized just the FFN tensors to F16, Q4_K, Q6_K or IQ4_NL. The gains did not persist across all three short prompts. Reusing a paid but unverified draft tail and changing the per-token opportunity cost also lost on code or edits. [Drafter formats](p7c/quant/), [reuse](p7c/reuse/), [opportunity-cost sweep](p7c/opportunity/).
+
+### Part A verifier crossover
+
+Source `69443c6` (`p7c-verify-windows`). Old uses the frozen `a9cdc61` server and all its libraries. New uses the rebuilt server and libraries. Each cell below is the range across its two independent processes in the old/new/new/old sequence. The short entries are three-request medians and the long entries are single uncached requests. [384-token measurements](p7c/verify-a/384/), [3,000-token measurements](p7c/verify-a/3000/).
+
+| Prompt | Frozen 384 | New 384 | Frozen 3,000 | New 3,000 |
+|---|---:|---:|---:|---:|
+| code | 248.4-249.2 | 254.0-255.0 | 264.4-268.7 | 274.9-275.3 |
+| edit | 338.6-338.7 | 348.8-349.6 | 293.7-297.3 | 304.0-304.1 |
+| prose | 216.6-217.0 | 220.1 | 284.7-287.6 | 294.1-295.3 |
+| edit@16K | 286.7-287.6 | 295.1-295.2 | 290.9-291.4 | 298.6-299.5 |
+| edit@32K | 252.4-252.7 | 257.8-258.5 | 295.6-295.8 | 296.8-300.9 |
+
+Across both candidate passes, all 40 drafted replies and 41,520 IDs matched the freshly rebuilt plain server. Its plain controls also matched the frozen Phase 7b references. The model, drafter and release policy were identical across builds.
