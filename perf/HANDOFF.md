@@ -1,6 +1,8 @@
 # Phase 7b hand-off
 
-Merging the lever 3 round 2 tag into Phase 7 on GPU1. The four-row verifier and single-row overlapped gate share the attention tile. Combined validation and release staging are pending.
+Local merge `1a45f6d` (`p7b-merged`) integrates `e03d993` with the four-row verifier. On GPU1 the merged fixed n3 reaches 324.0 tok/s on the 384-token edit, 172.6 on prose versus 211.5 plain. The previous adaptive policy reaches 172.5 on prose. Four drafted configurations match all five same-flags plain messages and IDs on all three repeats. [Merged short controls](p7b/merged-384/).
+
+Request-local policy trials and the rollback, depth, quality and long-message checks are in progress. Deployment is pending.
 
 # Phase 7 hand-off
 
