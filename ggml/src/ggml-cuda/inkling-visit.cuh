@@ -30,7 +30,7 @@ struct ik_dense_program {
 template<int taps>
 static __device__ __constant__ ik_dense_program<taps> ik_dense_code;
 
-template<int k>
+template<int k, bool packed = false>
 static __device__ __forceinline__ float ik_dense_row(const block_iq4_nl * w, const block_q8_1 * x, int row) {
     constexpr int n = k/QK4_NL;
     const int lane = threadIdx.x%32;
@@ -42,7 +42,16 @@ static __device__ __forceinline__ float ik_dense_row(const block_iq4_nl * w, con
         for (int j = 0; j < 4; ++j) {
             const int b = start + j*16 + lane/2;
             if (b < n) {
-                const auto wi = ik_iq4_nl_decode(w, row*n + b, iqs);
+                ik_iq4_nl_w wi;
+                if constexpr (packed) {
+                    const char * base = (const char *)(w + row*n);
+                    const uint2 codes = ((const uint2 *)base)[2*b + lane%2];
+                    wi.v[0] = get_int_from_table_16(codes.x, kvalues_iq4nl);
+                    wi.v[1] = get_int_from_table_16(codes.y, kvalues_iq4nl);
+                    wi.d = __half2float(((const half *)(base + 16*n))[b]);
+                } else {
+                    wi = ik_iq4_nl_decode(w, row*n + b, iqs);
+                }
                 const auto d = __fmul_rn(wi.d, __low2float(x[b].ds));
                 p[j] = __fmaf_rn(d, float(ik_iq4_nl_sumi(wi, x + b, iqs)), p[j]);
             }
@@ -171,7 +180,7 @@ static __global__ void __launch_bounds__(256, min_blocks) ik_dense_queue(ik_attn
     }
 }
 
-template<int taps, int min_blocks>
+template<int taps, int min_blocks, bool packed = false>
 static __global__ void __launch_bounds__(256, min_blocks) ik_dense_late_gate(ik_attn_args a, ik_dense_visit v) {
     const int block = blockIdx.x;
     const int workers = gridDim.x - 8;
@@ -198,14 +207,14 @@ static __global__ void __launch_bounds__(256, min_blocks) ik_dense_late_gate(ik_
         for (int i = row0; v.mode != 8 && i < last_row - 3072; i += 8*workers) {
             const int row = i < 3480 ? i : i + 3072;
             const int col = a.proj_ncols == 3 && row >= 6552 ? (row < 7576 + 32*taps ? 1 : 2) : 0;
-            const float val = ik_dense_row<2304>(v.wi, v.x + col*72, row);
+            const float val = ik_dense_row<2304, packed>(v.wi, v.x + col*72, row);
             if (lane == row%2) { ((float *)a.proj)[row] = val; }
         }
         __syncthreads();
         if (!tid) { ik_atomic_add_acq_rel(v.counters, 1); }
         for (int i = row0; i < 3072; i += 8*workers) {
             const int row = i + 3480;
-            const float val = ik_dense_row<2304>(v.wi, v.x, row);
+            const float val = ik_dense_row<2304, packed>(v.wi, v.x, row);
             if (lane == row%2) { ((float *)a.proj)[row] = val; }
         }
         __syncthreads();
@@ -222,7 +231,7 @@ static __global__ void __launch_bounds__(256, min_blocks) ik_dense_late_gate(ik_
     __syncthreads();
     const auto * w = v.prefetch >= 2 ? (const block_iq4_nl *) staged : v.wo + first*96;
     for (int row = first + warp; row < end; row += 8) {
-        const float val = ik_dense_row<3072>(w, (const block_q8_1 *) a.dst, row - first);
+        const float val = ik_dense_row<3072, packed>(w, (const block_q8_1 *) a.dst, row - first);
         if (lane == row%2) { ik_dense_store(v.conv, v.out, row, val); }
     }
     __syncthreads();
@@ -234,17 +243,17 @@ static __global__ void __launch_bounds__(256, min_blocks) ik_dense_late_gate(ik_
     }
 }
 
-template<int taps>
+template<int taps, bool packed = false>
 static __global__ void ik_dense_scan_inputs(ik_attn_args a, ik_dense_visit v) {
     const int i = (blockIdx.x*blockDim.x + threadIdx.x)/32;
     if (i >= (taps ? 8664 : 8600) - 3072) { return; }
     const int row = i < 3480 ? i : i + 3072;
     const int col = a.proj_ncols == 3 && row >= 6552 ? (row < 7576 + 32*taps ? 1 : 2) : 0;
-    const float val = ik_dense_row<2304>(v.wi, v.x + col*72, row);
+    const float val = ik_dense_row<2304, packed>(v.wi, v.x + col*72, row);
     if (threadIdx.x%32 == row%2) { ((float *) a.proj)[row] = val; }
 }
 
-template<int taps, bool short_scan, int role = 0>
+template<int taps, bool short_scan, int role = 0, bool packed = false>
 static __global__ void __launch_bounds__(256) ik_dense_gate_scan(ik_attn_args a, ik_dense_visit v, float * values, int gate_blocks) {
     const int tid = threadIdx.x, warp = tid/32, lane = tid%32;
     const int b = blockIdx.x + (role == 2 ? 8*a.n_split : 0);
@@ -257,7 +266,7 @@ static __global__ void __launch_bounds__(256) ik_dense_gate_scan(ik_attn_args a,
     } else {
         for (int i = ((b-scans)%gate_blocks)*(blockDim.x/32) + warp; i < 384; i += (blockDim.x/32)*gate_blocks) {
             const int row = 3480 + head*384 + i;
-            const float val = ik_dense_row<2304>(v.wi, v.x, row);
+            const float val = ik_dense_row<2304, packed>(v.wi, v.x, row);
             if (lane == row%2) { ((float *) a.proj)[row] = val; }
         }
     }
@@ -294,9 +303,10 @@ static __global__ void __launch_bounds__(256 + 32*producers) ik_dense_warp_roles
     }
 }
 
+template<bool packed = false>
 static __global__ void ik_dense_output(ik_dense_visit v) {
     const int row = (blockIdx.x*blockDim.x + threadIdx.x)/32;
-    const float y = ik_dense_row<3072>(v.wo, v.activation, row);
+    const float y = ik_dense_row<3072, packed>(v.wo, v.activation, row);
     if (threadIdx.x%32 == row%2) { ik_dense_store(v.conv, v.out, row, y); }
 }
 
@@ -387,16 +397,22 @@ template<int taps>
 static bool ik_launch_dense(ggml_backend_cuda_context & ctx, ik_attn_args a, ik_dense_visit v) {
     const auto & dev = ggml_cuda_info().devices[ctx.device];
     static const int requested = getenv("IK_DENSE_BLOCKS") ? atoi(getenv("IK_DENSE_BLOCKS")) : 10000;
-    if (v.mode == 7 || v.mode >= 10) {
+    if (v.mode == 7 || (v.mode >= 10 && v.mode != 16)) {
         ggml_cuda_pool_alloc<float> values(ctx.pool(), 3072);
         static const int gates = getenv("IK_DENSE_GATE_BLOCKS") ? std::max(1, std::min(48, atoi(getenv("IK_DENSE_GATE_BLOCKS")))) : 24;
-        if (v.mix) {
+        if (v.mode == 17) {
+            ik_dense_scan_inputs<taps, true><<<((taps ? 8664 : 8600) - 3072)/4,128,0,ctx.stream()>>>(a, v);
+        } else if (v.mix) {
             ik_launch_mix_input<taps>(ctx, a, v);
         } else {
             ik_dense_scan_inputs<taps><<<((taps ? 8664 : 8600) - 3072)/4,128,0,ctx.stream()>>>(a, v);
         }
         const int blocks = 8*(a.n_split + gates);
-        if (v.mode >= 14 && a.n_kv > 256) {
+        if (v.mode == 17 && a.n_kv == 256 && a.n_split == 1) {
+            ik_dense_gate_scan<taps, true, 0, true><<<blocks,256,0,ctx.stream()>>>(a, v, values.get(), gates);
+        } else if (v.mode == 17) {
+            ik_dense_gate_scan<taps, false, 0, true><<<blocks,256,0,ctx.stream()>>>(a, v, values.get(), gates);
+        } else if (v.mode >= 14 && a.n_kv > 256) {
             const dim3 grid(8, a.n_split);
             if (v.mode == 14) { ik_dense_warp_roles<taps, 4><<<grid,384,0,ctx.stream()>>>(a, v); }
             else { ik_dense_warp_roles<taps, 8><<<grid,512,0,ctx.stream()>>>(a, v); }
@@ -423,7 +439,9 @@ static bool ik_launch_dense(ggml_backend_cuda_context & ctx, ik_attn_args a, ik_
         } else {
             ik_dense_gate_scan<taps, false><<<blocks,256,0,ctx.stream()>>>(a, v, values.get(), gates);
         }
-        if (v.router) {
+        if (v.mode == 17) {
+            ik_dense_output<true><<<2304/4,128,0,ctx.stream()>>>(v);
+        } else if (v.router) {
             ik_router_dispatch(ctx, v.router, &v);
         } else {
             ik_dense_output<<<2304/4,128,0,ctx.stream()>>>(v);
@@ -441,6 +459,7 @@ static bool ik_launch_dense(ggml_backend_cuda_context & ctx, ik_attn_args a, ik_
         if (v.mode >= 5) { kernel = v.mode == 5 ? (const void *) ik_dense_late_gate<taps, 2> : (const void *) ik_dense_late_gate<taps, 3>; }
         static const int group_env = getenv("IK_DENSE_GROUP") ? atoi(getenv("IK_DENSE_GROUP")) : 2;
         int group = std::max(1, std::min(group_env, 16));
+        if (v.mode == 16) { kernel = (const void *) ik_dense_late_gate<taps, 2, true>; }
         int active;
         CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active, kernel, 256, 0));
         int grid = std::min(std::max(1, requested)*8, active*dev.nsm);

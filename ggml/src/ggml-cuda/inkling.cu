@@ -3403,7 +3403,7 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
     }
 
     if (visit) {
-        if ((!short_scan && (visit->mode < 10 || !fixed || n_rows != 1 || ik_mr_enabled())) || (proj->ne[0] != (a.has_taps ? 8664 : 8600))) { return false; }
+        if ((!short_scan && ((visit->mode < 10 || visit->mode == 16) || !fixed || n_rows != 1 || ik_mr_enabled())) || (proj->ne[0] != (a.has_taps ? 8664 : 8600))) { return false; }
         ggml_cuda_pool_alloc<float> projection(ctx.pool(), proj->ne[0]);
         ggml_cuda_pool_alloc<block_q8_1> activation(ctx.pool(), 3072/QK8_1);
         visit->activation = activation.get();

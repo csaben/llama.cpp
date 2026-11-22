@@ -337,6 +337,16 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
             row += n_piece;
         }
         fused_pending.push_back(std::move(f));
+        if (getenv("IK_DENSE_PACK") && atoi(getenv("IK_DENSE_PACK")) && type == GGML_TYPE_IQ4_NL &&
+                (n_rows == 8600 || n_rows == 8664) && n_embd == 2304 && layers[i].wo->type == type &&
+                layers[i].wo->ne[0] == 3072 && layers[i].wo->ne[1] == 2304 && ggml_is_matrix(layers[i].wo)) {
+            fused_tensor packed;
+            packed.ref = layers[i].wo;
+            packed.t = ggml_new_tensor_1d(fused_context(), GGML_TYPE_I8, ggml_nbytes(fa.w) + ggml_nbytes(packed.ref));
+            ggml_format_name(packed.t, "blk.%d.dense_iq4_codes_scales", i);
+            fa.dense_pack = packed.t;
+            fused_pending.push_back(std::move(packed));
+        }
     }
 
     load_fused(ml);
@@ -350,6 +360,23 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         }
         n_fused++;
         auto & layer = layers[i];
+        if (fa.dense_pack) {
+            size_t offset = 0;
+            for (const auto * matrix : {fa.w, layer.wo}) {
+                std::vector<uint8_t> src(ggml_nbytes(matrix)), packed(src.size());
+                ggml_backend_tensor_get(matrix, src.data(), 0, src.size());
+                const int blocks = matrix->ne[0]/32;
+                for (int64_t r = 0; r < matrix->ne[1]; ++r) {
+                    const size_t row = r*matrix->nb[1];
+                    for (int b = 0; b < blocks; ++b) {
+                        memcpy(packed.data() + row + 16*b, src.data() + row + 18*b + 2, 16);
+                        memcpy(packed.data() + row + 16*blocks + 2*b, src.data() + row + 18*b, 2);
+                    }
+                }
+                ggml_backend_tensor_set(fa.dense_pack, packed.data(), offset, packed.size());
+                offset += packed.size();
+            }
+        }
 
         const size_t row_size = ggml_row_size(fa.w->type, n_embd);
 
@@ -1025,6 +1052,9 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                             n_head, n_head_kv, n_embd_head, hp.n_relative, hp.n_shortconv_l_cache, !is_swa, recr->mctx->get_head(),
                             hp.f_qk_clip, hp.f_relative_clip, hp.f_norm_rms_eps, hp.f_log_scale_alpha, (float) hp.n_log_scale_floor,
                             1.0f/sqrtf(n_embd_head), a_type);
+                    if (!mr && n_tokens == 1 && fa.dense_pack && proj->op == GGML_OP_MUL_MAT && proj->src[0] == fa.w) {
+                        cur->src[11] = fa.dense_pack;
+                    }
                     if (mr) {
                         cur->src[10] = inp->window_kv_before;
                         ik_set_param(cur, 14, mr_planes);

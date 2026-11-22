@@ -5,6 +5,7 @@ struct ik_floor_op {
     ggml_tensor * mm;
     ggml_tensor * attn;
     int ids[8];
+    const char * packed;
 };
 
 static bool ik_floor_graph(const ggml_cgraph * g) {
@@ -29,7 +30,7 @@ static bool ik_floor_graph(const ggml_cgraph * g) {
 }
 
 static ik_floor_op ik_floor_capture(ggml_backend_cuda_context & ctx, ggml_cgraph * g, int i) {
-    ik_floor_op op{g->nodes[i], nullptr, {}};
+    ik_floor_op op{g->nodes[i], nullptr, {}, nullptr};
     if (op.mm->op == GGML_OP_MUL_MAT_ID) {
         CUDA_CHECK(cudaMemcpyAsync(op.ids, op.mm->src[2]->data, sizeof(op.ids), cudaMemcpyDeviceToHost, ctx.stream()));
         CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
@@ -42,6 +43,17 @@ static ik_floor_op ik_floor_capture(ggml_backend_cuda_context & ctx, ggml_cgraph
         GGML_ASSERT(i < g->n_nodes && g->nodes[i]->op == GGML_OP_INKLING_ATTN);
         op.attn = g->nodes[i];
     }
+    if (ggml_cuda_env_flag("IK_FLOOR_PACK") && op.mm->op == GGML_OP_MUL_MAT && op.mm->src[0]->ne[1] < 200000) {
+        auto * x = op.mm->src[1];
+        if (x->op == GGML_OP_INKLING_ATTN) {
+            GGML_ASSERT(x->src[11]);
+            op.packed = (const char *) x->src[11]->data + ggml_nbytes(x->src[0]->src[0]);
+        } else {
+            while (i < g->n_nodes && g->nodes[i]->op != GGML_OP_INKLING_ATTN) { ++i; }
+            GGML_ASSERT(i < g->n_nodes && g->nodes[i]->src[0] == op.mm && g->nodes[i]->src[11]);
+            op.packed = (const char *) g->nodes[i]->src[11]->data;
+        }
+    }
     return op;
 }
 
@@ -51,7 +63,7 @@ struct ik_floor_tile {
     int out, kind, rows, row_bytes;
 };
 
-template<int type, int k>
+template<int type, int k, bool packed = false>
 static __device__ __forceinline__ float ik_floor_dot(const char * w, const block_q8_1 * x, int row) {
     constexpr int qk = type == GGML_TYPE_IQ4_NL ? QK4_NL : type == GGML_TYPE_Q2_K ? QK_K : QK2_0;
     constexpr int lanes = type == GGML_TYPE_IQ4_NL ? QI4_NL/VDR_IQ4_NL_Q8_1_MMVQ : type == GGML_TYPE_Q2_K ? QI2_K/VDR_Q2_K_Q8_1_MMVQ : QI2_0;
@@ -64,7 +76,18 @@ static __device__ __forceinline__ float ik_floor_dot(const char * w, const block
             const auto * y = x + b*(qk/QK8_1);
             const int bi = row*(k/qk) + b;
             if constexpr (type == GGML_TYPE_IQ4_NL) {
-                sum += vec_dot_iq4_nl_q8_1(w, y, bi, (lane%lanes)*VDR_IQ4_NL_Q8_1_MMVQ);
+                if constexpr (packed) {
+                    constexpr int n = k/QK4_NL;
+                    const char * base = w + row*n*sizeof(block_iq4_nl);
+                    const uint2 codes = ((const uint2 *)base)[2*b + lane%2];
+                    ik_iq4_nl_w wi;
+                    wi.v[0] = get_int_from_table_16(codes.x, kvalues_iq4nl);
+                    wi.v[1] = get_int_from_table_16(codes.y, kvalues_iq4nl);
+                    wi.d = __half2float(((const half *)(base + 16*n))[b]);
+                    sum += ik_iq4_nl_dot(wi, y, (lane%2)*2);
+                } else {
+                    sum += vec_dot_iq4_nl_q8_1(w, y, bi, (lane%lanes)*VDR_IQ4_NL_Q8_1_MMVQ);
+                }
             } else if constexpr (type == GGML_TYPE_Q2_K) {
                 sum += vec_dot_q2_K_q8_1(w, y, bi, (lane%lanes)*VDR_Q2_K_Q8_1_MMVQ);
             } else {
@@ -97,6 +120,8 @@ static __global__ void ik_floor_stream(const ik_floor_tile * tiles, int n, float
                     case 1: v = ik_floor_dot<GGML_TYPE_IQ4_NL, 3072>(t.w, t.x, r); break;
                     case 2: v = ik_floor_dot<GGML_TYPE_IQ4_NL, 1152>(t.w, t.x, r); break;
                     case 3: v = ik_floor_dot<GGML_TYPE_Q2_K, 2304>(t.w, t.x, r); break;
+                    case 5: v = ik_floor_dot<GGML_TYPE_IQ4_NL, 2304, true>(t.w, t.x, r); break;
+                    case 6: v = ik_floor_dot<GGML_TYPE_IQ4_NL, 3072, true>(t.w, t.x, r); break;
                     default: v = ik_floor_dot<GGML_TYPE_Q2_0, 1152>(t.w, t.x, r); break;
                 }
                 if (threadIdx.x%32 == 0) { out[t.out + r] = v; }
@@ -186,6 +211,7 @@ static void ik_floor_measure(ggml_backend_cuda_context & ctx, const std::vector<
         if (w->type == GGML_TYPE_Q2_K && k == 2304) { kind = 3; }
         if (w->type == GGML_TYPE_Q2_0 && k == 1152) { kind = 4; }
         GGML_ASSERT(kind >= 0);
+        if (op.packed) { GGML_ASSERT(kind < 2); kind += 5; }
         offsets.push_back(outputs);
         boundaries.push_back(tiles.size());
         fprintf(stderr, "floor op %zu %s %s k=%d rows=%d bytes=%zu ids=", i, w->name, ggml_type_name(w->type), k, rows, size_t(slots)*rows*row_bytes);
@@ -197,7 +223,7 @@ static void ik_floor_measure(ggml_backend_cuda_context & ctx, const std::vector<
                 const int end = col == 0 ? qrows : col == 1 ? qrows + krows : rows;
                 const int count = std::min(tile_rows, end - r);
                 const int xcol = routed ? slot%op.mm->src[1]->ne[1] : col;
-                const char * ptr = (const char *) w->data + id*w->nb[2] + r*w->nb[1];
+                const char * ptr = (op.packed ? op.packed : (const char *) w->data) + id*w->nb[2] + r*w->nb[1];
                 GGML_ASSERT(uintptr_t(ptr)%16 == 0);
                 tiles.push_back({ptr, x.get() + xcol*(k/QK8_1), outputs + (routed ? slot : col)*rows + r, kind, count, row_bytes});
                 r += count;

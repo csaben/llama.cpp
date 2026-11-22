@@ -4633,6 +4633,13 @@ static int ik_dense_end(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgra
                 v.out = (float *) cgraph->nodes[end]->data;
                 v.mode = dense_mode == 13 ? 10 : dense_mode;
                 v.mix = mix;
+                if (dense_mode == 16 || dense_mode == 17) {
+                    const auto * packed = cgraph->nodes[j]->src[11];
+                    if (!packed || packed->type != GGML_TYPE_I8 || !ggml_is_vector(packed) ||
+                            ggml_nbytes(packed) != ggml_nbytes(node->src[0]) + ggml_nbytes(cgraph->nodes[k]->src[0])) { return start; }
+                    v.wi = (const block_iq4_nl *)packed->data;
+                    v.wo = (const block_iq4_nl *)((const char *)packed->data + ggml_nbytes(node->src[0]));
+                }
                 v.prefetch = ggml_cuda_env_int("IK_DENSE_PREFETCH", 1);
                 int last = end;
                 if (dense_mode == 9) {
@@ -5559,7 +5566,9 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 #ifdef USE_CUDA_GRAPH
     static const bool floor_requested = ggml_cuda_env_flag("IK_TOKEN_FLOOR");
     static thread_local bool floor_done = false;
-    const bool measure_floor = floor_requested && !floor_done && !use_cuda_graph && ik_floor_graph(cgraph);
+    static thread_local int floor_step = 0;
+    const bool measure_floor = floor_requested && !floor_done && !use_cuda_graph && ik_floor_graph(cgraph) &&
+            floor_step++ == ggml_cuda_env_int("IK_FLOOR_STEP", 0);
     std::vector<ik_floor_op> floor_ops;
 #endif
 
