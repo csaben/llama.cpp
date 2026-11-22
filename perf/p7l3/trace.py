@@ -39,7 +39,11 @@ for name, durations in sorted(work.items(), key=lambda pair: -sum(pair[1])):
 print(f"head-to-head ms/token: {(hi-lo)/119e6:.4f}")
 for name, spans in sorted(overlap.items(), key=lambda pair: -sum(pair[1])):
     print(f"prefetch overlap with {name}, {sum(spans)/119e6:.4f} ms/token")
-for a, b in [("situ_q8_1_kernel", "ik_q2_down_rows"), ("mul_mat_vec_q", "shortconv_res_f32")]:
+for a, b in [
+    ("situ_q8_1_kernel", "ik_q2_down_rows"),
+    ("mul_mat_vec_q", "shortconv_res_f32"),
+    ("inkling_attn2_kernel", "mul_mat_vec_q"),
+]:
     spans = [right[4] - left[3] for left, right in zip(glue, glue[1:]) if left[0] == a and right[0] == b]
     if spans:
         print(f"{a} to {b} inclusive, {len(spans)/119:.2f} pairs/token, {statistics.mean(spans)/1000:.3f} us/pair")

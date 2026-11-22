@@ -22,3 +22,4 @@ quantize_q8_1, 1.00, 1.395, 0.0014
 head-to-head ms/token: 4.9393
 situ_q8_1_kernel to ik_q2_down_rows inclusive, 44.00 pairs/token, 11.854 us/pair
 mul_mat_vec_q to shortconv_res_f32 inclusive, 48.00 pairs/token, 8.614 us/pair
+inkling_attn2_kernel to mul_mat_vec_q inclusive, 48.00 pairs/token, 15.580 us/pair
