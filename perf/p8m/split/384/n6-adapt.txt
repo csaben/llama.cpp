@@ -1,0 +1,2 @@
+n6-adapt       edit@32K  prompt  32045   384 tok   246.8 tok/s    1304 chars  accepted/proposed 254/296  runs 246/247/250
+n6-adapt       agent     prompt   2025   384 tok   287.5 tok/s    1324 chars  accepted/proposed 249/274  runs 286/287/289

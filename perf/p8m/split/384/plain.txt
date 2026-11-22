@@ -1,0 +1,2 @@
+plain          edit@32K  prompt  32045   384 tok   183.6 tok/s    1304 chars  runs 183/184/184
+plain          agent     prompt   2025   384 tok   218.5 tok/s    1324 chars  runs 218/218/218

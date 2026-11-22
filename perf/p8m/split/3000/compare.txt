@@ -1,0 +1,2 @@
+n6-adapt     agent     identical (6655 bytes)
+n6-adapt     edit@32K  identical (2752 bytes)

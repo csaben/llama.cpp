@@ -1680,3 +1680,7 @@ GPU1 ran frozen A / merged / merged / frozen A, three samples per depth in each 
 | MR/MMA stream A | 229.27 | 217.54 | 203.96 | 188.65 |
 | MR/MMA merged | 228.88 | 217.20 | 203.77 | 188.32 |
 | MR/MMA change | -0.17% | -0.16% | -0.09% | -0.17% |
+
+### Target microbatch choice
+
+Use 512/512 target/draft microbatches with logical batch 2,048. A 2,048/512 target/draft split reproduced its own same-flags plain messages and IDs for the 32K edit and agent at both budgets. It changed prefill PPL from the release target of 3.0530 to 3.0509. Against the 512 target, both split budgets first diverged at output token 49 on the agent and 153 on edit at 32K (one-based). The 16K TTFT saving was 0.204 s at cap 6. [Split PPL and full messages](p8m/split/), [driver](p8m/split.sh), [512 control](p8m/matrix/main/).
