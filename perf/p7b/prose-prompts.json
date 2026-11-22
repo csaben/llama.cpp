@@ -1,5 +1,7 @@
 {
     "letter": "Write a short letter from a gardener to a neighbor explaining how to look after a vegetable patch for a week in July.",
     "science": "Explain why the Moon shows the same face to Earth for a middle-school science column. Use an everyday example.",
-    "scene": "Write the opening scene of a mystery set in a train station at dawn. Tell it from the station cleaner's point of view."
+    "scene": "Write the opening scene of a mystery set in a train station at dawn. Tell it from the station cleaner's point of view.",
+    "review": "Write a newspaper review of an imaginary neighborhood cafe. Describe a particular meal and the atmosphere in three short paragraphs.",
+    "dialogue": "Write a conversation between two siblings deciding what to do with their grandmother's piano. Let their different memories emerge through the dialogue."
 }
