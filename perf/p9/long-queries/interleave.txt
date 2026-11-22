@@ -1,0 +1,10 @@
+Two interleaved sequences, 1,129-token prefixes, 47-token batches, 32 generated rows per sequence, 200,058 FP32 logits per row. Physical GPU1.
+upstream         bdc513cd848d8765b8c0b664101c2156dd5911dff548d899ef50114d8ec517da
+runtime-repeat   f2758047e1f0befd4b4d378d278d3d727a9175f485b9780a09971222514a83d0
+direct           bdc513cd848d8765b8c0b664101c2156dd5911dff548d899ef50114d8ec517da
+all              f2758047e1f0befd4b4d378d278d3d727a9175f485b9780a09971222514a83d0
+mixed            f2758047e1f0befd4b4d378d278d3d727a9175f485b9780a09971222514a83d0
+frozen-alloc     bdc513cd848d8765b8c0b664101c2156dd5911dff548d899ef50114d8ec517da
+tails            bdc513cd848d8765b8c0b664101c2156dd5911dff548d899ef50114d8ec517da
+off              f2758047e1f0befd4b4d378d278d3d727a9175f485b9780a09971222514a83d0
+Initial candidate versus frozen: 64/64 rows differ, one greedy ID differs, maximum absolute logit difference 4.1578126.

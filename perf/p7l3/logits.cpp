@@ -26,9 +26,10 @@ static bool decode(llama_context * ctx, const llama_token * tokens, int n, int p
 }
 
 int main(int argc, char ** argv) {
-    const bool interleave = argc == 6 && std::string(argv[5]) == "interleave";
+    const bool mixed = argc == 6 && std::string(argv[5]) == "interleave-mixed";
+    const bool interleave = mixed || (argc == 6 && std::string(argv[5]) == "interleave");
     if (argc < 3 || argc > 6 || (argc == 6 && !interleave)) {
-        fprintf(stderr, "usage: logits model.gguf corpus.txt [prefix [rows [interleave]]]\n");
+        fprintf(stderr, "usage: logits model.gguf corpus.txt [prefix [rows [interleave|interleave-mixed]]]\n");
         return 1;
     }
     const int prefix = argc > 3 ? atoi(argv[3]) : 200;
@@ -82,12 +83,14 @@ int main(int argc, char ** argv) {
         second.assign(tokens.begin(), tokens.begin() + prefix + steps);
         std::rotate(second.begin(), second.begin() + second.size()/3, second.end());
     }
-    const int chunk = interleave ? 47 : cp.n_batch;
-    for (int pos = 0; ok && pos < prefix; pos += chunk) {
+    const int widths[] = {7, 15, 31, 47, 127, 129, 512};
+    for (int pos = 0, i = 0; ok && pos < prefix; ++i) {
+        const int chunk = mixed ? widths[i % std::size(widths)] : (interleave ? 47 : cp.n_batch);
         for (int seq = 0; ok && seq < sequences; ++seq) {
             const auto & input = seq ? second : tokens;
             ok = decode(ctx, input.data() + pos, std::min(chunk, prefix - pos), pos, seq);
         }
+        pos += chunk;
     }
     for (int pos = prefix; ok && pos < prefix + steps; ++pos) {
         for (int seq = 0; ok && seq < sequences; ++seq) {
