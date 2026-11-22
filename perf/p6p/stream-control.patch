@@ -1,0 +1,73 @@
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index afd58c5..7df5f32 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -3050,10 +3050,10 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+             ggml_cuda_op_rms_norm_back(ctx, dst);
+             break;
+         case GGML_OP_MUL_MAT:
+-            ggml_cuda_mul_mat(ctx, dst->src[0], dst->src[1], dst);
++            if (!ggml_cuda_inkling_stream_control(ctx, dst)) { ggml_cuda_mul_mat(ctx, dst->src[0], dst->src[1], dst); }
+             break;
+         case GGML_OP_MUL_MAT_ID:
+-            ggml_cuda_mul_mat_id(ctx, dst);
++            if (!ggml_cuda_inkling_stream_control(ctx, dst)) { ggml_cuda_mul_mat_id(ctx, dst); }
+             break;
+         case GGML_OP_OUT_PROD:
+             ggml_cuda_out_prod(ctx, dst);
+@@ -4582,7 +4582,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+         }
+         if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_INKLING_ATTN &&
+                 (cgraph->nodes[j]->flags & GGML_TENSOR_FLAG_COMPUTE) && cgraph->nodes[j]->src[0] == node) {
+-            ggml_cuda_inkling_segmented_projection(*cuda_ctx, node, cgraph->nodes[j]);
++            if (!ggml_cuda_inkling_stream_control(*cuda_ctx, node, true)) { ggml_cuda_inkling_segmented_projection(*cuda_ctx, node, cgraph->nodes[j]); }
+             ggml_cuda_op_inkling_attn(*cuda_ctx, cgraph->nodes[j]);
+             return j - i;
+         }
+diff --git a/ggml/src/ggml-cuda/inkling-fmv.cu b/ggml/src/ggml-cuda/inkling-fmv.cu
+index 8523ff5..067ed8f 100644
+--- a/ggml/src/ggml-cuda/inkling-fmv.cu
++++ b/ggml/src/ggml-cuda/inkling-fmv.cu
+@@ -930,3 +930,33 @@ bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * ds
+             (const block_q2_0 *) w->data, (const block_q8_1 *) x->data, (const int32_t *) ids->data, (float *) dst->data);
+     return true;
+ }
++
++static __global__ void ik_stream_only(const uint4 * w, int vectors, const int * ids, float * out, int nout, bool read) {
++    const int slice = blockIdx.y;
++    const int tid = blockIdx.x*blockDim.x + threadIdx.x;
++    if (read) {
++        const uint4 * base = w + (ids ? (int64_t) ids[slice]*vectors : 0);
++        for (int i = tid; i < vectors; i += blockDim.x*gridDim.x) {
++            uint4 v;
++            asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(base + i));
++        }
++    }
++    for (int i = tid; i < nout; i += blockDim.x*gridDim.x) { out[slice*nout+i] = 0.0f; }
++}
++
++bool ggml_cuda_inkling_stream_control(ggml_backend_cuda_context & ctx, ggml_tensor * dst, bool segmented) {
++    static const int mode = getenv("IK_DIAG_STREAM") ? atoi(getenv("IK_DIAG_STREAM")) : 0;
++    if (!mode) { return false; }
++    const ggml_tensor * w = dst->src[0];
++    const bool expert = dst->op == GGML_OP_MUL_MAT_ID;
++    if ((w->type != GGML_TYPE_IQ4_NL && w->type != GGML_TYPE_Q2_0 && w->type != GGML_TYPE_Q2_K) ||
++            (expert ? (!ggml_is_vector(dst->src[2]) || dst->ne[1] != 8 || !ggml_is_matrix(dst)) :
++            ((!segmented && dst->ne[1] != 1) || !ggml_is_matrix(dst))) ||
++            !ggml_is_contiguous(dst) || !ggml_is_contiguous(w) || w->nb[2] % 16 || dst->type != GGML_TYPE_F32) { return false; }
++    const int nvec = w->nb[2]/16;
++    const int slots = expert ? 8 : 1;
++    const int blocks = std::min(8*82/slots, (nvec+255)/256);
++    ik_stream_only<<<dim3(blocks,slots),256,0,ctx.stream()>>>((const uint4 *) w->data, nvec, expert ? (const int *) dst->src[2]->data : nullptr,
++            (float *) dst->data, ggml_nelements(dst)/slots, mode == 1);
++    return true;
++}
+diff --git a/ggml/src/ggml-cuda/inkling.cuh b/ggml/src/ggml-cuda/inkling.cuh
+index 9a4c449..9d89b35 100644
+--- a/ggml/src/ggml-cuda/inkling.cuh
++++ b/ggml/src/ggml-cuda/inkling.cuh
+@@ -19,3 +19,4 @@ void ggml_cuda_op_inkling_proj(ggml_backend_cuda_context & ctx, ggml_tensor * ds
+ void ggml_cuda_inkling_segmented_projection(ggml_backend_cuda_context & ctx, ggml_tensor * projection, const ggml_tensor * attn);
+ bool ggml_cuda_inkling_segmented_projection_rows(ggml_backend_cuda_context & ctx, ggml_tensor * projection, int q_rows, int n_tok);
+ bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++bool ggml_cuda_inkling_stream_control(ggml_backend_cuda_context & ctx, ggml_tensor * dst, bool segmented = false);

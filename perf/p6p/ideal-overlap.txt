@@ -1,0 +1,22 @@
+stream blocks 0
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |       483.83 ± 10.81 |
+stream blocks -328
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        232.74 ± 1.81 |
+optimistic stream: 385 graph launches, 2006510000 bytes each
+stream blocks 82
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        233.90 ± 2.59 |
+optimistic stream: 385 graph launches, 2006510000 bytes each
+stream blocks 164
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        234.00 ± 1.97 |
+optimistic stream: 385 graph launches, 2006510000 bytes each
+stream blocks 328
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        233.65 ± 2.56 |
+optimistic stream: 385 graph launches, 2006510000 bytes each
+stream blocks 656
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        243.31 ± 2.31 |
+optimistic stream: 385 graph launches, 2006510000 bytes each
+stream blocks 1312
+| inkling2_loop ?B IQ4_NL - 4.5 bpw |   9.25 GiB |    26.07 B | CUDA       |  99 |   q8_0 |   q8_0 |   1 |           tg128 |        236.03 ± 2.42 |
+optimistic stream: 385 graph launches, 2006510000 bytes each
+
+Nsight Systems node trace, 656 blocks, last 119 reads: mean read 2.277 ms, overlap with kernels on the other stream 0.626 ms/token.

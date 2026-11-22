@@ -1,0 +1,4 @@
+CUDA device 0, PCI 0000:01:00.0, 82 SMs
+4 blocks/SM, 889.3 GB/s
+8 blocks/SM, 886.4 GB/s
+16 blocks/SM, 888.3 GB/s

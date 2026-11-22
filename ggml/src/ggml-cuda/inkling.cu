@@ -2369,7 +2369,7 @@ static __device__ __forceinline__ void ik_mma_finish(ik_mma_lane<G> & st, float 
 #ifndef IK_A2_MIN_BLOCKS
 #define IK_A2_MIN_BLOCKS 1
 #endif
-template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false>
+template <typename cache_t, bool q8_out, int G, bool MMA = false, bool MR = false, int HAS_TAPS = -1, bool SHORT_SCAN = false>
 static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_attn2_kernel(const ik_attn_args args_in) {
     constexpr int HD = IK_ATTN_HD;
     constexpr int U  = IK_A2_U;
@@ -2416,7 +2416,21 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
             return;
         }
     }
-    const ik_attn_args & args = MR ? args_m : args_in;
+    if constexpr (HAS_TAPS >= 0) {
+        args_m = args_in;
+        args_m.n_conv = 4;
+        args_m.has_taps = HAS_TAPS;
+        args_m.n_head_kv = 8;
+        args_m.n_head = 24;
+        args_m.n_extent = 1024;
+        args_m.n_rel = 16;
+        args_m.kc_nb1 = args_m.vc_nb1 = 4*sizeof(block_q8_0);
+        args_m.kc_nb2 = args_m.vc_nb2 = 32*sizeof(block_q8_0);
+        args_m.ext_scan = 0;
+        args_m.dbg_skip = 0;
+        args_m.dbg_times = nullptr;
+    }
+    const ik_attn_args & args = MR || HAS_TAPS >= 0 ? args_m : args_in;
 
     const int g     = blockIdx.x;
     const int split = blockIdx.y;
@@ -2440,6 +2454,15 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     // ===== round 1: every load that does not depend on the recurrent cell =====
     const int     read_cell = args.rs_ids[0];
     const int64_t kv_idx    = args.kv_idxs[0];
+    __shared__ uint32_t visible[IK_A2_WARPS];
+    if constexpr (SHORT_SCAN) {
+        static_assert(IK_A2_BLOCK == 256, "one mask cell per thread");
+        const float mask = args.mask_f16 ? __half2float(((const half *) args.mask)[tid]) : ((const float *) args.mask)[tid];
+        const unsigned bits = __ballot_sync(0xffffffffu, mask != -INFINITY && tid != kv_idx);
+        if (lane == 0) {
+            visible[warp] = bits;
+        }
+    }
     float tau = 1.0f;
     if (args.pos) {
         const float t = args.pos[0] + 1.0f;
@@ -2678,8 +2701,18 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
         if (has_cells && !(args.dbg_skip & 2)) {
             const char * kb = args.k_cache + g*args.kc_nb1;
             const char * vb = args.v_cache + g*args.vc_nb1;
-            for (int kt = w0; kt < w1; kt += 16) {
-                ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+            if constexpr (SHORT_SCAN) {
+                // Each warp takes two tiles. Skip tiles that only contain masked cells or the current token.
+#pragma unroll
+                for (int tile = warp; tile < 16; tile += IK_A2_WARPS) {
+                    if (visible[tile/2] & (0xffffu << (16*(tile%2)))) {
+                        ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, 255, 16*tile, 16*tile + 16, kv_idx);
+                    }
+                }
+            } else {
+                for (int kt = w0; kt < w1; kt += 16) {
+                    ik_mma_step<G>(args, st, s_r, kb, args.kc_nb2, vb, args.vc_nb2, 0, args.n_kv - 1, kt, w1, kv_idx);
+                }
             }
         }
         // the warp's partial result
@@ -2771,7 +2804,8 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     if constexpr (MMA) {
         init_lane_state();
     }
-    if ((args.ext_scan ? warp == 0 : (kv_idx >= w0 && kv_idx < w1)) && !(args.dbg_skip & 2)) {
+    const bool owns_current = SHORT_SCAN ? (kv_idx/16)%IK_A2_WARPS == warp : args.ext_scan ? warp == 0 : (kv_idx >= w0 && kv_idx < w1);
+    if (owns_current && !(args.dbg_skip & 2)) {
         float kv4[4];
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
@@ -3305,6 +3339,16 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
     } else if (mma) {
         a.n_split = std::max(1, std::min(mma_split, (a.n_kv + 16*IK_A2_WARPS*mma_spw - 1)/(16*IK_A2_WARPS*mma_spw)));
     }
+    static const bool fixed_enabled = !getenv("IK_ATTN_FIXED") || atoi(getenv("IK_ATTN_FIXED"));
+    static const bool short_enabled = !getenv("IK_ATTN_SHORT") || atoi(getenv("IK_ATTN_SHORT"));
+    const bool fixed = fixed_enabled && mma && !ext && n_rows == 1 && !ik_mr_enabled() && dst->type == GGML_TYPE_Q8_1 &&
+            ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X && !a.dbg_skip && !a.dbg_times &&
+            a.n_head == 24 && a.n_head_kv == 8 && a.n_conv == 4 && a.n_rel == 16 && a.n_extent == 1024 &&
+            a.kc_nb2 == 32*sizeof(block_q8_0) && a.vc_nb2 == a.kc_nb2;
+    const bool short_scan = fixed && short_enabled && a.n_kv == 256;
+    if (short_scan) {
+        a.n_split = 1;
+    }
     a.kv_per_split = ext ? (a.n_kv + n_ext - 1)/n_ext : (a.n_kv + a.n_split - 1)/a.n_split;
     a.mr_mma       = mma;
     a.mr_mma_split = mma_split;
@@ -3354,6 +3398,16 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         return;
     }
     const dim3 grid(a.n_head_kv, a.n_split, 1);
+    if (fixed) {
+        if (short_scan) {
+            if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 1, true><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
+            else            { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 0, true><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
+        } else {
+            if (a.has_taps) { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 1><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
+            else            { inkling_attn2_kernel<block_q8_0, true, 3, true, false, 0><<<grid, IK_A2_BLOCK, 0, stream>>>(a); }
+        }
+        return;
+    }
     if (!v1) {
         if (k_cache->type == GGML_TYPE_F16) {
             if (q8) { inkling_attn2_launch<half, true>(a, grid, stream); } else { inkling_attn2_launch<half, false>(a, grid, stream); }
@@ -3778,6 +3832,7 @@ struct ik_router_args {
     float       * logits;             // [n_expert] scratch
     int         * counter;
     int n_embd, n_expert, n_used;
+    bool warp_topk;
     float eps, scale, norm_eps, w_scale, w_eps;
     // the optional attention-output convolution producing the last state
     const float   * wo_out;          // nullptr: no convolution
@@ -4060,6 +4115,19 @@ static __global__ void __launch_bounds__(W*WARP_SIZE) inkling_router_kernel(cons
 #define IK_R2_MAX_STATES 5
 #define IK_R2_MAX_EXPERT 256
 
+static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long long key, int lane) {
+#pragma unroll
+    for (int size = 2; size <= 32; size *= 2) {
+#pragma unroll
+        for (int delta = size/2; delta; delta /= 2) {
+            const unsigned long long other = __shfl_xor_sync(0xffffffffu, key, delta);
+            const bool higher = ((lane & size) == 0) == ((lane & delta) == 0);
+            key = higher ? max(key, other) : min(key, other);
+        }
+    }
+    return key;
+}
+
 template <int NS, int NC, bool MR = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
@@ -4334,6 +4402,33 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         s_sel[tid]  = p + args.probs_b[tid];
     }
     __syncthreads();
+    if (!MR && args.warp_topk && !__syncthreads_or(tid < n_expert && isnan(s_sel[tid]))) {
+        __shared__ unsigned long long winners[32];
+        if (tid < 128) {
+            const float score = s_sel[tid];
+            const unsigned bits = __float_as_uint(score == 0.0f ? 0.0f : score);
+            const unsigned ordered = bits ^ (bits & 0x80000000u ? 0xffffffffu : 0x80000000u);
+            // Descending keys break tied scores in favor of the smaller expert id.
+            const unsigned long long key = (static_cast<unsigned long long>(ordered) << 32) | (127u - tid);
+            const auto best = ik_sort_warp(key, lane);
+            if (lane < 8) { winners[warp*8 + lane] = best; }
+        }
+        __syncthreads();
+        if (warp == 0) {
+            const auto best = ik_sort_warp(winners[lane], lane);
+            const int id = 127 - (uint32_t) best;
+            const float prob = s_prob[id];
+            float sum = 0.0f;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) { sum += __shfl_sync(0xffffffffu, prob, i); }
+            if (lane < 8) {
+                args.route[lane] = id;
+                args.route[8 + lane] = __float_as_int(prob/(sum + args.w_eps)*args.w_scale);
+            }
+            if (lane == 0) { *args.counter = 0; }
+        }
+        return;
+    }
     int rank = n_expert;
     if (tid < n_expert) {
         const float mine = s_sel[tid];
@@ -4461,6 +4556,7 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
     a.mr_route_rs = route->nb[1]/sizeof(int32_t);
     a.mr_dst_rs   = dst->nb[1]/sizeof(float);
     a.mr_xq_rs    = xq ? xq->nb[1]/sizeof(block_q8_1) : 0;
+    static const bool warp_topk = !getenv("IK_ROUTER_WARP_TOPK") || atoi(getenv("IK_ROUTER_WARP_TOPK"));
     static const int dbg_skip = getenv("IK_ROUTER_SKIP") ? atoi(getenv("IK_ROUTER_SKIP")) : 0;
     a.dbg_skip = dbg_skip;
     static long long * dbg_times = [] () -> long long * {
@@ -4479,6 +4575,8 @@ void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * 
         return t;
     }();
     a.dbg_times = dbg_times;
+    a.warp_topk = warp_topk && !a.dbg_skip && !a.dbg_times && a.n_expert == 128 && a.n_used == 8 &&
+            ggml_cuda_info().devices[ctx.device].cc == GGML_CUDA_CC_AMPERE_GA10X;
 
     static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));

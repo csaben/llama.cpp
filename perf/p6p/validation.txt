@@ -1,0 +1,28 @@
+Calibrated Q2, GPU0, q8_0 K/V, perf/ppl.txt
+baseline-pref
+0.01.769.257 I perplexity: calculating perplexity over 8 chunks, n_ctx=2048, batch_size=2048, n_seq=1
+[1]3.6141,[2]3.8384,[3]3.5521,[4]3.2652,[5]3.3178,[6]3.0657,[7]3.1246,[8]3.0530,
+0.08.698.433 I Final estimate: PPL = 3.0530 +/- 0.06532
+baseline-dec
+0.01.882.925 I perplexity: calculating perplexity over 2 chunks, n_ctx=1024, batch_size=1024, n_seq=1
+[1]4.1791,[2]4.2036,
+0.11.751.425 I Final estimate: PPL = 4.2036 +/- 0.28336
+final-pref
+0.01.969.488 I perplexity: calculating perplexity over 8 chunks, n_ctx=2048, batch_size=2048, n_seq=1
+[1]3.6141,[2]3.8384,[3]3.5521,[4]3.2652,[5]3.3178,[6]3.0657,[7]3.1246,[8]3.0530,
+0.09.102.096 I Final estimate: PPL = 3.0530 +/- 0.06532
+final-dec
+0.01.877.881 I perplexity: calculating perplexity over 2 chunks, n_ctx=1024, batch_size=1024, n_seq=1
+[1]4.1860,[2]4.1979,
+0.11.539.430 I Final estimate: PPL = 4.1979 +/- 0.28221
+test-backend-ops test -b CUDA0 -o MUL_MAT_ID
+  1081/1081 tests passed
+test-backend-ops test -b CUDA0 -o INKLING_ROUTER
+  11/11 tests passed
+test-backend-ops test -b CUDA0 -o INKLING_ATTN
+  16/16 tests passed
+Teacher-forced, 200 prefix tokens + 64 single-token steps. Each logit row spans all 200058 vocabulary entries.
+Two-row down and warp router, general attention:
+64 rows, 64 identical rows, 64 identical argmax, maximum absolute logit difference 0.000000
+All final defaults:
+64 rows, 2 identical rows, 63 identical argmax, maximum absolute logit difference 4.990240

@@ -10,6 +10,7 @@
 // the kernel is replayable from a CUDA graph.
 
 #include "inkling.cuh"
+#include "ggml-cuda.h"
 #include "inkling-common.cuh"
 #include "vecdotq.cuh"
 
@@ -901,4 +902,50 @@ void ggml_cuda_op_inkling_proj(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         case GGML_TYPE_IQ4_NL: ik_fmv_proj_switch<GGML_TYPE_IQ4_NL, 2>(ctx, a); break;
         default: GGML_ABORT("inkling_proj: unsupported weight type %s", ggml_type_name(w->type));
     }
+}
+
+// GA10x small-K MMVQ gives 36 Q8_1 blocks to four warps. Only the first 36 lanes contribute.
+static __global__ void ik_q2_down_rows(const block_q2_0 * weights, const block_q8_1 * x, const int32_t * ids, float * out) {
+    const int slot = blockIdx.y;
+    const int lane = threadIdx.x;
+    const int row = 2*(blockIdx.x*blockDim.y + threadIdx.y);
+    constexpr int blocks = 1152/QK2_0;
+    const int base = (ids[slot]*2304 + row)*blocks;
+    x += slot*(1152/QK8_1);
+    float sums[2] = {};
+#pragma unroll
+    for (int start = 0; start < blocks*QI2_0; start += WARP_SIZE) {
+        const int b = (start + lane)/QI2_0;
+        if (b < blocks) {
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+                const float v = vec_dot_q2_0_q8_1(weights, x + b*(QK2_0/QK8_1), base + r*blocks + b, lane % QI2_0);
+                sums[r] = __fadd_rn(sums[r], v);
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < 2; ++r) {
+        const float v = warp_reduce_sum(sums[r]);
+        if (lane == (row + r)%4) {
+            out[slot*2304 + row + r] = v;
+        }
+    }
+}
+
+bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    static const bool enabled = !getenv("IK_Q2_DOWN_ROWS") || atoi(getenv("IK_Q2_DOWN_ROWS")) == 2;
+    const ggml_tensor * w = dst->src[0];
+    const ggml_tensor * x = dst->src[1];
+    const ggml_tensor * ids = dst->src[2];
+    if (!enabled || w->type != GGML_TYPE_Q2_0 || ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X ||
+            w->ne[0] != 1152 || w->ne[1] != 2304 || w->ne[2] != 128 || w->ne[3] != 1 || x->ne[1] != 8 ||
+            !ggml_is_matrix(x) || !ggml_is_vector(ids) || ids->ne[0] != 8 || !ggml_is_matrix(dst) ||
+            !ggml_is_contiguous(w) || !ggml_is_contiguous(x) || !ggml_is_contiguous(ids) || !ggml_is_contiguous(dst) ||
+            !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device)) {
+        return false;
+    }
+    ik_q2_down_rows<<<dim3(2304/8, 8), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
+            (const block_q2_0 *) w->data, (const block_q8_1 *) x->data, (const int32_t *) ids->data, (float *) dst->data);
+    return true;
 }
