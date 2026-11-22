@@ -1187,6 +1187,9 @@ struct ggml_backend_sched_split {
 struct ggml_backend_sched {
     bool is_reset; // true if the scheduler has been reset since the last graph split
     bool is_alloc;
+    ggml_backend_buffer_t upload_buffer;
+    size_t upload_used;
+
 
     int n_backends;
 
@@ -2125,6 +2128,33 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
     }
 
     if (input->flags & GGML_TENSOR_FLAG_INPUT) {
+        static const bool queue_inputs = getenv("IK_QUEUE_INPUTS") && atoi(getenv("IK_QUEUE_INPUTS"));
+        constexpr size_t capacity = 4*1024*1024;
+        const size_t bytes = ggml_nbytes(input);
+        if (queue_inputs && sched->n_backends == 2 && split_backend_id == 0 && sched->n_copies == 1 &&
+                ggml_backend_buffer_is_host(input->buffer) && split_backend->iface.set_tensor_async && bytes <= capacity &&
+                input_cpy->buffer->buft == ggml_backend_dev_buffer_type(split_backend->device) &&
+                strncmp(ggml_backend_name(split_backend), "CUDA", 4) == 0) {
+            if (!sched->upload_buffer) {
+                auto * buft = ggml_backend_dev_host_buffer_type(split_backend->device);
+                if (buft) {
+                    sched->upload_buffer = ggml_backend_buft_alloc_buffer(buft, capacity);
+                }
+            }
+            if (sched->upload_buffer) {
+                if (capacity - sched->upload_used < bytes) {
+                    ggml_backend_synchronize(split_backend);
+                    sched->upload_used = 0;
+                }
+                // The user can overwrite the input as soon as it is queued. The pinned copy lives until the stream drains.
+                char * data = (char *) ggml_backend_buffer_get_base(sched->upload_buffer) + sched->upload_used;
+                memcpy(data, input->data, bytes);
+                ggml_backend_tensor_set_async(split_backend, input_cpy, data, 0, bytes);
+                sched->upload_used += bytes;
+                return;
+            }
+        }
+
         // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
             ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
@@ -2387,6 +2417,10 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     if (sched == NULL) {
         return;
     }
+    if (sched->upload_buffer) {
+        ggml_backend_synchronize(sched->backends[0]);
+        ggml_backend_buffer_free(sched->upload_buffer);
+    }
     for (int b = 0; b < sched->n_backends; b++) {
         for (int c = 0; c < sched->n_copies; c++) {
             ggml_backend_event_free(sched->events[b][c]);
@@ -2503,6 +2537,7 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
     for (int i = 0; i < sched->n_backends; i++) {
         ggml_backend_synchronize(sched->backends[i]);
     }
+    sched->upload_used = 0;
     if (!sched->is_alloc) {
         // if the graph is not already allocated, always use copy 0 after a synchronization
         // this ensures that during generation the same copy is used every time,
