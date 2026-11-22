@@ -1415,6 +1415,10 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             setenv("LLAMA_DSPARK_HEAD_N", std::to_string(this->params.n_max).c_str(), 1);
             head_n = this->params.n_max;
         }
+        {
+            const char * env = getenv("LLAMA_DSPARK_ADAPTIVE");
+            adapt.on = env != nullptr && atoi(env) != 0 && n_seq == 1;
+        }
         if (has_rnn_context) {
             const llama_model * model_tgt = llama_get_model(this->params.ctx_tgt);
             if (n_embd_tgt != n_embd_dec || target_layer_ids[target_layer_ids_n - 1] != llama_model_n_layer(model_tgt)) {
@@ -1475,12 +1479,82 @@ protected:
         }
     }
 
+    // Window policy (LLAMA_DSPARK_ADAPTIVE=1, one sequence): draft only while drafting is measured to be faster.
+    // A step is the time between two draft() calls and yields pos0 - previous pos0 tokens (the accepted drafts + 1, or
+    // 1 without a draft). Decayed sums of tokens and time per mode give the two rates. While drafting loses, drafting
+    // is skipped for a stretch (32 steps, doubling up to 256 while it keeps losing) and then probed again for a few
+    // steps; while drafting wins, a couple of plain steps now and then keep the plain rate current (it falls with
+    // the context depth). The output does not depend on any of this: the target verifies every token.
+    struct adaptive_state {
+        bool   on = false;
+        bool   last_valid = false, last_drafted = false;
+        int64_t   last_us = 0;
+        llama_pos last_pos0 = -1;
+        double tok_d = 0.0, us_d = 0.0, tok_p = 0.0, us_p = 0.0;
+        int    n_d = 0, n_p = 0;       // steps seen per mode since the last reset of that mode
+        int    skip_left = 0, skip_len = 32, plain_left = 0, since_plain = 0, steps_skipped = 0, steps_drafted = 0;
+    } adapt;
+
+    // true: draft this step
+    bool adaptive_step(llama_pos pos0) {
+        const int64_t now = ggml_time_us();
+        if (adapt.last_valid && pos0 > adapt.last_pos0 && pos0 - adapt.last_pos0 <= params.n_max + 1 && now - adapt.last_us < 250000) {
+            const double tok = pos0 - adapt.last_pos0, us = (double) (now - adapt.last_us);
+            if (adapt.last_drafted) {
+                adapt.tok_d = 0.9*adapt.tok_d + tok; adapt.us_d = 0.9*adapt.us_d + us; adapt.n_d++;
+            } else {
+                adapt.tok_p = 0.8*adapt.tok_p + tok; adapt.us_p = 0.8*adapt.us_p + us; adapt.n_p++;
+            }
+        } else if (adapt.last_valid && (pos0 <= adapt.last_pos0 || now - adapt.last_us >= 250000)) {
+            adapt = adaptive_state(); // another request
+            adapt.on = true;
+        }
+        bool do_draft = true;
+        if (adapt.skip_left > 0) {
+            // drafting is switched off for a stretch
+            do_draft = false;
+            if (--adapt.skip_left == 0) {
+                adapt.tok_d = adapt.us_d = 0.0; adapt.n_d = 0; // probe afresh
+            }
+        } else if (adapt.plain_left > 0) {
+            do_draft = false;
+            --adapt.plain_left;
+        } else if (adapt.n_d >= 6 && adapt.n_p < 2) {
+            adapt.plain_left = 3; // no plain rate yet: measure it
+            do_draft = false;
+        } else if (adapt.n_d >= 6 && adapt.n_p >= 2) {
+            const double rate_d = adapt.tok_d/adapt.us_d, rate_p = adapt.tok_p/adapt.us_p;
+            if (rate_d < rate_p) {
+                adapt.skip_left = adapt.skip_len;
+                adapt.skip_len  = std::min(256, 2*adapt.skip_len);
+                do_draft = false;
+            } else {
+                adapt.skip_len = 32;
+                if (++adapt.since_plain >= 96) {
+                    adapt.since_plain = 0;
+                    adapt.plain_left  = 2;
+                    do_draft = false;
+                }
+            }
+        }
+        adapt.last_valid   = true;
+        adapt.last_drafted = do_draft;
+        adapt.last_pos0    = pos0;
+        adapt.last_us      = now;
+        (do_draft ? adapt.steps_drafted : adapt.steps_skipped)++;
+        return do_draft;
+    }
+
 public:
 
     void draft(common_speculative_draft_params_vec & dparams) override {
         auto & ctx_dft = params.ctx_dft;
 
         batch.clear();
+
+        if (adapt.on && n_seq == 1 && dparams[0].drafting && !adaptive_step(dparams[0].pos0)) {
+            return; // a plain step
+        }
 
         // build one batch holding every drafting sequence's noise block into a single decode
         std::vector<int32_t> i_block_beg(n_seq, -1);
