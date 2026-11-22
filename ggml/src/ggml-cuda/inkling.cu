@@ -4190,7 +4190,6 @@ void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_ten
 #define IK_ROUTER_WARPS      (IK_ROUTER_BLOCK/WARP_SIZE)
 
 struct ik_router_args {
-    const float * partials;
     const float * query;              // nullptr: no mix
     ik_state_ptrs st; int n_states;
     const float * norm_w;             // [n_embd], followed by the selection bias [n_expert]
@@ -4498,7 +4497,7 @@ static __device__ __forceinline__ unsigned long long ik_sort_warp(unsigned long 
     return key;
 }
 
-template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false, int prep = 0> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
+template <int NS, int NC, bool MR = false, bool register_rows = false, bool compact = false> // NC: taps of the fused attention-output convolution (0: none); MR: a row per blockIdx.y
 static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(const ik_router_args args_in) {
     ik_router_args args_m;
     if constexpr (MR) {
@@ -4610,21 +4609,6 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         }
     }
 
-    float direct_factor = 1.0f;
-    if constexpr (prep) {
-        float ss = 0.0f;
-        if constexpr (prep == 1) {
-            float hi[2];
-#pragma unroll
-            for (int j = 0; j < 2; ++j) { hi[j] = warp_reduce_sum<8>(args.partials[32*j+lane]); }
-#pragma unroll
-            for (int w = 0; w < 8; ++w) { ss += __shfl_sync(0xffffffffu, hi[w/4], 8*(w%4)); }
-        } else {
-#pragma unroll
-            for (int w = 0; w < 8; ++w) { ss += warp_reduce_sum(args.partials[32*w+lane]); }
-        }
-        direct_factor = rsqrtf(ss/n_embd + args.norm_eps);
-    } else {
     // ===== the Gram matrix of the states and their dots with the query: block reduction =====
     {
         float acc[NP];
@@ -4693,7 +4677,7 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
         __syncthreads();
     }
     IK_RDBG_T(1);
-
+    float direct_factor = 1.0f;
     if constexpr (compact && NS == 1) {
         float ss = 0.0f;
 #pragma unroll
@@ -4746,7 +4730,6 @@ static __global__ void __launch_bounds__(IK_R2_BLOCK, 1) inkling_router2_kernel(
     }
     if constexpr (!(compact && NS == 1)) {
         __syncthreads();
-    }
     }
     IK_RDBG_T(9); // weights ready
 
@@ -4941,7 +4924,7 @@ static void inkling_router2_launch(ggml_backend_cuda_context & ctx, const ik_rou
     }
 }
 
-static void ik_execute_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst, const float * partials, int mode) {
+void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int n_states = ggml_get_op_params_i32(dst, 6);
     const ggml_tensor * query    = dst->src[0];
     const ggml_tensor * consts   = dst->src[1 + n_states];
@@ -4950,7 +4933,6 @@ static void ik_execute_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     ggml_tensor       * xq       = dst->src[4 + n_states];
 
     ik_router_args a;
-    a.partials = partials;
     a.query    = query ? (const float *) query->data : nullptr;
     a.n_states = n_states;
     for (int i = 0; i < n_states; ++i) {
@@ -5031,14 +5013,6 @@ static void ik_execute_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst
 
     static const bool v1 = getenv("IK_ROUTER_V1") && atoi(getenv("IK_ROUTER_V1")) != 0;
     GGML_ASSERT(!has_conv || (a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES));
-    if (partials && a.warp_topk && !v1) {
-        if (mode%2) {
-            inkling_router2_kernel<1,0,false,true,true,1><<<32,IK_R2_BLOCK,4*576*sizeof(float),ctx.stream()>>>(a);
-        } else {
-            inkling_router2_kernel<1,0,false,true,true,2><<<32,IK_R2_BLOCK,4*576*sizeof(float),ctx.stream()>>>(a);
-        }
-        return;
-    }
     if (n_rows > 1) {
         GGML_ASSERT(!has_conv && n_rows <= 8 && a.n_embd <= IK_R2_MAX_EMBD && a.n_expert <= IK_R2_MAX_EXPERT && n_states <= IK_R2_MAX_STATES);
         for (int i = 0; i < n_states; ++i) {
@@ -5069,51 +5043,4 @@ static void ik_execute_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         case 8:  inkling_router_kernel<8><<<a.n_expert/8, 8*WARP_SIZE, 0, ctx.stream()>>>(a); break;
         default: inkling_router_kernel<4><<<a.n_expert/4, 4*WARP_SIZE, 0, ctx.stream()>>>(a); break;
     }
-}
-
-void ggml_cuda_op_inkling_router(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    ik_execute_router(ctx, dst, nullptr, 0);
-}
-
-template<int threads, bool compact>
-static __global__ void ik_apply_partials(const float * cur, const float * msg, const float * d, const half * wg, const half * wf,
-        float * y, float * partials, bool group) {
-    const int t = threadIdx.x, lane = t%32, w = blockIdx.x/8, low = blockIdx.x%8;
-    __shared__ float dots[3][4];
-    for (int task = t; task < 384; task += threads) {
-        const int stripe = task/128, high = (task/32)%4;
-        const int k = 32*w+low+8*high+256*stripe, c = 4*k+lane/8;
-        float x = 0.0f;
-        if (k < 576) {
-            x = ik_ctrl_apply_channel<compact>(cur, msg, d, wg, wf, 2304, 0, 0, c, 0);
-            if (lane%8 == 0) { y[c] = x; }
-        }
-        const float a = __shfl_sync(0xffffffffu,x,8), b = __shfl_sync(0xffffffffu,x,16), z = __shfl_sync(0xffffffffu,x,24);
-        if (lane == 0) { dots[stripe][high] = x*x+a*a+b*b+z*z; }
-    }
-    __syncthreads();
-    if (t < 4) {
-        float v = (dots[0][t]+dots[1][t])+dots[2][t];
-        if (group) {
-            v += __shfl_xor_sync(15u,v,2);
-            v += __shfl_xor_sync(15u,v,1);
-            if (!t) { partials[blockIdx.x] = v; }
-        } else { partials[32*w+8*t+low] = v; }
-    }
-}
-
-bool ggml_cuda_route_partials(ggml_backend_cuda_context & ctx, ggml_tensor * apply, ggml_tensor * dst, int mode) {
-    if (!ggml_cuda_inkling_fast_glue(ctx) || dst->ne[0] != 2304 || !ggml_is_vector(dst) || ggml_get_op_params_i32(dst,6) != 1 ||
-            dst->src[0] || ggml_get_op_params_i32(dst,10) || ggml_get_op_params_i32(dst,3) != 8 || dst->src[3]->ne[1] != 128 ||
-            !dst->src[5] || dst->src[5]->type != GGML_TYPE_Q8_1 || dst->src[1] != apply || !ggml_is_vector(apply) ||
-            !ggml_is_contiguous(apply) || apply->ne[0] != 2304 || apply->type != GGML_TYPE_F32 || apply->src[5] ||
-            apply->src[2]->ne[0] != 64 || apply->src[3]->type != GGML_TYPE_F16 || apply->src[4]->type != GGML_TYPE_F16 ||
-            (uintptr_t)apply->src[2]->data%16 || (uintptr_t)apply->src[3]->data%8 || (uintptr_t)apply->src[4]->data%8) { return false; }
-    const int threads = mode <= 2 ? 384 : 128;
-    const auto kernel = mode <= 2 ? ik_apply_partials<384,true> : mode <= 4 ? ik_apply_partials<128,true> : ik_apply_partials<128,false>;
-    ggml_cuda_pool_alloc<float> partials(ctx.pool(), mode%2 ? 64 : 256);
-    kernel<<<64,threads,0,ctx.stream()>>>((const float *)apply->src[0]->data,(const float *)apply->src[1]->data,(const float *)apply->src[2]->data,
-            (const half *)apply->src[3]->data,(const half *)apply->src[4]->data,(float *)apply->data,partials.get(),mode%2 != 0);
-    ik_execute_router(ctx, dst, partials.get(), mode);
-    return true;
 }

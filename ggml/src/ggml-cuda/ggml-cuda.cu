@@ -4631,14 +4631,6 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
-    static const int handoff = ggml_cuda_env_int("IK_ROUTE_PARTIALS", 0);
-    if (handoff > 0 && handoff <= 6 && node->op == GGML_OP_LOOP_CTRL_APPLY && (node->flags & GGML_TENSOR_FLAG_COMPUTE) &&
-            cuda_ctx->curr_stream_no == 0 && cuda_ctx->stream_context().concurrent_events.empty() && ggml_node_has_n_uses(cgraph, i, 1)) {
-        int j = i + 1;
-        while (j < cgraph->n_nodes && ggml_cuda_is_view_or_noop(cgraph->nodes[j])) { ++j; }
-        if (j < cgraph->n_nodes && cgraph->nodes[j]->op == GGML_OP_INKLING_ROUTER && (cgraph->nodes[j]->flags & GGML_TENSOR_FLAG_COMPUTE) &&
-                ggml_cuda_route_partials(*cuda_ctx, node, cgraph->nodes[j], handoff)) { return j-i; }
-    }
     if (node->op == GGML_OP_RES_MIX && (node->flags & GGML_TENSOR_FLAG_COMPUTE) &&
             cuda_ctx->curr_stream_no == 0 && cuda_ctx->stream_context().concurrent_events.empty()) {
         int j = i + 1;
