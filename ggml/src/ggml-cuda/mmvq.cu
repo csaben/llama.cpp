@@ -1878,6 +1878,63 @@ static __global__ void ik_mmvq_mr(
     }
 }
 
+// The expert matvecs of a window, a warp per (token, slot) pair and row block (the layout of mul_mat_vec_q_moe). The
+// dp4a work per pair is what bounds these kernels on Ampere, not the weight bytes, so reading a shared expert once
+// (ik_mmvq_mr with a plan) does not pay there. The warp walks the blocks of each warp of mul_mat_vec_q<type, 1> in turn
+// and adds the partial sums in that kernel's order, so the result is bit-identical to it.
+template <ggml_type type, bool small_k>
+static __global__ void ik_mmvq_mr_pairs(
+        const void * GGML_CUDA_RESTRICT vx, const block_q8_1 * GGML_CUDA_RESTRICT vy, const int32_t * GGML_CUDA_RESTRICT ids,
+        float * GGML_CUDA_RESTRICT dst, const uint32_t ncols_x, const uint32_t nrows_x, const uint32_t stride_row_x,
+        const uint32_t stride_expert_x, const uint32_t ids_stride,
+        const uint32_t y_stride_tok, const uint32_t y_stride_slot, const uint32_t dst_stride_tok, const uint32_t dst_stride_slot) {
+    constexpr int qk  = ggml_cuda_type_traits<type>::qk;
+    constexpr int qi  = ggml_cuda_type_traits<type>::qi;
+    constexpr int vdr = get_vdr_mmvq(type);
+    constexpr mmvq_parameter_table_id table_id = get_device_table_id();
+    constexpr int nwarps = calc_nwarps(type, 1, table_id, small_k, false); // of the single-column kernel
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    constexpr int R = 2;
+
+    constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+
+    const uint32_t tok  = threadIdx.y;
+    const uint32_t slot = blockIdx.y;
+    const int row0 = R*blockIdx.x;
+    const int blocks_per_row_x = ncols_x / qk;
+    constexpr int blocks_per_iter = vdr * nwarps*warp_size / qi;
+
+    const uint32_t expert = ids[slot + tok*ids_stride];
+    const block_q8_1 * y = vy + tok*y_stride_tok + slot*y_stride_slot;
+    const int kbx_offset = expert*stride_expert_x + row0*stride_row_x;
+
+    float acc[R] = {0.0f};
+#pragma unroll
+    for (int w = 0; w < nwarps; ++w) {
+        const int tid = warp_size*w + threadIdx.x;
+        float tmp[R] = {0.0f};
+        for (int kbx = tid / (qi/vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+            const int kby = kbx * (qk/QK8_1);
+            const int kqs = vdr * (tid % (qi/vdr));
+#pragma unroll
+            for (int i = 0; i < R; ++i) {
+                tmp[i] += vec_dot_q_cuda(vx, &y[kby], kbx_offset + i*stride_row_x + kbx, kqs);
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < R; ++i) {
+            acc[i] = w == 0 ? tmp[i] : acc[i] + tmp[i];
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < R; ++i) {
+        acc[i] = warp_reduce_sum<warp_size>(acc[i]);
+    }
+    if (threadIdx.x < R && uint32_t(row0 + threadIdx.x) < nrows_x) {
+        dst[tok*dst_stride_tok + slot*dst_stride_slot + row0 + threadIdx.x] = acc[threadIdx.x];
+    }
+}
+
 template <ggml_type type>
 static void ik_mmvq_mr_launch(
         const void * vx, const block_q8_1 * vy, const int32_t * ids, const int32_t * plan, float * dst, const uint32_t ncols_x, const uint32_t nrows_x,
@@ -1891,6 +1948,19 @@ static void ik_mmvq_mr_launch(
     const int  nwarps1 = calc_nwarps(type, 1, table_id);
     const bool small_k = nwarps1 > 1 && (int) (ncols_x/qk) < nwarps1*(vdr*warp_size/qi) && type != GGML_TYPE_IQ3_XXS && type != GGML_TYPE_IQ3_S;
     const int  n_slots = ids ? n_tok*n_used : 1;
+    // IK_MR_GROUPED=1: the grouped kernel (each distinct expert read once) instead of a warp per pair
+    static const bool grouped = getenv("IK_MR_GROUPED") && atoi(getenv("IK_MR_GROUPED")) != 0;
+    if (ids && !grouped) {
+        const dim3 grid((nrows_x + 1)/2, n_used, 1), block(warp_size, n_tok, 1);
+        if (small_k) {
+            ik_mmvq_mr_pairs<type, true><<<grid, block, 0, stream>>>(vx, vy, ids, dst, ncols_x, nrows_x, stride_row_x, stride_expert_x, ids_stride,
+                    y_stride_tok, y_stride_slot, dst_stride_tok, dst_stride_slot);
+        } else {
+            ik_mmvq_mr_pairs<type, false><<<grid, block, 0, stream>>>(vx, vy, ids, dst, ncols_x, nrows_x, stride_row_x, stride_expert_x, ids_stride,
+                    y_stride_tok, y_stride_slot, dst_stride_tok, dst_stride_slot);
+        }
+        return;
+    }
     auto launch = [&](auto SK, auto NCT) {
         constexpr bool sk = decltype(SK)::value;
         constexpr int  nc = decltype(NCT)::value;
@@ -1979,7 +2049,8 @@ bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * s
     GGML_ASSERT(!ids || (ids->ne[0] == n_used && ids->ne[1] == n_tok && (src1->ne[1] == 1 || src1->ne[1] == n_used) && src1->ne[2] == n_tok));
 
     ggml_cuda_pool_alloc<int32_t> plan(ctx.pool());
-    if (ids) {
+    static const bool plan_on = getenv("IK_MR_STATS") || (getenv("IK_MR_GROUPED") && atoi(getenv("IK_MR_GROUPED")) != 0);
+    if (ids && plan_on) {
         GGML_ASSERT(n_tok*n_used <= 64);
         plan.alloc((size_t) n_tok*n_used*IK_MR_PLAN);
         // IK_MR_STATS=1: count the distinct experts per visit on the device, printed at exit
@@ -2004,7 +2075,7 @@ bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * s
         }();
         ik_mmvq_mr_plan<<<1, 64, 0, stream>>>(ids_d, plan.get(), n_tok, n_used, ids_stride, stats);
     }
-    const int32_t * plan_d = ids ? plan.get() : nullptr;
+    const int32_t * plan_d = ids && plan_on ? plan.get() : nullptr;
 #define IK_MR_CASE(T) case T: ik_mmvq_mr_launch<T>(src0->data, y, ids_d, plan_d, (float *) dst->data, src0->ne[0], src0->ne[1], s01, s02, n_tok, n_used, \
         ids_stride, y_tok, y_slot, d_tok, d_slot, warp_size, table_id, stream); break;
     switch (src0->type) {

@@ -2,7 +2,7 @@
 # Speculative-decoding probe (phase 5): the same prompts of three kinds (new code, an edit of given code, prose) plus an
 # edit deep in a 16K-token context, through a fresh server per configuration. Prints decode tok/s and, for a drafter,
 # accepted/proposed draft tokens. Temperature 0, seed 1, prompt cache off, 384 tokens per reply.
-# usage: MODEL=... GPU=1 perf/spec_probe.py <label> [--no-long] [-- extra llama-server args]
+# usage: MODEL=... GPU=1 [SPEC_OUT=dir] perf/spec_probe.py <label> [--no-long] [-- extra llama-server args]
 import glob, json, os, subprocess, sys, time, urllib.request
 args = sys.argv[1:]
 label = args[0]
@@ -38,7 +38,11 @@ try:
         PROMPTS.append(("edit@16K", doc + "\n\nCopy the first function defined in the source above exactly, then add a one-line comment above each of its statements. Output only the code."))
     for kind, p in PROMPTS:
         body = {"model": "x", "messages": [{"role": "user", "content": p}], "max_tokens": 384, "temperature": 0, "seed": 1, "cache_prompt": False}
-        t = post("/v1/chat/completions", body)["timings"]
+        r = post("/v1/chat/completions", body)
+        t = r["timings"]
+        if os.environ.get("SPEC_OUT"):  # keep the reply, to compare drafted against plain output
+            os.makedirs(os.environ["SPEC_OUT"], exist_ok=True)
+            open(os.path.join(os.environ["SPEC_OUT"], f"{label}.{kind}.txt"), "w").write(r["choices"][0]["message"].get("content") or "")
         acc = f"  accepted/proposed {t.get('draft_n_accepted')}/{t.get('draft_n')}" if t.get("draft_n") else ""
         print(f"{label:14s} {kind:9s} prompt {t['prompt_n']:6d}  {t['predicted_n']:4d} tok  {t['predicted_per_second']:6.1f} tok/s{acc}", flush=True)
 finally:
