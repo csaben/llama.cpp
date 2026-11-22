@@ -309,8 +309,8 @@ public:
     }
 
     // remove seq_id from its cells at positions in [p0, p1)
-    // return the lowest index of a cell that becomes empty, or size() if none does
-    uint32_t seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    // For a ring rewind, return the first freed cell in position order. Otherwise prefer the lowest index.
+    uint32_t seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1, bool rewind_ring = false) {
         assert(seq_id >= 0);
         assert(seq_id < LLAMA_MAX_SEQ);
 
@@ -321,7 +321,7 @@ public:
             const uint32_t i = it->second;
             ++it; // advance first: seq_rm(i, seq_id) erases this entry from sp
 
-            if (seq_rm(i, seq_id)) {
+            if (seq_rm(i, seq_id) && (!rewind_ring || res == size())) {
                 res = std::min(res, i);
             }
         }

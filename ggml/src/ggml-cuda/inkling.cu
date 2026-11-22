@@ -3134,7 +3134,7 @@ static __global__ void __launch_bounds__(2*IK_ATTN_HD) inkling_attn_kv_rows_kern
     const int which  = tid/HD;    // 0: a K channel, 1: a V channel
     const int ci     = tid % HD;
     const int  n_conv   = HAS_TAPS >= 0 ? 4 : args.n_conv;
-    const bool has_taps = HAS_TAPS >= 0 ? HAS_TAPS != 0 : has_taps != 0;
+    const bool has_taps = HAS_TAPS >= 0 ? HAS_TAPS != 0 : args.has_taps != 0;
     __shared__ float s_red[2][IK_A2_WARPS];
 
     const int64_t ch   = (int64_t) which*HD*args.n_head_kv + (int64_t) g*HD + ci; // state channel

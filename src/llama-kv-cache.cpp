@@ -434,6 +434,11 @@ void llama_kv_cache::clear(bool data) {
     }
 }
 
+bool llama_kv_cache::uses_inkling_window_ring() const {
+    static const bool mr = getenv("IK_MR") && atoi(getenv("IK_MR")) != 0;
+    return mr && n_swa && (model.arch == LLM_ARCH_INKLING2 || model.arch == LLM_ARCH_INKLING2_LOOP);
+}
+
 bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
@@ -455,10 +460,11 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
         auto & cells = v_cells[seq_to_stream[seq_id]];
         auto & head  = v_heads[seq_to_stream[seq_id]];
 
-        const uint32_t new_head = cells.seq_rm(seq_id, p0, p1);
+        const bool rewind_ring = uses_inkling_window_ring() && p0 > 0 && p1 == std::numeric_limits<llama_pos>::max();
+        const uint32_t new_head = cells.seq_rm(seq_id, p0, p1, rewind_ring);
 
         // If we freed up a slot, set head to it so searching can start there.
-        if (new_head != cells.size() && new_head < head) {
+        if (new_head != cells.size() && (rewind_ring || new_head < head)) {
             head = new_head;
         }
     } else {
@@ -1039,7 +1045,7 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
 
         // if we have enough unused cells before the current head ->
         //   better to start searching from the beginning of the cache, hoping to fill it
-        if (head_cur > cells.get_used() + 2*n_tokens) {
+        if (head_cur > cells.get_used() + 2*n_tokens && !uses_inkling_window_ring()) {
             head_cur = 0;
         }
 

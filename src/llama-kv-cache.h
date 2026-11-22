@@ -263,6 +263,8 @@ public:
     void get_prev_tokens(const llama_ubatch & ubatch, uint32_t n, std::vector<llama_token> & res) const;
 
 private:
+    bool uses_inkling_window_ring() const;
+
     const llama_model & model;
     const llama_hparams & hparams;
 

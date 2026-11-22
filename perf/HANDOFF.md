@@ -6,6 +6,10 @@ The old edit trace reproduces the failure at target input position 2561 after ro
 
 Replay from repo root after sourcing `perf/p5env.sh`: `IK_MR=1 IK_MMA=3 MR_RS_A=0 MR_RS=3 MR_CTX=16384 MR_TRACE=/path/to/n3.trace LD_LIBRARY_PATH=$PWD/build/bin build/bin/mr_check "$Q2" perf/ppl.txt`. Old trace is under the brief's scratchpad. Next: confirm zero differing rows, then full 3000/384-token matrix and restore phase 5.
 
+At `dca9008`, natural-stop n3 and plain-mr match on all four messages. Code/edit reach 3000, prose ends at 2838 and edit@16K at 1318. A five-row window starting at 1533 or 3069 with three rejected rows exposed another bug: the ring rewound to the lowest physical address, skipping the first rejected position. Position-ordered ring rewind gives 0/73 bad rows at each of 1533, 3069 and 4500 (was 70/73, 71/73, 0/73). Reproduce with `MR_SIZES=5 MR_RAND=2 MR_PLAIN_PCT=0 MR_RS=4 MR_RS_A=0`. The original trace is now stored in `perf/p6/r4_repro/n3.trace.gz`.
+
+In flight: `bash perf/p6/r4_spec.sh perf/p6/r4_3000` (fixed-length requests, backend sampling, GPU1). Short table: `SPEC_MAXT=384 SPEC_REPS=3 bash perf/p6/r4_spec.sh perf/p6/r4_384`. Check both against plain-mr. The original no-backend-sampling plain result at char 214 reproduces in a separate short run; the server uses identical target prompt batches in both modes.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.
