@@ -5,12 +5,14 @@ GPU1 only. Starting tree `c8eefdf`, Round 4 inference baseline `399b61a`. The li
 - Three scan layouts tested. Standalone staging (`10c8f8c`) and staging an entire split (`0f4c67b`) cost more time. Four query rows in the MMA columns (`4b8cb7b`) matched all 480 reference logit rows through 32K. At 32K the window fell from 12.49 to 12.09 ms. Raw depth sweeps are in `perf/p7/trials/`.
 - Device features (`99f3500`), queued candidate IDs (`7b57a6a`), separate allocated graphs (`13f232b`), stream-ordered host inputs (`61a1127`, `2adfe25`) and device embedding lookup reduced the draft host read to zero calls. At `2adfe25`, a CUDA event probe on 67 short-edit rounds found one wait above 1 ms per round and a median 11.22 ms of GPU graph work.
 - `2adfe25`: fixed n3 at 3000 tokens gave 256.3 / 281.6 / 233.4 / 270.9 / 270.6 tok/s for code / edit / prose / edit@16K / edit@32K. All 15 fixed-policy-off messages and token streams across widths 2/3/4 matched plain, and the four historical plain answers still matched Round 4. `perf/p7/pre3000/`.
-- Candidate `8899fa9`: stricter device-path limits, sampled-output fences and a five-row packing trial. Final matrix, deployment choice and regression checks in progress. `perf/p7/round_times.py` reads the timestamped CUDA-event probe.
+- Candidate `8899fa9`: stricter device-path limits, sampled-output fences and a five-row packing trial. This candidate was superseded by the single-fence build below. `perf/p7/round_times.py` reads the timestamped CUDA-event probe.
 
 - Release candidate `8899fa9` passed 2,714 full logit-row comparisons (replay, mixed widths, pad boundaries and SWA rollback), all six greedy probes and 1,108 backend tests. PPL matched Round 4. The five-row variant improved the isolated 32K window by 0.24 ms but lost on the 3,000-token served edit (263.4 vs 271.0), so the matrix uses `IK_WINDOW_COLS=1`.
 - In 854 measured long edit rounds, the serialized draft and target graphs alone took 9.666 s. At 16K, 831 such rounds took 9.980 s. The 320 tok/s budget for the entire 3,000-token response is 9.375 s. These observed sums exclude unmeasured rounds, device injection and host bookkeeping. See `perf/p7/profile-edit{,@16K}/rounds.txt`.
 
 - The follow-up moved the mask embedding to the GPU and shared the target fence with draft readback. CUDA API tracing recorded exactly one synchronization call in all 88 complete short-edit rounds on trial `24b9447` (`perf/p7/fence/gpu.rounds.txt`). The release integration is `c71f680`; validation runs on a private test port.
+
+- Final long matrix on `c71f680`: all 30 full messages and 90,000 drafted IDs matched plain. Fixed n3 won code and all three edits at 262.0 / 288.1 / 276.7 / 275.3 tok/s (code / edit / edit@16K / edit@32K). Adaptive n2 won prose at 244.4. The deploy script stages fixed n3. Short medians and the closing plain/depth A/B are in progress.
 
 # Phase 6 hand-off (keep current; newest status first)
 

@@ -1156,6 +1156,37 @@ This command was not run at 64K context in this phase (the measurements used a 3
 
 # Phase 7 (levers 1-2)
 
+Inference build `c71f680` on physical GPU1 (RTX 3090), one 64K slot. The staged preset uses three draft tokens, a four-row packed verify window, the folded 32K shortlist and GPU sampling. Fixed n3 had the highest long-reply rate on code and all three edits. Adaptive n2 was fastest on long prose.
+
+### Served decode throughput
+
+Each value is generated tokens per second. Each configuration had a fresh server. Plain-mr used the same target, flags, tensor placement, sampling and context as the drafted runs. The two deep prompts had 16,044 and 32,045 prompt tokens. All full messages and 90,000 drafted token IDs matched plain at 3,000 tokens. [Long replies and comparisons](p7/final3000/).
+
+**3,000 generated tokens**
+
+| Configuration | Code | Edit | Prose | Edit @ 16K | Edit @ 32K |
+|---|---:|---:|---:|---:|---:|
+| plain-mr | 202.2 | 197.3 | 201.4 | 183.4 | 170.0 |
+| n2 | 253.2 | 270.2 | 243.9 | 254.5 | 251.5 |
+| n3 | 262.0 | 288.1 | 239.3 | 276.7 | 275.3 |
+| n4 | 238.9 | 273.2 | 217.7 | 261.7 | 267.3 |
+| n2-adapt | 251.9 | 268.6 | 244.4 | 253.6 | 250.4 |
+| n3-adapt | 260.1 | 287.3 | 241.8 | 276.3 | 274.4 |
+| n4-adapt | 247.2 | 272.8 | 237.6 | 275.1 | 274.1 |
+
+For fixed n3, the long edit improved from 273.6 to 288.1 tok/s (+5.3%) and edit at 16K from 259.3 to 276.7 (+6.7%) against fixed n3 on Round 4 (`399b61a`). Against the staged Round 4 adaptive preset, the gains were 8.0% and 10.5%. Phase 7 also measured the 32K edit, where fixed n3 beat same-flags plain by 61.9%.
+
+**Effective mean round cost at 3,000 tokens, ms**
+
+| Configuration | Code | Edit | Prose | Edit @ 16K | Edit @ 32K |
+|---|---:|---:|---:|---:|---:|
+| plain-mr | 4.95 | 5.07 | 4.97 | 5.45 | 5.88 |
+| n2 | 9.71 | 10.08 | 9.69 | 10.77 | 11.41 |
+| n3 | 11.31 | 11.74 | 11.27 | 12.53 | 13.39 |
+| n4 | 13.81 | 14.54 | 13.73 | 15.53 | 16.65 |
+
+These costs divide total decode time by the estimated number of target steps (generated tokens minus accepted drafts). The last round can be truncated. They include host work, any graph captures during generation, and all device work. Long edit n3 used 2,113 accepted drafts vs 2,245 for n4. Its approximately 2.8 ms cheaper round outweighed n4's extra acceptance. [Long edit n3](p7/final3000/n3.txt), [n4](p7/final3000/n4.txt).
+
 ### Changes and ablations
 
 The target saves the four extracted feature rows on its device, and the drafter gathers the projected row at the accepted anchor. That row can precede the last proposed row after a rejection. The drafter queues both a small host copy of its picks and device IDs for the target embedding lookup. Target verification can then start before the host knows the candidates. The mask embedding and target token table are GPU-resident. The target fence publishes the generation number of the draft readback it completed, so sampling and draft readback can both use that fence. The target sampler still owns the emitted tokens. The server updates prompt history and the sequence rollback boundary from the verified prefix. Multi-sequence, checkpoint-replay and unsupported state layouts use the ordinary path.
