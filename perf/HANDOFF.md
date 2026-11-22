@@ -22,6 +22,8 @@ PPL reproduced Round 3 to all reported digits at the original batch sizes: prefi
 
 GPU1 ABBA (fixed n3, 3000 tokens) confirmed a speedup from scheduling neighboring verify rows on the same KV tile. Edit@16K was 241.7 / 255.0 / 257.4 / 241.3 tok/s (old / new / new / old), edit 268.3 / 272.3 / 273.0 / 265.2, with matching messages and token IDs. The CUDA change is in the build queue. Repeat both matrices into r4_final_3000 and r4_final_384 before deployment.
 
+A/B of default plain against the 3aea16a libraries, same session, shows a difference below 0.06% at every benchmark depth; all six CLI greedy outputs match. The independent no-backend-sampling discrepancy starts in prefill: at the first 12 tokens the serialized states differ. Disabling CUDA fusion makes all three checkpoints and both 64-token answers identical. Disabling graph reuse/capture or warmup preserves the discrepancy. See r4_checks/sampling.txt.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.
