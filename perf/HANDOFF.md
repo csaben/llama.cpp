@@ -20,6 +20,8 @@ Both tables now complete (48/48 configurations and prompts across the two budget
 
 PPL reproduced Round 3 to all reported digits at the original batch sizes: prefill 3.0530, single-row decode 4.1979 (default) and 4.2038 (window flags). Backend ops 1108/1108. All boundary and mixed schedule checks passed. The deploy-sized 65536 slot started on GPU1; all four 384-token streams and JSON messages matched the 32K-slot reference. Benchmark A/B against the original library, the KV locality trial and P5 restoration are pending.
 
+GPU1 ABBA (fixed n3, 3000 tokens) confirmed a speedup from scheduling neighboring verify rows on the same KV tile. Edit@16K was 241.7 / 255.0 / 257.4 / 241.3 tok/s (old / new / new / old), edit 268.3 / 272.3 / 273.0 / 265.2, with matching messages and token IDs. The CUDA change is in the build queue. Repeat both matrices into r4_final_3000 and r4_final_384 before deployment.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.

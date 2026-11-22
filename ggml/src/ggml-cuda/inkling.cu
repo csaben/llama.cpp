@@ -1549,7 +1549,7 @@ struct ik_attn_args {
     int   * counters;
     int     ext_scan; // the cells were scanned by inkling_attn_scan_kernel (parts 0 .. n_split - 2); this kernel adds the current cell
     int     dbg_skip; // timing experiments only (IK_ATTN_SKIP): 1 bias table, 2 attention loop, 4 Q/R phase
-    // multi-row (speculative window) launches: row r of the window is blockIdx.z of the MR kernel
+    // multi-row (speculative window) launches
     const int32_t * mr_kv_before;
     int     mr_rows;        // tokens of the window (1: the single-token kernel)
     int     mr_planes;      // rollback planes of the recurrent state written by the window (slot k: the state k tokens back)
@@ -2376,11 +2376,11 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     constexpr int U  = IK_A2_U;
     typedef ik_a2_raw<cache_t> raw_t;
 
-    // MR: the block serves row blockIdx.z of a window. Its K/V are in the caches already (inkling_attn_kv_rows_kernel,
+    // MR: each block serves one row of a window. Its K/V are in the caches already (inkling_attn_kv_rows_kernel,
     // with the cells of the earlier rows), so this kernel neither convolves nor stores nor touches the recurrent state.
     ik_attn_args args_m;
     if constexpr (MR) {
-        const int row = blockIdx.z;
+        const int row = blockIdx.x;
         args_m = args_in;
         args_m.proj    += (int64_t) row*args_in.proj_s1;
         args_m.kv_idxs += row;
@@ -2410,7 +2410,7 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
             }
             args_m.kv_per_split = (row_kv + args_m.n_split - 1)/args_m.n_split;
         }
-        if ((int) blockIdx.y >= args_m.n_split) {
+        if ((int) blockIdx.z >= args_m.n_split) {
             return;
         }
     }
@@ -2432,8 +2432,8 @@ static __global__ void __launch_bounds__(IK_A2_BLOCK, IK_A2_MIN_BLOCKS) inkling_
     }
     const ik_attn_args & args = MR || HAS_TAPS >= 0 ? args_m : args_in;
 
-    const int g     = blockIdx.x;
-    const int split = blockIdx.y;
+    const int g     = MR ? blockIdx.y : blockIdx.x;
+    const int split = MR ? blockIdx.z : blockIdx.y;
     const int tid   = threadIdx.x;
     const int lane  = tid % WARP_SIZE;
     const int warp  = tid / WARP_SIZE;
@@ -3382,7 +3382,8 @@ void ggml_cuda_op_inkling_attn(ggml_backend_cuda_context & ctx, ggml_tensor * ds
         // a window: the K/V of all rows first (their cache cells and the state planes), then a block set per row
         GGML_ASSERT(!ext && !v1 && n_rows <= 8 && a.n_head_kv*n_rows <= 64);
         const dim3 grid_kv(a.n_head_kv, 1, 1);
-        const dim3 grid_mr(a.n_head_kv, a.n_split, n_rows);
+        // Adjacent blocks read the same KV tile for different query rows.
+        const dim3 grid_mr(n_rows, a.n_head_kv, a.n_split);
         if (k_cache->type == GGML_TYPE_F16) {
             inkling_attn_kv_rows_kernel<half><<<grid_kv, 2*IK_ATTN_HD, 0, stream>>>(a);
             if (q8) { inkling_attn2_launch<half, true, false, true>(a, grid_mr, stream); } else { inkling_attn2_launch<half, false, false, true>(a, grid_mr, stream); }
