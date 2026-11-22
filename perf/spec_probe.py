@@ -9,6 +9,7 @@
 # SPEC_REPS=n repeats each request (median rate; all n messages must be equal), SPEC_PROBS=1 also saves the tokens with
 # their top-3 log-probabilities as <label>.<kind>.probs.json, SPEC_CTX sets -c (default 32768).
 # SPEC_SERVER_LOG saves stderr from the server for CUDA timing or LLAMA_SPEC_PROF.
+# SPEC_PROMPTS_FILE adds a JSON object of named prompts. SPEC_SERVER_BIN selects a staged server binary.
 # SPEC_TOKEN_IDS=1 saves the emitted IDs even for requests that stop naturally (tool grammars require EOS).
 import glob, json, os, struct, subprocess, sys, time, urllib.request
 args = sys.argv[1:]
@@ -23,6 +24,10 @@ PROMPTS = [
     ("edit",  "Rewrite the following Python code so that every function and variable has type hints and the HTTP calls go through one helper function. Output the complete file, changing nothing else.\n\n```python\n" + SNIP + "\n```"),
     ("prose", "Write a 300-word story about a lighthouse keeper who finds a message in a bottle."),
 ]
+if os.environ.get("SPEC_PROMPTS_FILE"):
+    with open(os.environ["SPEC_PROMPTS_FILE"]) as source:
+        PROMPTS.extend(json.load(source).items())
+
 def post(path, body):
     request = urllib.request.Request(URL + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
     try:
@@ -31,7 +36,7 @@ def post(path, body):
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"{path}: HTTP {error.code}: {error.read().decode(errors='replace')}") from error
 M = os.path.expanduser(os.environ["MODEL"])
-cmd = [os.path.join(ROOT, "build/bin/llama-server"), "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", os.environ.get("SPEC_CTX", "32768"),
+cmd = [os.environ.get("SPEC_SERVER_BIN", os.path.join(ROOT, "build/bin/llama-server")), "-m", M, "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-c", os.environ.get("SPEC_CTX", "32768"),
        "-np", "1", "--port", "8041", "--host", "127.0.0.1"] + extra
 with open(os.environ.get("SPEC_SERVER_LOG", os.devnull), "wb") as log:
     proc = subprocess.Popen(cmd, env=dict(os.environ, CUDA_VISIBLE_DEVICES=os.environ.get("GPU", "1")), stdout=subprocess.DEVNULL, stderr=log)
