@@ -1,0 +1,3 @@
+model-only     edit      prompt   1025   384 tok   338.4 tok/s    1115 chars  accepted/proposed 299/328  runs 331/334/338/339/340
+model-only     prose     prompt     36   384 tok   176.2 tok/s    1474 chars  accepted/proposed 172/623  runs 176/176/176/201/222
+model-only     agent     prompt   2025   384 tok   276.1 tok/s    1284 chars  accepted/proposed 234/289  runs 268/270/276/276/284
