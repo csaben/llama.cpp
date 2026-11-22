@@ -1,0 +1,6 @@
+ik_mix_down                           46.0    6.683   307.430
+loop_ctrl_down_f32                     2.0    4.688     9.377
+mode=-1 exact
+ik_mix_down                           46.0    7.058   324.670
+loop_ctrl_down_f32                     2.0    4.712     9.423
+mode=-2 exact

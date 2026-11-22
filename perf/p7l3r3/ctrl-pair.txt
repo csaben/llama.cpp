@@ -1,0 +1,4 @@
+ik_ctrl_pair                          48.0    7.082   339.924
+preload_mode=1 exact
+ik_ctrl_pair                          48.0    7.397   355.067
+preload_mode=2 exact
