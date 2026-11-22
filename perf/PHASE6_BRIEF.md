@@ -169,3 +169,32 @@ step, i.e. ~13.8 ms per step, of which a 3-row window is ~9.7 ms; the rest is dr
 
 Re-run the measurement table (plain, DSpark n=2/3/4 with and without the policy, four prompts, greedy equality) and
 add a "Round 3" subsection to RESULTS.md. Same rules, stop signal and finishing (`bash perf/live/restore-p5.sh`).
+
+## Round 4 (after tag `p6-r3-final-edit-304tok`): an exactness bug in long replies, and honest long-reply numbers
+
+The orchestrator re-checked round 3 and found two problems:
+
+1. **The greedy-equality checks of rounds 1–3 compared empty strings.** `perf/spec_probe.py` saves
+   `message.content`, but Inkling puts the whole 384-token reply in `message.reasoning_content` (it reasons first), so
+   every saved reply file in `perf/p6/{final_spec,r2_spec,r3_spec}` is 0 bytes. Fix the probe to save the full message
+   (all string fields). Re-checked at 384 tokens with the full message: code/edit/prose identical (so the short
+   claims hold).
+2. **Drafted output diverges from plain in long replies.** `perf/p6/r4_repro/eq.py` (fresh server per config, full
+   message saved as JSON; env `EQ=<dir> MAXT=3000 KINDS=edit,code`, run with the live env plus `IK_MR=1 IK_MMA=3`;
+   label `plain-mr`, then label `n3` with `LLAMA_DSPARK_ADAPTIVE=1` and `--spec-type draft-dspark --spec-draft-model
+   ~/models/inkling-2-mini/dspark-Inkling-2-Mini-Q8_0-fold-short32k.gguf --spec-draft-n-max 3 --spec-draft-p-min 0`):
+   the **edit** prompt's reasoning differs from char 4,843 on (about 1,100 generated tokens after a ~1,040-token
+   prompt, i.e. near cache position ~2,100–2,200); **code** stayed identical for all 3,000 tokens. Saved outputs:
+   `perf/p6/r4_repro/{plain-mr,n3}.{edit,code}.json`. Suspects: the 1,024-cell SWA ring wrapping a second time
+   during a window or a rollback; a 256-cell pad boundary of the full-attention cache at n_kv > 2,048 (mr_check only
+   went to prefixes 1,500 in rounds 2–3); the policy's plain-step/deferred-feature-injection transition; shape-keyed
+   graph reuse. Find the exact first differing token, reproduce it in `mr_check` (extend it to prefixes 2,000–4,500,
+   windows straddling SWA wraps, and alternating plain/window steps as the policy does), fix it, and prove 0 differing
+   rows.
+3. **Long-reply speed is lower than the 384-token headline:** with 3,000-token replies (all reasoning), DSpark n=3 +
+   policy = 256.1 tok/s on edit (plain 197.5) and 242.6 on code (plain 202.1). Make **MAXT=3000 full-message runs the
+   standard measurement** (equality + tok/s) for code, edit, prose and edit@16K, in addition to the 384-token table.
+
+Goal of round 4: the exactness bug fixed with proof (byte-identical full messages for all four prompts at 3,000
+tokens, n=2/3/4, with and without the policy), then push long-reply speed (shared K/V scan across window rows,
+remaining host round trips, policy tuning for long replies). Same rules, stop signal and finishing.
