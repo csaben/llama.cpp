@@ -1,6 +1,6 @@
 # Phase 7 GPU0 plain decode
 
-[Round 2 results and streaming-floor measurements](#round-2-on-gpu0)
+[Round 3 dependency measurements and results](#round-3-on-gpu0) | [Round 2 streaming floor](#round-2-on-gpu0)
 
 ## Plain single-token decode
 
@@ -225,3 +225,43 @@ LD_LIBRARY_PATH="$probe_bin" GGML_CUDA_DISABLE_GRAPHS=1 IK_DENSE_VISIT=0 IK_EXPE
 ```
 
 At `p7l3r2-late-gate-221tok`, mode 5 selects the single-launch late gate and mode 7 selects the staged short-cache schedule. Set `IK_DENSE_PREFETCH=0` and `IK_DENSE_GATE_BLOCKS=12` for the tuned short benchmark. At `p7l3r2-resident-router-tuning`, modes 18/19 select shared-memory staging or direct L2 prefetch for a resident visit through routing, and mode 22 reuses the dense workers with a two-block residency budget. At `p7l3r2-exact-expert-tail`, `IK_EXPERT_TAIL=2` selects the native-weight four-row tile and `IK_Q2_PACK=1 IK_EXPERT_TAIL=8` selects its lossless packed variant. The selected implementation uses `0` to disable the optimization and `1` to request it explicitly. [Short-context sweep](p7l3r2/stage-screen.txt), [resident sweep](p7l3r2/resident-router-tune.txt), [expert sweep](p7l3r2/expert-layout-screen.txt)
+
+## Round 3 on GPU0
+
+### Cost of a dependency
+
+At 82 blocks on the RTX 3090, one point-to-point handoff took 0.352 us, 47% less than an empty CUDA graph edge. A cooperative grid barrier took 0.651 us. A single producer waking every block and waiting for acknowledgements took 0.817 us. For four dependencies per visit across 48 visits, replacing graph edges with ideal point-to-point handoffs would save 0.061 ms/token. Round 2 needed 1.150 ms/token to reach 300 tok/s. The scope of the dependency matters when projecting that saving onto decode. [Microbenchmark](p7l3r3/dependency.cu), [raw event times](p7l3r3/dependency.txt), [Round 2 rates](p7l3r2/default.txt)
+
+| Dependent work | 2 blocks, us/edge | 16 blocks | 82 blocks | 192 edges at 82 blocks, ms |
+|---|---:|---:|---:|---:|
+| Empty kernels in one graph | 0.636 | 0.597 | 0.668 | 0.128 |
+| Cooperative grid barrier | 0.663 | 0.652 | 0.651 | 0.125 |
+| Release/acquire to the next block | 0.385 | 0.358 | 0.352 | 0.068 |
+| One block publishes to all others, with acknowledgement | 0.739 | 0.798 | 0.817 | 0.157 |
+
+Each graph has N+1 empty kernels and N edges. Each resident launch performs N handoffs. GPU events time 16 replays per sample, with seven samples per chain length and N = 32, 128, 512, 1024. Slopes use the 1024-minus-128 median divided by 896. This subtracts fixed launch and counter-reset work. The ring checks its final sequence number, and broadcast checks the total acknowledgements. All tests used 128-thread blocks. Release/acquire has device scope. The broadcast timing includes consumption by every worker before the next publication. [Implementation and final-state checks](p7l3r3/dependency.cu), [CUDA 12.8 cooperative groups and graphs](https://docs.nvidia.com/cuda/archive/12.8.0/cuda-c-programming-guide/index.html), [PTX memory model](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#memory-consistency-model)
+
+### What the decoder actually pays
+
+Across 119 warmed head-to-head intervals, the top three within-token boundaries by aggregate signed idle time were router to Q2_K gate/up (42 calls, 5.688 us/token), residual mix to controller down (48, 3.958 us), and controller down to apply (48, 3.849 us). The respective mean gap per visit was 0.135, 0.082 and 0.080 us. An empty-node slope includes dispatch and block execution. Subtracting the end of one active kernel from the start of the next measures a different interval. Nsight node timestamps even overlap slightly for some serial pairs. The 332 us softcap-to-next-input gap crosses the host decode boundary. [Ranked edges and kernel durations](p7l3r3/control-edges.txt), [trace analysis](p7l3r3/edges.py)
+
+Router work cost 350 us/token, residual mixes 285, controller-down 198, apply 147, expert sum/state update 98, separate RMS/packing 93 and SITU 89. Q2 gate/up itself averaged 19.442 us on the 42 directly adjacent router edges. Each experiment below timed useful work from the first producer's start through the last consumer's finish. Rows with different coverage use their own matched graph control. [Kernel and edge inventory](p7l3r3/control-edges.txt), [matched FFN spans](p7l3r3/matched-ffn.txt), [controller spans](p7l3r3/controller-trace.txt)
+
+| Experiment | Matched visits/token | Graph, us/visit | Best experiment, us/visit | Local source tag |
+|---|---:|---:|---:|---|
+| Router and routed gate/up in one resident grid | 42 | 26.703 | 30.921 | `p7l3r3-resident-route` |
+| Mix and controller down, including two fallback calls | 48 | 7.693 | 6.742 | `p7l3r3-ctrl-pair` |
+| Controller down and apply | 48 | 7.272 | 7.082 | `p7l3r3-ctrl-pair` |
+| Router through FFN state update | 42 | 40.585 | 62.171 | `p7l3r3-full-ffn` |
+| Attention input projection through FFN state update | 19 | 71.734 | 96.101 | `p7l3r3-complete-layer` |
+| Controller apply plus RMS/Q8 packing | 24 | 7.680 | 7.130 | `p7l3r3-apply-pack` |
+
+The router/up kernel uses the 16-row Q2_K dot from the production-rounded Round 2 floor, the live normalized Q8 input and the router's actual top-eight experts. The FFN extension releases activation tiles per expert after SITU, then releases each 32-channel output tile after all eight contributions arrive. It performs the convolution and state writes in the same launch. These kernels matched all 64 vocabulary rows at each of the three tested residency settings. Two visits have a message operation between router and gate/up. Four use IQ4_NL experts. [Bit-exact floor](p7l3r2/bitwise-floor.txt), [router/up](p7l3r3/route-visit.txt), [full FFN](p7l3r3/full-visit.txt), [matched comparisons](p7l3r3/matched-ffn.txt)
+
+The complete short-cache visit runs the per-KV-head projection instruction list, cache update and attention, output projection and recurrent convolution, router, gate/up, SITU, down and recurrent FFN update. It replaced eight graph nodes at each of 19 direct visits. It matched the 64 reference rows. The complete kernel used 128 registers/thread and actually launched 160 blocks of 256 threads at the higher requested residency. The graph could launch a separately sized grid for each stage. Higher requested residency left the complete visit at 96.10 us. Its 24.37 us loss per visit failed the brief's gate for scaling this design to a token. The Round 2 floor supplies known inputs and routes up front, so its 2.775 ms cannot serve as a live decode time. [Layer traces](p7l3r3/layer.txt), [matched spans](p7l3r3/layer-and-pass.txt), [registers and launch geometry](p7l3r3/resources.txt), [Hazy Research persistent decoder](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles)
+
+The winning mixed-state down dot recomputes the 2304-channel state mix in shared memory in each two-rank controller block. One block writes each mixed column for later users. The isolated fused calls took 6.683 us across 46 sites. Reading the message half early raised this to 7.058 us. Fusing down with apply saved less and competes for the same down operation. The apply/pack kernel instead retains 32-channel groups while 32 blocks exchange their RMS partials, then writes Q8_1 directly. The selected 256-thread version took 7.131 us. A separate router sweep loaded four expert rows in registers and formed channel products during normalization. It took 7.057 us versus 7.269 with eight shared rows. Reducing only the shared-memory tile width lost. [Mix/down](p7l3r3/mix-down.txt), [down/apply](p7l3r3/ctrl-pair.txt), [apply/pack](p7l3r3/apply-pack.txt), [shared-row sweep](p7l3r3/router-tiles.txt), [register-row sweep](p7l3r3/reg-router.txt)
+
+Real graph branches split the independent message half from the state half of the controller dot. Moving the fork from the mix to the preceding projection/FFN sum, then before attention, gave 3.071, 3.468 and 4.862 us of concurrent work per matched controller. The earliest fork had the most overlap and ran at 222.80 tok/s, below the 224.14 tok/s mix-local fork. Another schedule batched message halves from a complete pass into a 64-by-48 grid, twice per token. The side stream ran about 19.51 us per pass, with 4.21 us of measured overlap. Both exact pass schedules ran near 221 tok/s. Combining those prepared terms with the mixed-state down dot changed the logits with graphs both enabled and disabled. The default excludes that variant. [Branch screens](p7l3r3/branches.txt), [measured overlap](p7l3r3/controller-trace.txt), [pass timings](p7l3r3/layer-and-pass.txt), [pass screen](p7l3r3/pass-screen.txt)
+
+A further 20 projection/attention schedules let the last projection tile for each KV head continue directly into attention. The fastest took 26.059 us against about 23.24 us for the two graph kernels. The exact FFN state-update-to-residual-mix experiment took 6.426-8.324 us per fused call at 46 sites, depending on the residence and tile schedule. These stages and the cross-pass branches remain reproducible at their experiment tags. [Dense continuation sweep](p7l3r3/drain.txt), [control](p7l3r3/control-edges.txt), [FFN sum/mix](p7l3r3/tail-mix.txt)
