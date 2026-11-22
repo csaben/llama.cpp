@@ -112,3 +112,5 @@ GPU 0 ran B / C / C / B at the same batch 2,048 and microbatch 512. Each process
 | 32K | 2,437 | 2,719 | +11.6% | 14.630 s | 13.071 s | -10.7% |
 
 The 16K profile saved 562 ms in Q2_K experts, 30 ms in Q2_0 experts and 141 ms in relative bias. Dense IQ4 MMQ and FlashAttention were within 2% of the original kernel times. [Nsight category totals](p8bc/prefill/kernels.tsv).
+
+The final CUDA build passed 3,779 matrix and routed-matrix cases plus 13 relative-bias cases. These include dedicated ragged 257-row routed matrices and a 129-token, 1,025-key bias test. All 216 captured full-vocabulary FP32 rows matched B byte for byte, including interleaved sequences and prefixes through 32K. In a further 728 kept target rows at four depths, mixed-width decode reproduced single-token decode with maximum logit difference zero. [Operation and window results](p8bc/prefill/checks.txt), [FP32 capture hashes](p8bc/prefill/logits.tsv), [capture driver](p7l3/logits.cpp), [width and rollback driver](p6/mr_check.cpp).
