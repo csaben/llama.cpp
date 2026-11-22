@@ -129,7 +129,7 @@ One resident kernel evaluated the **193 quantized matvecs in 2.692 ms**. A CUDA 
 
 | Schedule on the captured weights | Median ms/token | Logical weight GB/s |
 |---|---:|---:|
-| Single resident kernel, real quantized dots | 2.692 | 745.5 |
+| Single resident kernel, real quantized dots | 2.692 | 745.45 |
 | Production matvecs in a 193-node graph, before/after | 2.871 / 2.892 | 698.9 / 693.9 |
 | Same row-dot implementation as the resident kernel, 193-node graph | 3.527 | 568.9 |
 | Single resident kernel, volatile reads | 2.340 | 857.4 |
@@ -176,6 +176,47 @@ Both builds ran the requested tg128 benchmark at all four depths with three repe
 | 16,384 | 186.12 +/- 2.37 | **192.76 +/- 2.84** | +3.57% |
 | 32,768 | 170.05 +/- 0.91 | **176.94 +/- 2.25** | +4.05% |
 
+**Same-binary paired result.** At each depth four independent processes ran off/on/on/off with three repetitions each and a start temperature of 63 C. Off retains the Round 1 projection/conv fold. The table averages the two process means per condition and isolates the incremental Round 2 gain. [All sixteen runs](p7l3r2/paired.txt)
+
+| Depth | Round 1 path, tok/s | Round 2 path, tok/s | Gain |
+|---:|---:|---:|---:|
+| 0 | 218.675 | 222.455 | +1.73% |
+| 4,096 | 200.550 | 205.535 | +2.49% |
+| 16,384 | 188.795 | 192.305 | +1.86% |
+| 32,768 | 174.115 | 178.015 | +2.24% |
+
 The selected implementation overlaps gate projection and attention, then uses the existing WO/shortconv kernel. The CUDA graph allocator keeps the Q8 input live until attention finishes. It reuses the real projection allocation for the compact scan inputs and uses the normal attention output buffer. At depth zero the 48 dense intervals averaged 30.143 us each against 31.803 us with the optimization off. At 4K all 48 visits used the long-cache warp schedule and averaged 39.112 us against 41.255 us for the graph. The real depth-zero token took 4.495 ms in llama-bench, 1.162 ms over target. In the selected Nsight trace, just the router, residual mixes and two controller kernels occupied 0.976 ms per token. This already exceeds the 0.558 ms left by the bitwise dot floor. Approaching 300 tok/s requires substantially more useful overlap than the measured launch savings. [Selected implementation](../ggml/src/ggml-cuda/inkling-visit.cuh), [allocator and graph matching](../ggml/src/ggml-cuda/ggml-cuda.cu), [all kernels](p7l3r2/selected-kernels.txt), [4K intervals](p7l3r2/selected-long.txt), [paired visit traces off](p7l3r2/selected-trace-0.txt) and [on](p7l3r2/selected-trace-1.txt)
 
 Both the exact baseline and candidate measured prefill PPL **3.0530** on 8 x 2048 and decode-path PPL **4.1979** on 2 x 1024 with `-ub 1`. All 88 teacher-forced logit rows matched byte-for-byte across the full 200,058-token vocabulary. The comparison covered 64 successive tokens after prefix 200 and eight after each prefix of 4096, 16384 and 32768 tokens. Prefix fill is batched, with the corpus token sequence repeated when needed. [Perplexity logs](p7l3r2/ppl.txt), [full-vocabulary hashes](p7l3r2/logits.txt), [driver](p7l3/logits.cpp)
+
+The DSpark checks compared 2,834 output rows across 12 runs, including the 1,699-row recorded trace, mixed step sizes, rollbacks, and the alternate attention control. Every comparison had maximum absolute logit difference zero. CUDA0 passed all 3,988 supported cases in the selected operator groups, including state-output fixtures for the short convolutions and expert sum. The final source enables the gate overlap automatically on the measured 82-SM GA10x shape. Set `IK_DENSE_VISIT=0` to restore the Round 1 path. Other GA10x sizes can opt in with `1`. The MR path retains its own schedule. [DSpark comparisons](p7l3r2/mr.txt), [CUDA operator groups](p7l3r2/ops.txt), [single-token graph conditions](../ggml/src/ggml-cuda/ggml-cuda.cu)
+
+### Reproduction
+
+Run from this worktree. The model is the 9,938,847,648-byte `Inkling-2-Mini-experimental-Q2K-Q2_0-fit.gguf`, SHA-256 `bc7f51192fbc35eeb5eaec6a342028b8588691023a2399d97c29eb633a049d07`. The corpus hash is `af0be9d6d59418b9f4d599aebe17b69c55ae06bbf90b8650f6b288396d90d0be`. The paired comparison uses the same selected binary with `IK_DENSE_VISIT=0` and `1`. The experiments preserve the original prefill and multi-row paths. [Model environment](p5env.sh), [corpus](ppl.txt), [validation driver](p7l3r2/validate.sh)
+
+```bash
+. perf/p5env.sh
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0
+export LD_LIBRARY_PATH="$PWD/build/bin"
+IK_DENSE_VISIT=1 build/bin/llama-bench -m "$Q2" -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -p 0 -n 128 -d 0,4096,16384,32768 -r 3
+```
+
+To rebuild the exact reference locally, extract `git archive 16264c6` into `build/p7l3r2/baseline-16264c6/src` and run the commands below. The validation driver's four entry points are `bench`, `quality`, `mr` and `ops`. It sets the device mask before starting CUDA programs. Full profiler databases are in `build/p7l3`, full verification logs in `build/p7l3r2`, and the small summaries in `perf/p7l3r2`. [DSpark fixtures](p6/r4_checks.sh), [backend fixtures](../tests/test-backend-ops.cpp), [Nsight Systems](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)
+
+```bash
+base=build/p7l3r2/baseline-16264c6
+mkdir -p "$base/src"
+git archive 16264c6 | tar -x -C "$base/src"
+cmake -S "$base/src" -B "$base/obj" -DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER="$HOME/opt/cuda-12.8/bin/nvcc" -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_UI=OFF -DLLAMA_BUILD_MTMD=OFF -DLLAMA_BUILD_NUMBER=0 -DLLAMA_BUILD_COMMIT=16264c6
+cmake --build "$base/obj" --target llama-bench llama-perplexity -j 8
+```
+
+To reproduce the floor, extract `p7l3r2-bitwise-floor` in place of the baseline tag into a separate directory under `build/p7l3r2`. Configure its own Release sm_86 build as above and build target `llama`. Set `probe_bin` to that build's absolute `bin` directory and run the following commands. `IK_FLOOR_STEP=12` or `48` captures a different real token. The original fastest tiled floor is at `p7l3r2-floor-371iter` with the same driver and `IK_TOKEN_FLOOR=1`. The native decoder must execute while routes are captured, so leave `IK_DENSE_VISIT` and `IK_EXPERT_TAIL` off for this replay. [Floor code](p7l3r2/floor.cuh), [geometry and timing](p7l3r2/floor-sweep.txt), [bitwise control](p7l3r2/bitwise-floor.txt)
+
+```bash
+g++ -O2 -std=c++17 -Wno-deprecated-declarations perf/p7l3/logits.cpp -Iinclude -Iggml/include -L"$probe_bin" -lllama -lggml -lggml-base -o build/p7l3r2/logits-probe
+LD_LIBRARY_PATH="$probe_bin" GGML_CUDA_DISABLE_GRAPHS=1 IK_DENSE_VISIT=0 IK_EXPERT_TAIL=0 IK_TOKEN_FLOOR=1 IK_FLOOR_EXACT=1 build/p7l3r2/logits-probe "$Q2" perf/ppl.txt >/dev/null
+```
+
+At `p7l3r2-late-gate-221tok`, mode 5 selects the single-launch late gate and mode 7 selects the staged short-cache schedule. Set `IK_DENSE_PREFETCH=0` and `IK_DENSE_GATE_BLOCKS=12` for the tuned short benchmark. At `p7l3r2-resident-router-tuning`, modes 18/19 select shared-memory staging or direct L2 prefetch for a resident visit through routing, and mode 22 reuses the dense workers with a two-block residency budget. At `p7l3r2-exact-expert-tail`, `IK_EXPERT_TAIL=2` selects the native-weight four-row tile and `IK_Q2_PACK=1 IK_EXPERT_TAIL=8` selects its lossless packed variant. The selected source tag uses `IK_DENSE_VISIT` as a boolean. [Short-context sweep](p7l3r2/stage-screen.txt), [resident sweep](p7l3r2/resident-router-tune.txt), [expert sweep](p7l3r2/expert-layout-screen.txt)

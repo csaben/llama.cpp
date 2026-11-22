@@ -79,8 +79,9 @@ case "$1" in
         ;;
     ops)
         export IK_DENSE_VISIT=1
-        for ops in MUL_MAT,MUL_MAT_ID INKLING_ATTN,INKLING_ROUTER,SHORTCONV_RES,RES_MIX,LOOP_CTRL_DOWN,LOOP_CTRL_APPLY INKLING_MOE_SUM_CONV SITU CONCAT; do
+        for ops in MUL_MAT,MUL_MAT_ID INKLING_ATTN,INKLING_ROUTER,SHORTCONV_RES,RES_MIX,LOOP_CTRL_DOWN,LOOP_CTRL_APPLY SITU CONCAT; do
             args=()
+            # The expert sum and shortconv fixtures concatenate the state and output.
             if [[ $ops == CONCAT ]]; then args=(-p 'n_slots=|n_used='); fi
             build/bin/test-backend-ops test -b CUDA0 -o "$ops" "${args[@]}" >"$work/ops-$ops.log" 2>&1
             echo "$ops"

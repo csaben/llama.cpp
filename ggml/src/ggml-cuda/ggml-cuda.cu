@@ -4600,13 +4600,18 @@ static int ik_projection_conv_end(ggml_backend_cuda_context & ctx, const ggml_cg
 }
 
 static int ik_attention_projection_end(ggml_backend_cuda_context & ctx, const ggml_cgraph * graph, int i) {
-    static const bool enabled = ggml_cuda_env_flag("IK_DENSE_VISIT") && !ggml_cuda_env_flag("IK_MR");
+    static const int mode = ggml_cuda_env_int("IK_DENSE_VISIT", -1);
+    static const bool mr = ggml_cuda_env_flag("IK_MR");
     const ggml_tensor * mm = graph->nodes[i];
-    if (!enabled || mm->op != GGML_OP_MUL_MAT || mm->type != GGML_TYPE_F32 || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
+    if (mode == 0 || mr || mm->op != GGML_OP_MUL_MAT || mm->type != GGML_TYPE_F32 || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
             mm->src[0]->type != GGML_TYPE_IQ4_NL || mm->src[0]->ne[0] != 2304 || !ggml_is_matrix(mm->src[0]) ||
             !ggml_is_contiguous(mm->src[0]) || mm->src[1]->type != GGML_TYPE_Q8_1 || !ggml_is_contiguous(mm->src[1]) ||
             !ggml_is_matrix(mm) || (mm->ne[1] != 1 && mm->ne[1] != 3) || !ggml_is_contiguous(mm) ||
-            ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X || !ggml_node_has_n_uses(graph, i, 1)) {
+            (mm->ne[0] != 8600 && mm->ne[0] != 8664) || !ggml_node_has_n_uses(graph, i, 1)) {
+        return i;
+    }
+    const auto & dev = ggml_cuda_info().devices[ctx.device];
+    if (dev.cc != GGML_CUDA_CC_AMPERE_GA10X || (mode < 0 && dev.nsm != 82)) {
         return i;
     }
     int j = i + 1;
@@ -4614,7 +4619,7 @@ static int ik_attention_projection_end(ggml_backend_cuda_context & ctx, const gg
     if (j == graph->n_nodes) { return i; }
     const ggml_tensor * attn = graph->nodes[j];
     return attn->op == GGML_OP_INKLING_ATTN && attn->src[0] == mm && attn->type == GGML_TYPE_Q8_1 &&
-           ggml_is_vector(attn) && ggml_is_contiguous(attn) && (attn->flags & GGML_TENSOR_FLAG_COMPUTE) ? j : i;
+           attn->ne[0] == 3072 && ggml_is_vector(attn) && ggml_is_contiguous(attn) && (attn->flags & GGML_TENSOR_FLAG_COMPUTE) ? j : i;
 }
 
 // try and fuse nodes and return the number of nodes to skip
