@@ -1,0 +1,4 @@
+plain-mr       code      prompt     47  3000 tok   200.0 tok/s    9296 chars
+plain-mr       edit      prompt   1025  3000 tok   196.1 tok/s    9009 chars
+plain-mr       prose     prompt     36  3000 tok   200.0 tok/s   10905 chars
+plain-mr       edit@16K  prompt  16044  3000 tok   182.3 tok/s    4508 chars

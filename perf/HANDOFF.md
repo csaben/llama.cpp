@@ -14,6 +14,8 @@ The fixed-length harness also collects the accepted token IDs through the server
 
 At inference commit `06d9abb` all 24 fixed-length full messages matched plain-mr. The follow-up raw-ID check has also passed for all four prompts at n2, n4 and all three adaptive widths. A fresh n3 server is collecting the final four raw token arrays. The 384-token table, quality checks and 64K slot smoke are queued on GPU1. The trial attention block ordering binary is outside the build tree, under `/tmp/r4-row-local`.
 
+Long proof complete: 24/24 messages and 72,000/72,000 emitted token IDs match the same-flags non-drafting server. Fixed n3 gives 244.7 / 267.0 / 225.5 / 240.0 tok/s against 200.0 / 196.1 / 200.0 / 182.3 in code / edit / prose / edit@16K. `perf/p6/r4_3000/equality.txt` and the per-request JSON and little-endian int32 IDs are the evidence. Short median-of-three sweep and quality checks still in flight.
+
 ## Round 3 status (2026-11-21, finished; numbers at `1c46feb`)
 
 Brief: "Round 3" at the end of `perf/PHASE6_BRIEF.md`. Full write-up: RESULTS.md "Round 3". Raw outputs: `perf/p6/r3_*`.
