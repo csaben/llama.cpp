@@ -1494,6 +1494,7 @@ static void loop_ctrl_apply2_launch(ggml_backend_cuda_context & ctx, const float
 
 // Four rank-64 output rows per warp. Each eight-lane group loads two
 // contiguous four-element vectors per lane, keeping the full-warp sum order.
+template<bool compact = false>
 static __device__ __forceinline__ float ik_ctrl_apply_channel(const float * cur, const float * msg, const float * d,
         const half * wg, const half * wf, int n, size_t cur_stride, size_t msg_stride, int i, int b) {
     const int lane = threadIdx.x % 8;
@@ -1508,10 +1509,26 @@ static __device__ __forceinline__ float ik_ctrl_apply_channel(const float * cur,
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
         const float a = ((const float *) &d0)[j], z = ((const float *) &d1)[j];
-        gv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *) &g1)[j]), z,
-                __fmul_rn(__half2float(((const half *) &g0)[j]), a)));
-        fv[j] = warp_reduce_sum<8>(__fmaf_rn(__half2float(((const half *) &f1)[j]), z,
-                __fmul_rn(__half2float(((const half *) &f0)[j]), a)));
+        gv[j] = __fmaf_rn(__half2float(((const half *) &g1)[j]), z,
+                __fmul_rn(__half2float(((const half *) &g0)[j]), a));
+        fv[j] = __fmaf_rn(__half2float(((const half *) &f1)[j]), z,
+                __fmul_rn(__half2float(((const half *) &f0)[j]), a));
+        if constexpr (!compact) {
+            gv[j] = warp_reduce_sum<8>(gv[j]);
+            fv[j] = warp_reduce_sum<8>(fv[j]);
+        }
+    }
+    if constexpr (compact) {
+        float v[8] = {gv[0], gv[1], gv[2], gv[3], fv[0], fv[1], fv[2], fv[3]};
+        float part = ik_reduce_moments<8,4>(v, lane);
+        part += __shfl_xor_sync(0xffffffffu, part, 2);
+        part += __shfl_xor_sync(0xffffffffu, part, 4);
+        const float f = __shfl_xor_sync(0xffffffffu, part, 1);
+        if (lane == 0) {
+            const float c = cur[b*cur_stride+i], m = msg[b*msg_stride+i];
+            return (c-tanhf(f)*c) + tanhf(part)*m;
+        }
+        return 0.0f;
     }
     if (lane == 0) {
         const float c = cur[b*cur_stride+i], m = msg[b*msg_stride+i];
@@ -1564,18 +1581,19 @@ static __global__ void ik_ctrl_apply8_rows(const float * cur, const float * msg,
     }
 }
 
-static __global__ void __launch_bounds__(256) ik_ctrl_apply_pack(const float * cur, const float * msg, const float * d,
+template<int threads = 256, bool compact = false>
+static __global__ void __launch_bounds__(threads) ik_ctrl_apply_pack(const float * cur, const float * msg, const float * d,
         const half * wg, const half * wf, size_t cur_stride, size_t msg_stride, const float * nw, size_t nw_stride,
         block_q8_1 * out, float * partial, float eps) {
     const int b = blockIdx.y, tile = blockIdx.x, t = threadIdx.x;
     __shared__ float y[3][32];
 #pragma unroll
-    for (int j = 0; j < 3; ++j) {
-        const int c = j*1024 + tile*32 + t/8;
+    for (int j = t/256; j < 3; j += threads/256) {
+        const int c = j*1024 + tile*32 + (t%256)/8;
         if (c < 2304) {
-            const float value = ik_ctrl_apply_channel(cur, msg, d, wg, wf, 2304, cur_stride, msg_stride, c, b);
+            const float value = ik_ctrl_apply_channel<compact>(cur, msg, d, wg, wf, 2304, cur_stride, msg_stride, c, b);
             if (t%8 == 0) {
-                y[j][t/8] = value;
+                y[j][(t%256)/8] = value;
             }
         }
     }
@@ -1634,8 +1652,13 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
         for (const ggml_tensor * input : {cur, msg, d, wg, wf, nw}) {
             aliases_input |= ik_storage_overlaps(input, dst);
         }
+        static const int mode = getenv("IK_APPLY_TILES") ? atoi(getenv("IK_APPLY_TILES")) : 0;
+        const int threads = mode >= 4 ? 768 : mode >= 2 ? 512 : 256;
+        const auto kernel = threads == 768 ? (mode%2 ? ik_ctrl_apply_pack<768,true> : ik_ctrl_apply_pack<768,false>) :
+                            threads == 512 ? (mode%2 ? ik_ctrl_apply_pack<512,true> : ik_ctrl_apply_pack<512,false>) :
+                                             (mode%2 ? ik_ctrl_apply_pack<256,true> : ik_ctrl_apply_pack<256,false>);
         int resident;
-        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, ik_ctrl_apply_pack, 256, 0));
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&resident, kernel, threads, 0));
         if (!aliases_input && resident*82 >= 32*B) {
             ggml_cuda_pool_alloc<float> partial(ctx.pool(), 32*B);
             float * sums = partial.get();
@@ -1645,7 +1668,7 @@ void ggml_cuda_op_loop_ctrl_apply(ggml_backend_cuda_context & ctx, ggml_tensor *
             void * inputs[] = {cur->data, msg->data, d->data, wg->data, wf->data, nw->data};
             void * params[] = {&inputs[0], &inputs[1], &inputs[2], &inputs[3], &inputs[4],
                 &cur_stride, &msg_stride, &inputs[5], &nw_stride, &dst->data, &sums, &eps};
-            CUDA_CHECK(cudaLaunchCooperativeKernel((void *) ik_ctrl_apply_pack, dim3(32, B), 256, params, 0, ctx.stream()));
+            CUDA_CHECK(cudaLaunchCooperativeKernel((void *) kernel, dim3(32, B), threads, params, 0, ctx.stream()));
             return;
         }
     }
