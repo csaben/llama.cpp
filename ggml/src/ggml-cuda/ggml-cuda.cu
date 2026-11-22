@@ -2684,6 +2684,9 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     // a Q8_1 src1 is an activation quantized by its producer: only the quantized matvec kernel reads it
     if (src1->type == GGML_TYPE_Q8_1) {
         GGML_ASSERT(ggml_is_quantized(src0->type) && ne2 <= get_mmvq_mmid_max_batch(src0->type, cc));
+        if (ggml_cuda_inkling_q2_down(ctx, dst)) {
+            return;
+        }
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
         return;
     }
