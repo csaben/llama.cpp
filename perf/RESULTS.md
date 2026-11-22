@@ -1153,3 +1153,47 @@ systemd-run --user --unit=inkling-3090-experiment --working-directory=$HOME/llam
 
 This command was not run at 64K context in this phase (the measurements used a 32K slot). Back to phase 5:
 `systemctl --user stop inkling-3090-experiment && bash perf/live/restore-p5.sh`.
+
+# Phase 7 (levers 1-2)
+
+### Changes and ablations
+
+The target saves the four extracted feature rows on its device, and the drafter gathers the projected row at the accepted anchor. That row can precede the last proposed row after a rejection. The drafter queues both a small host copy of its picks and device IDs for the target embedding lookup. Target verification can then start before the host knows the candidates. The mask embedding and target token table are GPU-resident. The target fence publishes the generation number of the draft readback it completed, so sampling and draft readback can both use that fence. The target sampler still owns the emitted tokens. The server updates prompt history and the sequence rollback boundary from the verified prefix. Multi-sequence, checkpoint-replay and unsupported state layouts use the ordinary path.
+
+Each cached width has its own scheduler, tensor arena and CUDA graph addresses. The input uploader takes a bounded pinned snapshot of CPU tensors before the producer can overwrite them. Uploads and their consumers share the device stream. After a fence, the contexts can reuse the pinned storage of their cached schedulers. The cached-width policy learns the cost between consecutive rounds. It uses recent acceptance at each draft position because the current margins arrive after the next verify graph is submitted. Its short-context priors for plain and verify widths 1..5 are 1.00, 1.20, 1.67, 1.99, 2.35 and 2.87 plain steps. Switching between cached widths carries no graph-rebuild penalty.
+
+| Trial | Inference commit | Short edit, fixed n3 (median tok/s) |
+|---|---|---:|
+| Round 4 published | `399b61a` | 308.4 |
+| Control in the first feature trial | `399b61a` inference, `c1e2288` workspace | 277.8 |
+| Device features and projected anchor | `99f3500` | 313.1 |
+| Device candidate IDs | `91d3a98` | 316.1 |
+| Cached graphs | `13f232b` | 316.2 |
+| Cached graphs and packed columns | `13f232b` | 317.8 |
+| Pinned inputs and packed columns | `61a1127` | 314.8 |
+| Same, single CUDA graph instead of 512-node chunks | `61a1127` | 320.4 |
+
+These are successive server measurements. The same-night control ran slower than the published Round 4 median. The small differences among the last four rows vary across repeats. Fixed n4 at `13f232b` accepted 2,245 long-edit drafts vs 2,113 for n3, but its extra verify row cut throughput from 284.5 to 273.3 tok/s. At 16K it fell from 271.6 to 260.2. [Short captures](p7/queue384/) and [long width sweep](p7/pick3000/).
+
+### Shared attention
+
+The 16-cell MMA microstep uses the two FP16 limbs of each query as two columns. Four query rows for one head fill the eight columns. Full attention and sliding-window attention use each row's own relative bias, causal mask, excluded self-cell, temperature scale and output gate. A pad-boundary window whose earlier rows need a different reduction geometry falls back to the original scan for that group. The split order and F32 merge order agree with single-token decoding.
+
+| Prefix tokens | Separate rows, ms | One shared-memory tile, ms | Packed query columns, ms |
+|---:|---:|---:|---:|
+| 1 | 8.96 | 9.26 | 9.32 |
+| 1,024 | 10.22 | | 10.33 |
+| 4,096 | 11.08 | 11.37 | 10.96 |
+| 16,384 | 11.47 | 11.69 | 11.40 |
+| 32,768 | 12.49 | 12.72 | 12.09 |
+
+These are four-row target windows with all logits read back. The first trial used one prefix token. The final paired sweep below also starts with an empty cache. The first two columns use `10c8f8c`, except the 1,024-row control at `0f4c67b`. The last column uses `4b8cb7b`. The separate-kernel version reads each K/V tile once for all query warps, but pays for an extra launch and intermediate global partials. Staging a whole split inside the fused kernel also lost at 1K and 16K. At 16K, staging two or four rows cost 11.86 or 12.03 ms against 11.48 ms without staging (`0f4c67b`). Every row in these three depth sweeps matched single-token logits bit for bit. [Raw sweeps](p7/trials/).
+
+At `8899fa9` we also packed the first four rows of a five-row window. Isolated target-window time at 32K went from 15.27 to 15.03 ms, with all 120 rows exact for each setting. Served fixed n4 fell from 271.0 to 263.4 tok/s on the long edit and from 260.2 to 256.9 at 16K. The release uses `IK_WINDOW_COLS=1`, which packs only four-row windows. [Five-row A/B](p7/wide/).
+
+### Sources
+
+- The scan extends the branch's two-limb implementation of Project Maya's warp-level tensor-core attention. Phase 7 changes which queries occupy the MMA columns and retains the existing MIT attribution. [Maya source](https://github.com/alesha-pro/maya-inkling-mini/blob/main/src/ik2/ik2_kernels.cu), [branch notices](../NOTICE.inkling), [NVIDIA PTX warp matrix instructions](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma).
+- ingine's device-ordered verify, accept, commit and draft sequence informed the stream handoff. Its attention processes multiple queries against cache cells. Phase 7 uses ggml device rows and CUDA stream events with the existing server transaction. No ingine source was copied for Phase 7. [Apache-2.0 round implementation](https://github.com/satellitedown/inkling-2-mini-abliterated-ingine/blob/306eaa8a90c9840f042a59d565f6dc4536bbb5ea/native/src/model/spec.cpp#L181-L201), [attention](https://github.com/satellitedown/inkling-2-mini-abliterated-ingine/blob/306eaa8a90c9840f042a59d565f6dc4536bbb5ea/native/src/kernels/attn/attn.cu).
+- basalt's graph cache by shape and selection of the window by expected accepted tokens per millisecond informed the scheduler cache and policy retune. Phase 7 uses its own ggml allocation and acceptance statistics. [MIT graph cache](https://github.com/jesdga95/basalt/blob/ae82a4841c95f6a05ca8ca2331ef6af7ca844aef/src/models/inkling2/session.cpp#L752-L766), [draft policy](https://github.com/jesdga95/basalt/blob/ae82a4841c95f6a05ca8ca2331ef6af7ca844aef/src/spec/draft_policy.cpp).
+- The pinned input uploader uses ordinary ggml host buffers and asynchronous CUDA copies. The timeline probe records CUDA events around graph launches on the same stream and queries completed pairs later. [CUDA asynchronous transfers](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#asynchronous-and-overlapping-transfers-with-computation), [CUDA event timing](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__EVENT.html).
