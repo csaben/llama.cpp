@@ -1,3 +1,7 @@
+# Phase 7 (levers 1-2)
+
+Active on GPU1. Starting tree `c8eefdf`, inference baseline `399b61a`. First measurements compare shared attention and device feature handoff against the same-flags plain reference. Round 4 deployment information below is historical.
+
 # Phase 6 hand-off (keep current; newest status first)
 
 ## Round 4 status (2026-11-22, complete)
