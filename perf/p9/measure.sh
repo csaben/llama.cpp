@@ -19,7 +19,8 @@ case $stage in
         profile="$PWD/build/p9/$(basename "$out")-$kv"
         nsys="$HOME/opt/cuda-12.8/nsight-systems-2024.6.2/bin/nsys"
         "$nsys" profile -t cuda --cuda-graph-trace=node -o "$profile" --force-overwrite true build/bin/llama-bench "${args[@]}" -fa 1 -p 4096 -n 0 --no-warmup -b 2048 -ub 512 -r 1 >"$profile.log" 2>&1
-        "$nsys" stats --force-export=true --report cuda_gpu_kern_sum --format csv -o - "$profile.nsys-rep" >"$out/profile-$kv.csv" ;;
+        "$nsys" stats --force-export=true --report cuda_gpu_kern_sum --force-overwrite=true --format csv -o "$profile" "$profile.nsys-rep" >>"$profile.log" 2>&1
+        cp "${profile}_cuda_gpu_kern_sum.csv" "$out/profile-$kv.csv" ;;
     memory)
         for ctx in 16384 32768 65536; do
             log="build/p9/$(basename "$out")-$kv-$ctx.log"

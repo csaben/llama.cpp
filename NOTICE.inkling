@@ -68,3 +68,30 @@ perf/p6/shortlist_rank.bin was built here from system files with this model's to
 The window policy in common/speculative.cpp (LLAMA_DSPARK_ADAPTIVE) follows the idea of basalt's draft policy
 (https://github.com/jesdga95/basalt, MIT, src/spec/draft_policy.cpp): costs per window size learned online, draft
 chances calibrated per confidence bin, the window maximizing expected tokens per ms.
+
+Phase 9 compared Unsloth's pinned CUDA banded attention implementation in local benchmark builds.
+The source is https://github.com/unslothai/llama.cpp/blob/6348de261e825d9abcd9cbc33d578c4ff076f1cd/ggml/src/ggml-cuda/fattn-banded.cu
+from pin set cfc9ea3709ca048d21aea67cd34be1eb7cd5cd92. The benchmark adapter uses this fork's actual cell-to-query
+distances for padded and sliding caches. The separate Q8_0 tile-load trial uses the upstream per-tile dequantization idea.
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
