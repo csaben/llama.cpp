@@ -1709,3 +1709,14 @@ Local release tag `p8m-release`. The nine-file runtime snapshot is `~/inkling-li
 Four independent 64K-slot staged servers ran five repeats each on edit, prose and agent. Both drafted configurations matched all 30 replies and 11,520 IDs against plain before and after. The staged plain outputs also matched the merged matrix. Release medians were 352.0 / 225.0 / 304.4 tok/s on edit / prose / agent. The server logged accepted history windows with lookup enabled. [Snapshot probes](p8m/snapshot-probes/).
 
 The manual deployment script selects physical GPU1, one 65,536-token slot, Q8 KV, backend sampling, folded 32K DSpark, explicit adaptive cap 6 with guarded prompt lookup, logical batch 2,048 and 512-token target and draft microbatches. It verifies the manifest before stopping the service, and calls the Phase 5 restore script on startup or health failure. The script passed `bash -n` and was left unexecuted. [Manual deployment](live/deploy-p8m.sh), [Phase 5 fallback](live/restore-p5.sh).
+
+## Phase 9
+
+Frozen Phase 8 merge server and libraries, physical GPU1 (RTX 3090), batch 2,048, microbatch 512. Each prefill rate is the mean of three runs. Memory is the final CUDA compute reservation and the warmed target-only server process usage at healthy idle. The server logs also include a preliminary fit estimate. [Bench samples, Nsight kernel totals and memory records](p9/base/), [measurement runner](p9/measure.sh).
+
+| KV | pp4096 | pp16384 | pp32768 | Compute MiB, 16K / 32K / 64K | Process MiB, 16K / 32K / 64K |
+|---|---:|---:|---:|---|---|
+| Q8_0 | 3,538 | 3,188 | 2,833 | 590 / 1,086 / 2,078 | 10,730 / 11,498 / 13,034 |
+| F16 | 3,494 | 3,197 | 2,874 | 520 / 952 / 1,816 | 11,012 / 11,956 / 13,844 |
+
+Nsight at 4,096 tokens counted 384 F16 MMA attention launches in each run. Q8_0 issued 768 Q8_0-to-F16 dequantizations (4.93 ms, 0.44% of GPU kernel time). F16 issued zero. The MMA launcher requests both F16 temporaries, whose sizes scale with active KV length. Q8_0 still saved total VRAM at all three context sizes. Both types built a dense per-head F16 bias. On Q8_0, attention took 115.96 ms, excluding fixups, and bias construction took 47.25 ms. The 968 dedicated residual mixes took 43.76 ms (3.87%). The row-packing target in Unsloth #400 had zero calls. The prefill graph already ran fused L2-clip (768 launches) and SiTU (768 launches). [CUDA launcher](../ggml/src/ggml-cuda/fattn-common.cuh), [Inkling graph](../src/models/inkling2.cpp), [Unsloth pin set](https://github.com/unslothai/llama.cpp/commit/cfc9ea3709ca048d21aea67cd34be1eb7cd5cd92), [row packing](https://github.com/unslothai/llama.cpp/pull/400), [L2-clip](https://github.com/unslothai/llama.cpp/pull/401), [SiTU](https://github.com/unslothai/llama.cpp/pull/402).

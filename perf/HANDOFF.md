@@ -1,3 +1,7 @@
+# Phase 9
+
+GPU1 Phase 8 merge baseline completed. Q8_0 prefill ran two whole-cache F16 conversions per attention call. At 64K it reserved 262 MiB more compute memory than F16, but used 810 MiB less process VRAM overall. The 4K residual mix used 3.87% of GPU kernel time and issued no `mul_mat_vec_f` calls. The three requested upstream changes are local candidates. Banded attention screening and release verification are in progress. [Measurements](RESULTS.md#phase-9).
+
 # Phase 8 merge
 
 **Staged and verified on GPU1, local tag `p8m-release`.** Source `f7f505c` (`p8m-merged`) combines stream A and `p8c-final`. Snapshot `~/inkling-live-bin-p8m-f7f505c` passed all nine SHA-256 checks and resolved all eight project libraries locally. The manual deploy script was syntax-checked and left unexecuted. It uses guarded prompt lookup, adaptive cap 6, the folded 32K drafter, one 64K slot, batch 2,048 and target/draft microbatches 512/512. Startup or health failure invokes Phase 5 restore. [Manual deploy](live/deploy-p8m.sh), [manifest](p8m/snapshot.sha256), [release table and reproduction](RESULTS.md#phase-8-merge).
