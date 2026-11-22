@@ -1490,83 +1490,297 @@ protected:
         }
     }
 
-    // Window policy (LLAMA_DSPARK_ADAPTIVE=1, one sequence): draft only while drafting is measured to be faster.
-    // A step is the time between two draft() calls and yields pos0 - previous pos0 tokens (the accepted drafts + 1, or
-    // 1 without a draft). Decayed sums of tokens and time per mode give the two rates. While drafting loses, drafting
-    // is skipped for a stretch (32 steps, doubling up to 256 while it keeps losing) and then probed again for a few
-    // steps; while drafting wins, a couple of plain steps now and then keep the plain rate current (it falls with
-    // the context depth). The output does not depend on any of this: the target verifies every token.
+    // Window policy (LLAMA_DSPARK_ADAPTIVE=1, one sequence; round 3). After basalt's draft policy (MIT,
+    // https://github.com/jesdga95/basalt src/spec/draft_policy.cpp: a round's cost by window size learned online, the
+    // chance of a draft calibrated per confidence bin, the window that maximizes expected tokens per ms); the idea
+    // only, no code copied. The output does not depend on any of this: the target verifies every token.
+    //
+    // A step is the time between two draft() calls. Its kind t: 0 = plain (the drafter did not run), t >= 1 = the
+    // drafter ran and t - 1 drafts were verified (a window of t rows). cost(t) is the decayed mean time of the steps of
+    // kind t (a kind not measured yet: the nearest measured one scaled by a prior shape). chance(margin) is the measured
+    // acceptance of drafts by the bin of their top-2 margin. Each drafted step verifies the prefix of the drafts
+    // that maximizes E[tokens] / cost. While the best window does not beat a plain step, the drafter is switched off
+    // for a stretch (8 steps, doubling to 64 while a probe still shows no gain); the features of plain steps are kept
+    // on the host and injected into the drafter in one batch before the next probe (see process()).
+    static constexpr int ADAPT_T_MAX = 9;
+    static constexpr int ADAPT_BINS  = 8;
     struct adaptive_state {
         bool   on = false, never = false;
-        bool   last_valid = false, last_drafted = false;
+        bool   last_valid = false;
+        int    last_t = 0;                   // kind of the last step
+        int    last_n = 0;                   // drafts verified in the last step
+        int    last_window = 0;              // rows of the last window (the target graph that is built)
+        float  last_margin[ADAPT_T_MAX] = {};
         int64_t   last_us = 0;
         llama_pos last_pos0 = -1;
-        double tok_d = 0.0, us_d = 0.0, tok_p = 0.0, us_p = 0.0;
-        int    n_d = 0, n_p = 0;       // steps seen per mode since the last reset of that mode
-        int    skip_left = 0, skip_len = 32, plain_left = 0, since_plain = 0, steps_skipped = 0, steps_drafted = 0;
+        double cost[ADAPT_T_MAX + 1] = {};   // ms of a step by kind (decayed mean)
+        int    cost_n[ADAPT_T_MAX + 1] = {}; // steps of this kind seen (the first is a warm-up and not counted in cost)
+        double ok[ADAPT_BINS], tested[ADAPT_BINS];
+        double gain = 1.0;                   // smoothed (best drafted rate) / (plain rate) while drafting
+        int    n_on = 0;                     // drafted steps since drafting was switched on
+        bool   was_off = false;              // the next drafted step is a probe after an off stretch
+        int    off_left = 0, off_len = 8;
+        int    plain_due = 4, plain_take = 0; // drafted steps until the plain rate is measured again, plain steps to take for it
+        int    steps[ADAPT_T_MAX + 1] = {};
+        adaptive_state() {
+            std::fill(ok, ok + ADAPT_BINS, 0.0);
+            std::fill(tested, tested + ADAPT_BINS, 0.0);
+        }
     } adapt;
 
-    // true: draft this step
-    bool adaptive_step(llama_pos pos0) {
-        const int64_t now = ggml_time_us();
-        if (adapt.last_valid && pos0 > adapt.last_pos0 && pos0 - adapt.last_pos0 <= params.n_max + 1 && now - adapt.last_us < 250000) {
-            const double tok = pos0 - adapt.last_pos0, us = (double) (now - adapt.last_us);
-            if (adapt.last_drafted) {
-                adapt.tok_d = 0.9*adapt.tok_d + tok; adapt.us_d = 0.9*adapt.us_d + us; adapt.n_d++;
-            } else {
-                adapt.tok_p = 0.8*adapt.tok_p + tok; adapt.us_p = 0.8*adapt.us_p + us; adapt.n_p++;
-            }
-        } else if (adapt.last_valid && (pos0 <= adapt.last_pos0 || now - adapt.last_us >= 250000)) {
-            const bool never = adapt.never;
-            adapt = adaptive_state(); // another request
-            adapt.on = true;
-            adapt.never = never;
+    // cost of a step of kind t in units of a plain step, before any measurement (windows: perf/p6/mr_check on the
+    // round 3 build; the drafter and its injection: about 0.25 of a plain step)
+    static double adaptive_shape(int t) {
+        static const double rows[ADAPT_T_MAX] = { 1.0, 1.62, 2.0, 2.25, 2.7, 3.05, 3.35, 3.7, 4.1 };
+        return t <= 0 ? 1.0 : rows[std::min(t, ADAPT_T_MAX) - 1] + 0.25;
+    }
+
+    double adaptive_cost(int t) const {
+        t = std::min(t, ADAPT_T_MAX);
+        if (adapt.cost_n[t] >= 2) {
+            return adapt.cost[t];
         }
-        bool do_draft = true;
-        if (adapt.skip_left > 0) {
-            // drafting is switched off for a stretch
-            do_draft = false;
-            if (--adapt.skip_left == 0) {
-                adapt.tok_d = adapt.us_d = 0.0; adapt.n_d = 0; // probe afresh
-            }
-        } else if (adapt.plain_left > 0) {
-            do_draft = false;
-            --adapt.plain_left;
-        } else if (adapt.n_d >= 6 && adapt.n_p < 2) {
-            adapt.plain_left = 3; // no plain rate yet: measure it
-            do_draft = false;
-        } else if (adapt.n_d >= 6 && adapt.n_p >= 2) {
-            const double rate_d = adapt.tok_d/adapt.us_d, rate_p = adapt.tok_p/adapt.us_p;
-            if (rate_d < rate_p) {
-                adapt.skip_left = adapt.skip_len;
-                adapt.skip_len  = std::min(256, 2*adapt.skip_len);
-                do_draft = false;
-            } else {
-                adapt.skip_len = 32;
-                if (++adapt.since_plain >= 96) {
-                    adapt.since_plain = 0;
-                    adapt.plain_left  = 2;
-                    do_draft = false;
+        // a kind not measured yet: the nearest measured one, scaled by the prior shape
+        for (int d = 1; d <= ADAPT_T_MAX; ++d) {
+            for (const int u : { t - d, t + d }) {
+                if (u >= 0 && u <= ADAPT_T_MAX && adapt.cost_n[u] >= 2) {
+                    return adapt.cost[u]*adaptive_shape(t)/adaptive_shape(u);
                 }
             }
         }
-        adapt.last_valid   = true;
-        adapt.last_drafted = do_draft;
-        adapt.last_pos0    = pos0;
-        adapt.last_us      = now;
-        (do_draft ? adapt.steps_drafted : adapt.steps_skipped)++;
-        return do_draft;
+        return 5.0*adaptive_shape(t);
+    }
+
+    static int adaptive_bin(float margin) {
+        // the confidence sigmoid(margin): bins are finest near 1, where long windows are decided
+        static const float edge[ADAPT_BINS - 1] = { 0.6f, 0.75f, 0.85f, 0.92f, 0.96f, 0.98f, 0.995f };
+        const float p = 1.0f/(1.0f + expf(-margin));
+        int b = 0;
+        while (b < ADAPT_BINS - 1 && p >= edge[b]) {
+            ++b;
+        }
+        return b;
+    }
+
+    double adaptive_chance(float margin) const {
+        // before a bin has data: a little below the stated confidence, worth 6 tested drafts
+        const int b = adaptive_bin(margin);
+        const double p = 1.0/(1.0 + exp(-(double) margin));
+        return (adapt.ok[b] + 6.0*0.9*p)/(adapt.tested[b] + 6.0);
+    }
+
+    // accounts the step that ended; false: this step is plain (the drafter stays off)
+    bool adaptive_begin(llama_pos pos0) {
+        const int64_t now = ggml_time_us();
+        const bool fresh = !adapt.last_valid || pos0 <= adapt.last_pos0 || pos0 - adapt.last_pos0 > params.n_max + 1 || now - adapt.last_us >= 250000;
+        if (fresh) {
+            // another request (or a pause): keep what was learned about costs and chances, start with drafting on
+            adapt.off_left = 0;
+            adapt.off_len  = 8;
+            adapt.gain     = 1.0;
+            adapt.n_on     = 0;
+            adapt.was_off  = false;
+        } else {
+            const int    t  = std::min(adapt.last_t, ADAPT_T_MAX);
+            const double ms = (double) (now - adapt.last_us)/1000.0;
+            // the first step of a kind builds its graph; a step far above the estimate is a hiccup
+            if (adapt.cost_n[t] == 1) {
+                adapt.cost[t] = ms;
+            } else if (adapt.cost_n[t] >= 2 && ms < 3.0*adapt.cost[t]) {
+                adapt.cost[t] = 0.85*adapt.cost[t] + 0.15*ms;
+            }
+            if (adapt.cost_n[t] < 2 || ms < 3.0*adapt.cost[t]) {
+                adapt.cost_n[t]++;
+            }
+            const int n_acc = (int) (pos0 - adapt.last_pos0) - 1;
+            for (int i = 0; i < adapt.last_n && i <= n_acc; ++i) {
+                const int b = adaptive_bin(adapt.last_margin[i]);
+                adapt.ok[b]     = 0.98*adapt.ok[b] + (i < n_acc ? 1.0 : 0.0);
+                adapt.tested[b] = 0.98*adapt.tested[b] + 1.0;
+            }
+        }
+        adapt.last_valid = true;
+        adapt.last_pos0  = pos0;
+        adapt.last_us    = now;
+        adapt.last_n     = 0;
+        // the plain rate must be known and current: two plain steps a few steps into a request and after every 192
+        // drafted steps (the cost of a plain step grows with the context)
+        if (fresh) {
+            adapt.plain_due = 4;
+        } else if (adapt.off_left == 0 && adapt.plain_due > 0 && --adapt.plain_due == 0) {
+            adapt.plain_take = adapt.cost_n[0] < 2 ? 3 : 2;
+            adapt.plain_due  = 192;
+        }
+        if (adapt.off_left > 0 || adapt.plain_take > 0) {
+            if (adapt.off_left > 0) {
+                --adapt.off_left;
+                adapt.plain_due = 192;
+            } else {
+                --adapt.plain_take;
+            }
+            adapt.last_t = 0;
+            adapt.steps[0]++;
+            return false;
+        }
+        return true;
+    }
+
+    // the number of drafts (of the n with these margins) to verify in this step
+    int adaptive_window(const float * margin, int n) {
+        n = std::min(n, ADAPT_T_MAX - 1);
+        double e = 1.0, all = 1.0;
+        double best = 1.0/adaptive_cost(1), best_drafted = 0.0;
+        int    best_k = 0;
+        for (int k = 1; k <= n; ++k) {
+            all *= adaptive_chance(margin[k - 1]);
+            e   += all;
+            // another window size than the last one rebuilds the target graph (about 1 ms on the host)
+            const double r = e/(adaptive_cost(k + 1) + (adapt.last_window != 0 && adapt.last_window != k + 1 ? 1.0 : 0.0));
+            best_drafted = std::max(best_drafted, r);
+            if (r > best) {
+                best   = r;
+                best_k = k;
+            }
+        }
+        // drafting stays on while the best window of the last steps beats a plain step
+        const double gain = std::max(best_drafted, best_k > 0 ? best : 0.0)*adaptive_cost(0);
+        const bool   probe = adapt.n_on == 0 && adapt.was_off;
+        adapt.was_off = false;
+        adapt.gain = adapt.n_on == 0 ? gain : 0.8*adapt.gain + 0.2*gain;
+        adapt.n_on++;
+        if (probe ? adapt.gain < 1.08 : (adapt.n_on >= 3 && adapt.gain < 1.02)) {
+            adapt.off_left = adapt.off_len;
+            adapt.off_len  = probe ? std::min(64, 2*adapt.off_len) : 8;
+            adapt.n_on     = 0;
+            adapt.was_off  = true;
+            if (best*adaptive_cost(0) < 1.0) {
+                best_k = 0; // not even this window pays
+            }
+        } else if (probe) {
+            adapt.off_len = 8;
+        }
+        // a size whose cost is only guessed is tried a few times when its drafts are likely accepted
+        if (best_k < n && adapt.off_left == 0 && adapt.cost_n[std::min(best_k + 2, ADAPT_T_MAX)] < 4) {
+            double joint = 1.0;
+            for (int i = 0; i <= best_k; ++i) {
+                joint *= adaptive_chance(margin[i]);
+            }
+            if (joint >= 0.8) {
+                ++best_k;
+            }
+        }
+        adapt.last_t = best_k + 1;
+        adapt.last_n = best_k;
+        if (best_k > 0) {
+            adapt.last_window = best_k + 1;
+        }
+        std::copy(margin, margin + best_k, adapt.last_margin);
+        adapt.steps[best_k + 1]++;
+        return best_k;
+    }
+
+    // Features of small target batches that were not injected yet (LLAMA_DSPARK_ADAPTIVE): rows of n_embd_enc floats
+    // with consecutive positions. They are injected before the drafter runs next; rows the target rejected are dropped.
+    std::vector<float>     pending_embd;
+    std::vector<llama_pos> pending_pos;
+
+    bool defer_features(const common_batch & batch_in) {
+        if (!adapt.on || adapt.never || n_seq != 1 || !has_rnn_context || use_dev_features || !batch_in.has_token() || batch_in.size() > 16) {
+            pending_pos.clear();
+            pending_embd.clear();
+            return false;
+        }
+        auto * ctx_tgt = params.ctx_tgt;
+        const int32_t   n  = batch_in.size();
+        const llama_pos p0 = batch_in.tokens[0].pos[0];
+        drop_pending_from(p0);
+        if (!pending_pos.empty() && pending_pos.back() + 1 != p0) {
+            pending_pos.clear();
+            pending_embd.clear();
+        }
+        const size_t n_keep = 512;
+        if (pending_pos.size() + n > n_keep) {
+            const size_t n_drop = pending_pos.size() + n - n_keep;
+            pending_pos.erase(pending_pos.begin(), pending_pos.begin() + n_drop);
+            pending_embd.erase(pending_embd.begin(), pending_embd.begin() + n_drop*n_embd_enc);
+        }
+        const size_t base = pending_pos.size();
+        pending_embd.resize((base + n)*n_embd_enc);
+        for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
+            const float * layer = llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
+            if (!layer) {
+                GGML_ABORT("DSpark: target layer %d input not extracted.", target_layer_ids[k]);
+            }
+            for (int32_t i = 0; i < n; ++i) {
+                std::memcpy(pending_embd.data() + (base + i)*n_embd_enc + k*(size_t) n_embd_tgt, layer + (size_t) i*n_embd_tgt, (size_t) n_embd_tgt*sizeof(float));
+            }
+        }
+        for (int32_t i = 0; i < n; ++i) {
+            if (batch_in.tokens[i].pos[0] != p0 + i || batch_in.tokens[i].seq_id != 0) {
+                GGML_ABORT("DSpark: deferred features need consecutive positions of sequence 0");
+            }
+            pending_pos.push_back(p0 + i);
+        }
+        return true;
+    }
+
+    void drop_pending_from(llama_pos pos) {
+        while (!pending_pos.empty() && pending_pos.back() >= pos) {
+            pending_pos.pop_back();
+        }
+        pending_embd.resize(pending_pos.size()*n_embd_enc);
+    }
+
+    // injects the pending rows below pos0 into the drafter
+    bool flush_pending(llama_pos pos0) {
+        drop_pending_from(pos0);
+        auto * ctx_dft = params.ctx_dft;
+        const int32_t n_rows   = (int32_t) pending_pos.size();
+        const int32_t n_ubatch = (int32_t) llama_n_ubatch(ctx_dft);
+        for (int32_t offset = 0; offset < n_rows; offset += n_ubatch) {
+            const int32_t n_chunk = std::min(n_ubatch, n_rows - offset);
+            batch_inject.clear();
+            for (int32_t i = 0; i < n_chunk; ++i) {
+                const llama_pos p = pending_pos[offset + i];
+                const llama_pos pos_arr[4] = { p, p, p, 0 };
+                batch_inject.add_embd({ pending_embd.data() + (size_t) (offset + i)*n_embd_enc, 1, n_embd_enc }, pos_arr, 0, false);
+            }
+            if (llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch_inject.get()) != 0) {
+                LOG_ERR("%s: llama_process(ctx_dft) failed\n", __func__);
+                pending_pos.clear();
+                pending_embd.clear();
+                return false;
+            }
+            store_context_features(0, n_chunk);
+        }
+        pending_pos.clear();
+        pending_embd.clear();
+        return true;
     }
 
 public:
+
+    bool process(const common_batch & batch_in) override {
+        if (batch_in.size() > 0 && batch_in.has_token() != batch_in.has_embd() && defer_features(batch_in)) {
+            return true;
+        }
+        return common_speculative_impl_draft_dflash::process(batch_in);
+    }
 
     void draft(common_speculative_draft_params_vec & dparams) override {
         auto & ctx_dft = params.ctx_dft;
 
         batch.clear();
 
-        if (adapt.on && n_seq == 1 && dparams[0].drafting && (adapt.never || !adaptive_step(dparams[0].pos0))) {
-            return; // a plain step
+        if (adapt.on && n_seq == 1 && dparams[0].drafting) {
+            if (adapt.never || !adaptive_begin(dparams[0].pos0)) {
+                return; // a plain step
+            }
+            const int64_t t_prof = common_spec_prof_on() ? ggml_time_us() : 0;
+            if (!flush_pending(dparams[0].pos0)) {
+                return;
+            }
+            if (t_prof) { common_spec_prof_add(SPEC_PROF_INJECT_DECODE, ggml_time_us() - t_prof); }
         }
 
         // build one batch holding every drafting sequence's noise block into a single decode
@@ -1638,6 +1852,7 @@ public:
             const float * conf = params.p_min > 0.0f && !has_rnn_context ? llama_get_embeddings_nextn(ctx_dft) : nullptr;
             // the margin of the top logit over the second that p_min asks of a draft position (Inkling2 drafter)
             const float margin_min = has_rnn_context && params.p_min > 0.0f && params.p_min < 1.0f ? logf(params.p_min/(1.0f - params.p_min)) : -INFINITY;
+            float margins[ADAPT_T_MAX] = {};
             // bonus-anchor drafts read the mask positions only, like DFlash
             for (int32_t i = i_draft_beg; i < i_draft_beg + params.n_max; ++i) {
                 const int32_t idx = beg + i;
@@ -1654,6 +1869,9 @@ public:
                     std::memcpy(&margin, picks + 2*(i - i_draft_beg) + 1, sizeof(margin));
                     if (margin < margin_min) {
                         break;
+                    }
+                    if (result.size() < ADAPT_T_MAX) {
+                        margins[result.size()] = margin;
                     }
                     result.push_back(tok);
                     continue;
@@ -1696,9 +1914,29 @@ public:
                 result.push_back(id);
             }
 
+            if (adapt.on && n_seq == 1) {
+                // without picks the margins are not known here: every draft counts as sure
+                if (!pick) {
+                    std::fill(margins, margins + ADAPT_T_MAX, 20.0f);
+                }
+                result.resize(adaptive_window(margins, (int) result.size()));
+            }
+
             if (result.size() < (size_t) params.n_min) {
                 result.clear();
             }
+        }
+    }
+
+    ~common_speculative_impl_draft_dspark() override {
+        if (adapt.on && getenv("LLAMA_DSPARK_ADAPTIVE_LOG")) {
+            fprintf(stderr, "dspark policy: gain %.2f, steps by kind:", adapt.gain);
+            for (int t = 0; t <= ADAPT_T_MAX; ++t) { fprintf(stderr, " %d", adapt.steps[t]); }
+            fprintf(stderr, "\n  cost ms:");
+            for (int t = 0; t <= params.n_max + 1 && t <= ADAPT_T_MAX; ++t) { fprintf(stderr, " %.2f", adaptive_cost(t)); }
+            fprintf(stderr, "\n  chance by bin:");
+            for (int b = 0; b < ADAPT_BINS; ++b) { fprintf(stderr, " %.2f/%.0f", adapt.tested[b] > 0 ? adapt.ok[b]/adapt.tested[b] : 0.0, adapt.tested[b]); }
+            fprintf(stderr, "\n");
         }
     }
 };

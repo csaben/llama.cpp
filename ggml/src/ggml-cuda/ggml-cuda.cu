@@ -3439,7 +3439,22 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
 }
 
 static const void * ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
-    return cgraph->nodes[0];
+    // The first node alone is the same address for every graph a context builds, so a caller that alternates between
+    // shapes (speculative verify windows of 1..8 rows, the drafter's two graphs) reset the warmup and re-captured on
+    // every change. With the shape in the key each shape keeps its captured graph (IK_GRAPH_KEY_SHAPE=0: as before).
+    static const bool by_shape = getenv("IK_GRAPH_KEY_SHAPE") == nullptr || atoi(getenv("IK_GRAPH_KEY_SHAPE")) != 0;
+    uintptr_t key = (uintptr_t) cgraph->nodes[0];
+    if (by_shape) {
+        uint64_t h = (uint64_t) cgraph->n_nodes;
+        for (const int i : { 0, cgraph->n_nodes/2, cgraph->n_nodes - 1 }) {
+            for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+                h = h*1000003u + (uint64_t) cgraph->nodes[i]->ne[d];
+            }
+            h = h*1000003u + (uint64_t) cgraph->nodes[i]->op;
+        }
+        key ^= (uintptr_t) (h*0x9E3779B97F4A7C15ull);
+    }
+    return (const void *) key;
 }
 
 static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {

@@ -1852,6 +1852,26 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         gf_res_prev_active = nullptr;
         res->reset();
 
+        // LLAMA_GRAPH_BUILD_PROF=1: host time of graph rebuilds (build + allocation), printed every 256 rebuilds
+        static const bool build_prof = getenv("LLAMA_GRAPH_BUILD_PROF") != nullptr;
+        const int64_t t_build_us = build_prof ? ggml_time_us() : 0;
+        struct build_prof_guard {
+            int64_t t0; uint32_t n_tokens; bool small_tokens;
+            ~build_prof_guard() {
+                static int64_t us[2] = {}, n[2] = {};
+                if (t0) {
+                    us[small_tokens] += ggml_time_us() - t0;
+                    n[small_tokens]++;
+                    if ((n[0] + n[1]) % 256 == 0) {
+                        fprintf(stderr, "graph_build_prof: token ubatches of <= 6: %lld rebuilds, %.3f ms each; others: %lld, %.3f ms each\n",
+                                (long long) n[1], n[1] ? us[1]/1e3/n[1] : 0.0, (long long) n[0], n[0] ? us[0]/1e3/n[0] : 0.0);
+                    }
+                }
+            }
+        };
+        build_prof_guard build_guard = { t_build_us, ubatch.n_tokens, ubatch.embd == nullptr && ubatch.n_tokens <= 6 };
+        (void) build_guard;
+
         ggml_backend_sched_reset(sched.get());
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
