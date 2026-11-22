@@ -3887,7 +3887,7 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
     }
 
     if (project_gates) {
-        if (!fixed || n_rows != 1 || ik_mr_enabled() || (!short_scan && a.n_kv <= 256) ||
+        if (!fixed || n_rows != 1 || (!short_scan && a.n_kv <= 256) || (ik_mr_enabled() && a.n_split < 8) ||
                 proj->ne[0] != (a.has_taps ? 8664 : 8600)) {
             return false;
         }

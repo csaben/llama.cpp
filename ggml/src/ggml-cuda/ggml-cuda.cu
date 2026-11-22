@@ -4581,8 +4581,8 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
 // The short convolution consumes one IQ4_NL projection and writes the recurrent state for this token.
 static int ik_projection_conv_end(ggml_backend_cuda_context & ctx, const ggml_cgraph * graph, int i) {
     const ggml_tensor * mm = graph->nodes[i];
-    static const bool enabled = ggml_cuda_env_int("IK_PROJ_CONV", 1) != 0 && !ggml_cuda_env_flag("IK_MR");
-    if (!enabled || mm->op != GGML_OP_MUL_MAT || !ggml_is_vector(mm) || mm->type != GGML_TYPE_F32 ||
+    static const bool enabled = ggml_cuda_env_int("IK_PROJ_CONV", 1) != 0;
+    if (!enabled || mm->op != GGML_OP_MUL_MAT || !ggml_is_vector(mm) || mm->type != GGML_TYPE_F32 || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
             mm->src[1]->op != GGML_OP_INKLING_ATTN || mm->src[1]->type != GGML_TYPE_Q8_1 ||
             mm->src[0]->type != GGML_TYPE_IQ4_NL || mm->src[0]->ne[0] != 3072 || mm->ne[0] != 2304 ||
             ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X || !ggml_node_has_n_uses(graph, i, 1)) {
@@ -4601,9 +4601,9 @@ static int ik_projection_conv_end(ggml_backend_cuda_context & ctx, const ggml_cg
 
 static int ik_attention_projection_end(ggml_backend_cuda_context & ctx, const ggml_cgraph * graph, int i) {
     static const int mode = ggml_cuda_env_int("IK_DENSE_VISIT", -1);
-    static const bool mr = ggml_cuda_env_flag("IK_MR");
+    static const bool mr_segmented = !ggml_cuda_env_flag("IK_MR") || ggml_cuda_env_flag("IK_SEGMENTED_IQ4");
     const ggml_tensor * mm = graph->nodes[i];
-    if (mode == 0 || mr || mm->op != GGML_OP_MUL_MAT || mm->type != GGML_TYPE_F32 || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
+    if (mode == 0 || (!mr_segmented && mm->ne[1] == 3) || mm->op != GGML_OP_MUL_MAT || mm->type != GGML_TYPE_F32 || (mm->flags & GGML_TENSOR_FLAG_OUTPUT) ||
             mm->src[0]->type != GGML_TYPE_IQ4_NL || mm->src[0]->ne[0] != 2304 || !ggml_is_matrix(mm->src[0]) ||
             !ggml_is_contiguous(mm->src[0]) || mm->src[1]->type != GGML_TYPE_Q8_1 || !ggml_is_contiguous(mm->src[1]) ||
             !ggml_is_matrix(mm) || (mm->ne[1] != 1 && mm->ne[1] != 3) || !ggml_is_contiguous(mm) ||
