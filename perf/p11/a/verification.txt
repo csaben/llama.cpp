@@ -1,0 +1,14 @@
+Default one-card flags: 128 interleaved full-vocabulary rows matched p9 bit for bit.
+Two-card output: 112 full-vocabulary rows matched p9 bit for bit over seven depths through 128,064 and both flag settings.
+uncensored pp: p9 3.0571, release 3.0571, difference +0.0000%
+uncensored tg: p9 4.1915, release 4.1915, difference +0.0000%
+uncensored tg-mr: p9 4.1877, release 4.1877, difference +0.0000%
+calibrated pp: p9 3.0530, release 3.0530, difference +0.0000%
+calibrated tg: p9 4.1979, release 4.1979, difference +0.0000%
+calibrated tg-mr: p9 4.2038, release 4.2038, difference +0.0000%
+Rollback and boundary battery: 2,714 exact rows in eleven checks. Extra widths 2-7: 217 exact rows.
+test-backend-ops head: 64/64.
+test-backend-ops inkling: 1110/1110.
+Direct IQ4 output, test: 589,824 FP32 values exact across widths 1-8 and four inputs.
+Direct IQ4 output, memcheck: 589,824 FP32 values exact across widths 1-8 and four inputs.
+Direct IQ4 output, synccheck: 589,824 FP32 values exact across widths 1-8 and four inputs.

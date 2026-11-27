@@ -1,0 +1,40 @@
+check	outcome	quantity	p9_reference	candidate	post_residency_candidate
+default-mixed-0	exact	64 full-vocabulary rows	1d7161341b9355531463f42415f31d10ac0a6916aa275ba5101ce0af988de5aa	1d7161341b9355531463f42415f31d10ac0a6916aa275ba5101ce0af988de5aa	yes
+logits-0-1	exact	8 full-vocabulary rows	047ce38bfb675778c23e68f3c69d04fbd41c5c8b79983a3b44ee0b196f54c890	047ce38bfb675778c23e68f3c69d04fbd41c5c8b79983a3b44ee0b196f54c890	yes
+logits-0-4096	exact	8 full-vocabulary rows	d3f8db9fc73e9d847a2fcdf8e3f4f879e8250b14ad72967dbc97bd1a89fdcebf	d3f8db9fc73e9d847a2fcdf8e3f4f879e8250b14ad72967dbc97bd1a89fdcebf	yes
+logits-0-16384	exact	8 full-vocabulary rows	0eb84f41d6526ed99fec74188bf8bafdcb64b19438666067cc11356307a495dc	0eb84f41d6526ed99fec74188bf8bafdcb64b19438666067cc11356307a495dc	yes
+logits-0-32768	exact	8 full-vocabulary rows	5989796545a683bd5bc546e598fa34fadfa1d4b0c204fbf343012affc97f6a85	5989796545a683bd5bc546e598fa34fadfa1d4b0c204fbf343012affc97f6a85	yes
+logits-0-65528	exact	8 full-vocabulary rows	5b0bb7f6f244b633d51ec0bf49762ce544560314152c290202b1463c20d614fb	5b0bb7f6f244b633d51ec0bf49762ce544560314152c290202b1463c20d614fb	yes
+deep-0-65536	exact	8 full-vocabulary rows	38bfbcd055f069db620dcaf5fc72dc7670cfd9212718f2ca9ee49f92f5eda065	38bfbcd055f069db620dcaf5fc72dc7670cfd9212718f2ca9ee49f92f5eda065	yes
+deep-0-128064	exact	8 full-vocabulary rows	cf9a8534e844d52e7d15f2136ca16167426617a1ab137d8d902a483ab460f871	cf9a8534e844d52e7d15f2136ca16167426617a1ab137d8d902a483ab460f871	yes
+default-mixed-1	exact	64 full-vocabulary rows	fcb9cf826bc3bd748327d36d803c7a5aa665b5b40c5a0b6a4cfb0dd32a0bcb87	fcb9cf826bc3bd748327d36d803c7a5aa665b5b40c5a0b6a4cfb0dd32a0bcb87	yes
+logits-1-1	exact	8 full-vocabulary rows	a3f09bf41b9ce3359a28933f9447528631093845721067acf9e8940e3758d99e	a3f09bf41b9ce3359a28933f9447528631093845721067acf9e8940e3758d99e	yes
+logits-1-4096	exact	8 full-vocabulary rows	6242d311646e7ed1be47f10322df6dcbf58a25cd5f4b48b0d48fb8ba32e65992	6242d311646e7ed1be47f10322df6dcbf58a25cd5f4b48b0d48fb8ba32e65992	yes
+logits-1-16384	exact	8 full-vocabulary rows	35b5fdab306f38a7e76c9ac6603f79e5c93871ea191ced49cf5efc3622e745ed	35b5fdab306f38a7e76c9ac6603f79e5c93871ea191ced49cf5efc3622e745ed	yes
+logits-1-32768	exact	8 full-vocabulary rows	23d8dad1e6adbd281508d556f9af9d4b0227617ff5fd83bc200e2866a3879be6	23d8dad1e6adbd281508d556f9af9d4b0227617ff5fd83bc200e2866a3879be6	yes
+logits-1-65528	exact	8 full-vocabulary rows	a58582f1f02424fb346fbc055994ba380692903cdbc2d1ed1777b741baa11c2c	a58582f1f02424fb346fbc055994ba380692903cdbc2d1ed1777b741baa11c2c	yes
+deep-1-65536	exact	8 full-vocabulary rows	0fd13c56f59979ed7d237321f3de6bd42d0e39e9ad472bb4e0fede1fdf3dd1f2	0fd13c56f59979ed7d237321f3de6bd42d0e39e9ad472bb4e0fede1fdf3dd1f2	yes
+deep-1-128064	exact	8 full-vocabulary rows	62d02bd339b16e9524ce2b698171808d11f599306b1b2b79198adde8d29d70fb	62d02bd339b16e9524ce2b698171808d11f599306b1b2b79198adde8d29d70fb	yes
+uncensored-pp	within 0.1%	+0.0000%	3.0571	3.0571	yes
+uncensored-tg	within 0.1%	+0.0000%	4.1915	4.1915	yes
+uncensored-tg-mr	within 0.1%	+0.0000%	4.1877	4.1877	yes
+calibrated-pp	within 0.1%	+0.0000%	3.0530	3.0530	yes
+calibrated-tg	within 0.1%	+0.0000%	4.1979	4.1979	yes
+calibrated-tg-mr	within 0.1%	+0.0000%	4.2038	4.2038	yes
+widths	exact	217 rows	-	-	yes
+trace	exact	1699 rows	-	-	yes
+control	exact	40 rows	-	-	yes
+edge-1533	exact	73 rows	-	-	yes
+edge-3069	exact	73 rows	-	-	yes
+edge-4500	exact	73 rows	-	-	yes
+rand-2000	exact	126 rows	-	-	yes
+rand-2046	exact	126 rows	-	-	yes
+rand-2558	exact	126 rows	-	-	yes
+rand-3069	exact	126 rows	-	-	yes
+rand-4094	exact	126 rows	-	-	yes
+rand-4500	exact	126 rows	-	-	yes
+ops-head	pass	64/64 tests passed	-	-	yes
+ops-inkling	pass	1110/1110 tests passed	-	-	yes
+head-test	exact	589824 floats	-	-	yes
+head-memcheck	exact	589824 floats	-	-	yes
+head-synccheck	exact	589824 floats	-	-	yes

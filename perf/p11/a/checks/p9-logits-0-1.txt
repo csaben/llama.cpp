@@ -1,0 +1,1 @@
+047ce38bfb675778c23e68f3c69d04fbd41c5c8b79983a3b44ee0b196f54c890  /home/arelius/llama.cpp-fast/build/p11a/checks/p9-logits-0-1.log.bin
