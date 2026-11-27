@@ -19,7 +19,9 @@ for budget in 384 3000; do
             export B_ADAPT=0
             if [[ $row == plain ]]; then width=0; fi
             if [[ $row == *-adapt ]]; then export B_ADAPT=1; fi
-            perf/p11/b/gpu.sh perf/p11/b/run.sh probe "$dir" "$row" "$width" "$kinds" "$reps" "$budget"
+            if ! python3 perf/p11/b/probe_complete.py "$dir" "$row" "$kinds" "$reps" "$budget"; then
+                perf/p11/b/gpu.sh perf/p11/b/run.sh probe "$dir" "$row" "$width" "$kinds" "$reps" "$budget"
+            fi
             if [[ $row != plain ]]; then
                 SPEC_KINDS="$kinds" SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py "$dir" plain "$row" >"$dir/$row.equal"
             fi

@@ -1,0 +1,6 @@
+timestamp, pci.bus_id, memory.free [MiB], memory.used [MiB]
+2026/11/27 02:07:49.651, 00000000:01:00.0, 1669 MiB, 22501 MiB
+pid, process_name, used_gpu_memory [MiB]
+2136, /home/arelius/Code/redact/.venv/bin/python3, 310 MiB
+2126, /home/arelius/Code/behemoth-omniparser/v2/behemoth/services/omniparser-manifest/.venv/bin/python, 728 MiB
+1358328, /home/arelius/llama.cpp/build/bin/llama-server, 21354 MiB

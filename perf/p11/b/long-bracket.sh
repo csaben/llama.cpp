@@ -7,7 +7,8 @@ plain=${4:?verified plain capture label}
 for leg in old1 new1 new2 old2; do
     export B_LIBS="$HOME/inkling-live-bin-p9-72fd097"
     cap=6
-    if [[ $leg == new* ]]; then B_LIBS=${BRACKET_NEW:?candidate runtime}; cap=${BRACKET_CAP:-6}; fi
+    export B_UBATCH=512
+    if [[ $leg == new* ]]; then B_LIBS=${BRACKET_NEW:?candidate runtime}; cap=${BRACKET_CAP:-6}; B_UBATCH=${BRACKET_NEW_UB:-512}; fi
     perf/p11/b/gpu.sh perf/p11/b/long.sh "$ctx" "$depth" "$cap" "$name-$leg"
     python3 - "$depth" "$plain" "$name-$leg" <<'PY'
 import hashlib, json, struct, sys

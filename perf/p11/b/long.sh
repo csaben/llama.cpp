@@ -25,7 +25,7 @@ Path(sys.argv[1]).write_text(code.replace('127.0.0.1:18471', '127.0.0.1:18551'))
 PY
 nvidia-smi -i 0 --query-gpu=timestamp,memory.used,memory.free --format=csv,noheader,nounits -lms 200 >"$W/$label-$mode.vram" &
 monitor=$!
-"$LD_LIBRARY_PATH/llama-server" -m "$model" --mmproj "$HOME/models/inkling-2-mini/mmproj-Inkling-2-Mini-Q8_0.gguf" -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -np 1 -b 2048 -ub 512 -c "$ctx" --backend-sampling --alias inkling-mini --host 127.0.0.1 --port 18551 "${extra[@]}" >"$W/$label-$mode.server" 2>&1 &
+"$LD_LIBRARY_PATH/llama-server" -m "$model" --mmproj "$HOME/models/inkling-2-mini/mmproj-Inkling-2-Mini-Q8_0.gguf" -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -np 1 -b 2048 -ub "${B_UBATCH:-512}" -c "$ctx" --backend-sampling --alias inkling-mini --host 127.0.0.1 --port 18551 "${extra[@]}" >"$W/$label-$mode.server" 2>&1 &
 pid=$!
 trap 'kill "$pid" "$monitor" 2>/dev/null || :; wait "$pid" || :; wait "$monitor" || :' EXIT
 for ((i=0; i<300; i++)); do
