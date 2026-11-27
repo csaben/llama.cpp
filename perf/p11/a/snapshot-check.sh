@@ -2,9 +2,15 @@
 # Load the staged runtime on the lab ports and compare both text and image requests.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
-read -r source mode draft_ub <perf/p11/a/release.txt
+if [[ $# == 4 ]]; then
+    source=$1 mode=$2 draft_ub=$3 manifest=$(realpath "$4")
+elif [[ $# == 0 ]]; then
+    read -r source mode draft_ub <perf/p11/a/release.txt
+    manifest=$PWD/perf/p11/a/snapshot.sha256
+else
+    exit 2
+fi
 export P11_BIN="$HOME/inkling-live-bin-p11a-$source" P11_DRAFT_UB="$draft_ub" P11_CTX=131072
-manifest=$PWD/perf/p11/a/snapshot.sha256
 (cd "$P11_BIN" && cmp SHA256SUMS "$manifest" && sha256sum --strict -c "$manifest")
 placement=one
 if [[ $mode == head || $mode == direct ]]; then

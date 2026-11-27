@@ -32,6 +32,10 @@ LD_LIBRARY_PATH="$snapshot" ldd "$snapshot/llama-server" >"$tmp/ldd"
 for f in "${files[@]:1}"; do
     awk -v f="$f" -v path="$snapshot/$f" '$1 == f && $2 == "=>" && $3 == path {ok=1} END {exit !ok}' "$tmp/ldd"
 done
+if [[ ${P11_PREPARE_ONLY:-0} == 1 ]]; then
+    echo "Package ready for lab checks at $snapshot"
+    exit 0
+fi
 cp -- "$tmp/manifest" perf/p11/a/snapshot.sha256
 sed -E 's/ \(0x[0-9a-f]+\)$//' "$tmp/ldd" >perf/p11/a/snapshot.ldd
 printf '%s %s %s\n' "$short" "$mode" "$draft_ub" >perf/p11/a/release.txt
