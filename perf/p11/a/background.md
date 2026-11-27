@@ -1,0 +1,5 @@
+# Available memory during qualification
+
+The p9 128K plain and draft capacity checks and the four native-head pilot legs finished before 02:02 EST. An unrelated Qwen service started at 02:02:47 EST. At 02:07, while holding the shared GPU0 lock, it occupied 21,354 MiB on GPU0. It also occupied 6,106 MiB on GPU1. Several expert-replication experiments then failed at model load. The 128K p9 matrix subsequently ran out of workspace during a drafted cell. Those incomplete probes contribute no speed or correctness results. [Residency sample](residency.txt).
+
+The coalesced output-head candidate completed the 128,064-token edit with 3,000 generated tokens while the service was resident, using target microbatch 512 and draft microbatch 128. It matched the earlier p9 plain control on the entire reply and every ID. The process used 17,558 MiB on GPU1 and 416 MiB on GPU0 at the final sample. Sampled board peaks including other processes were 23,695 / 22,922 MiB on GPU1 / GPU0. The regular p9 control uses draft microbatch 512. [Memory](capacity/direct-shared-128.memory), [request timing](capacity/direct-shared-128.timings).

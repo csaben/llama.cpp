@@ -11,8 +11,8 @@ Q2="$HOME/models/inkling-2-mini/Inkling-2-Mini-AtomicChat-Uncensored-Q2K-Q2_0-fi
 fallback() {
     exec bash perf/live/deploy-p9v-uncensored-128k.sh
 }
-read -r short mode < perf/p11/a/release.txt || fallback
-[[ $short =~ ^[a-f0-9]{8}$ ]] || fallback
+read -r short mode draft_ub < perf/p11/a/release.txt || fallback
+[[ $short =~ ^[a-f0-9]{8}$ && $draft_ub =~ ^(128|512)$ ]] || fallback
 snapshot="$HOME/inkling-live-bin-p11a-$short"
 if [[ ! -r $mmproj || ! -r $draft || ! -r $Q2 || ! -x $snapshot/llama-server ]] ||
         ! (cd "$snapshot" && sha256sum --strict -c "$repo/perf/p11/a/snapshot.sha256"); then
@@ -43,7 +43,7 @@ if systemd-run --user --collect --unit="$unit" --working-directory="$repo" \
     --setenv=LLAMA_DSPARK_ADAPTIVE=1 --setenv=LLAMA_DSPARK_POLICY=1 --setenv=GGML_CUDA_GRAPH_CHUNK_SIZE=0 \
     "$snapshot/llama-server" -m "$Q2" --mmproj "$mmproj" -ngl 99 -fa on -ctk q8_0 -ctv q8_0 \
     -c 131072 -np 1 -b 2048 -ub 512 "${placement[@]}" --override-tensor token_embd.weight=CUDA0 --backend-sampling --host 127.0.0.1 --port 8031 --alias inkling-mini \
-    --spec-type draft-dspark --spec-draft-model "$draft" "${draft_placement[@]}" --spec-draft-override-tensor mask_embd.weight=CUDA0 --spec-draft-n-ubatch 512 --spec-draft-n-max 6 --spec-draft-p-min 0; then
+    --spec-type draft-dspark --spec-draft-model "$draft" "${draft_placement[@]}" --spec-draft-override-tensor mask_embd.weight=CUDA0 --spec-draft-n-ubatch "$draft_ub" --spec-draft-n-max 6 --spec-draft-p-min 0; then
     for ((i=0; i<120; i++)); do
         if curl -fsS -m 2 http://127.0.0.1:8031/health >/dev/null 2>&1; then
             echo "Phase 11A vision (uncensored 2-bit) ready on :8031 from $snapshot"

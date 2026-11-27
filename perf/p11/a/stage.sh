@@ -6,6 +6,8 @@ runtime=$(realpath "${1:?verified runtime}")
 commit=$(git rev-parse --verify "${2:?source commit}^{commit}")
 mode=${3:?one, head, or direct}
 case $mode in one|head|direct) ;; *) exit 2;; esac
+draft_ub=${4:-512}
+case $draft_ub in 128|512) ;; *) exit 2;; esac
 short=${commit:0:8}
 snapshot="$HOME/inkling-live-bin-p11a-$short"
 tmp=$(mktemp -d "$HOME/.inkling-p11a-$short.XXXXXXXX")
@@ -26,4 +28,4 @@ for f in "${files[@]:1}"; do
 done
 cp -- "$tmp/manifest" perf/p11/a/snapshot.sha256
 sed -E 's/ \(0x[0-9a-f]+\)$//' "$tmp/ldd" >perf/p11/a/snapshot.ldd
-printf '%s %s\n' "$short" "$mode" >perf/p11/a/release.txt
+printf '%s %s %s\n' "$short" "$mode" "$draft_ub" >perf/p11/a/release.txt
