@@ -1,5 +1,6 @@
 """Compare the release matrix with fresh p9 controls on the same GGUF."""
 import csv
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -12,17 +13,18 @@ def read_cells(path):
         return list(csv.DictReader(source, delimiter='\t'))
 
 
-refs = {(r['suite'], r['budget'], r['prompt']): r for r in read_cells(frozen) if r['setting'] == 'plain'}
 rows = read_cells(root)
 replies = ids = 0
 for row in rows:
     suite, budget, prompt, setting = (row[k] for k in ('suite', 'budget', 'prompt', 'setting'))
-    old = refs[suite, budget, prompt]
     for ext, key in [('ids', 'ids_sha256'), ('json', 'message_sha256')]:
-        assert row[key] == old[key], (suite, budget, prompt, setting, key)
         expected = (frozen / suite / budget / f'plain.{prompt}.{ext}').read_bytes()
         data = (root / suite / budget / f'{setting}.{prompt}.{ext}').read_bytes()
-        assert data == expected, (suite, budget, prompt, setting, ext)
+        same_build = (root / suite / budget / f'plain.{prompt}.{ext}').read_bytes()
+        assert hashlib.sha256(data).hexdigest() == row[key], (suite, budget, prompt, setting, key)
+        assert data == same_build == expected, (suite, budget, prompt, setting, ext)
+        if ext == 'ids':
+            assert len(data) == 4*int(budget)
     reps = (5 if suite == 'prose' else 3) if budget == '384' else 1
     lines = (root / suite / budget / f'{setting}.txt').read_text().splitlines()
     line, = [s for s in lines if s.split()[1] == prompt]
