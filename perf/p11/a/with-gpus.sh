@@ -16,6 +16,9 @@ guard='
     if ((remaining < 900)); then exec timeout -k 2 "$((remaining-3))" "$@"; fi
     exec "$@"
 '
+if [[ $placement == one-ready ]]; then
+    exec flock -n -E 73 "$active_lock" env P11_PRIMARY_READY=1 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 bash -c "$guard" guard "$repo" "$@"
+fi
 if [[ $placement == one ]]; then
     exec flock "$turn_lock" flock "$active_lock" env P11_PRIMARY_READY=1 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 bash -c "$guard" guard "$repo" "$@"
 fi
