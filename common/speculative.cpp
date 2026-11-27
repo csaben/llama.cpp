@@ -1390,6 +1390,7 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
 
     bool device_draft = false;
     bool cached_policy = false;
+    bool full_rate_verify = false;
     llama_tokens * pending_ids = nullptr;
     float previous_margins[9] = {};
     llama_pos dev_pos0 = -1;
@@ -1485,6 +1486,8 @@ struct common_speculative_impl_draft_dspark final : public common_speculative_im
             cached_policy = device_draft && graphs && atoi(graphs) && use_policy;
             adapt.on = adapt.on || cached_policy;
             if (cached_policy) {
+                const char * full_rate = getenv("LLAMA_DSPARK_FULL_RATE");
+                full_rate_verify = full_rate && atoi(full_rate) != 0;
                 // Limit model work to the packed window. History can use the full cap.
                 head_n = std::min(head_n, std::max(3, this->params.n_min));
             }
@@ -1587,7 +1590,9 @@ protected:
         t = std::min(t, ADAPT_T_MAX);
         if (cached_policy) {
             const double plain = adapt.cost_n[0] >= 2 ? adapt.cost[0] : 4.8;
-            const double prior = plain*adaptive_shape(t);
+            const double shape = adaptive_shape(t);
+            // The unlocked 3090 uses a lower cost prior for multi-row verification.
+            const double prior = plain*(full_rate_verify && t >= 2 ? 1.0 + 0.70*(shape - 1.0) : shape);
             if (t == 0 || adapt.cost_n[t] < 2) {
                 return prior;
             }
