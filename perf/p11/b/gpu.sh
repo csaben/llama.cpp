@@ -28,6 +28,9 @@ if ((B_MIN_FREE_MIB >= 11000)); then
             build/p11/matrix-p9/*) queue=(flock build/p11/stream-b-p9-extra.lock) ;;
         esac
     fi
+    if [[ ${2:-} == bench && ${B_BENCH_GRID_LANE:-} =~ ^(timed|output)$ ]]; then
+        queue=(flock "build/p11/stream-b-bench-${B_BENCH_GRID_LANE}.lock")
+    fi
 elif [[ ${B_OPERATOR_SWEEP:-0} == 1 ]]; then
     queue=(flock "build/p11/stream-b-operator-$((PPID % 4)).lock")
 fi
