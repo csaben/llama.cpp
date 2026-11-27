@@ -1,0 +1,2 @@
+  7/7 tests passed
+  Backend CUDA0: OK
