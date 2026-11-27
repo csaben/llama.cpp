@@ -4283,7 +4283,7 @@ void ggml_cuda_op_inkling_moe_down(ggml_backend_cuda_context & ctx, ggml_tensor 
 // ---------------------------------------------------------------------------------------------------------------------
 // inkling_moe_sum_conv: the weighted expert sum, the FFN short convolution and the residual, one thread per channel
 
-template<bool fixed = false>
+template<bool fixed = false, bool prefix = false>
 static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a, const int64_t a_s1, const float * __restrict__ w, const int w_s1,
         const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
         const int write_cell, const int chan_offset, const float scale, const float * __restrict__ residual, float * __restrict__ dst,
@@ -4301,7 +4301,7 @@ static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a,
     // all the loads first
     float av[8], xs[8], wv[8];
 #pragma unroll
-    for (int e = 0; e < 8; ++e) {
+    for (int e = prefix ? 4 : 0; e < 8; ++e) {
         av[e] = e < n_used ? a[c + e*a_s1] : 0.0f;
     }
 #pragma unroll
@@ -4313,8 +4313,8 @@ static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a,
 
     const int lane = threadIdx.x % WARP_SIZE;
     const float route = fixed && lane < 8 ? w[lane*w_s1] : 0.0f;
-    float sum = 0.0f;
-    for (int e = 0; e < n_used; ++e) {
+    float sum = prefix ? a[c] : 0.0f;
+    for (int e = prefix ? 4 : 0; e < n_used; ++e) {
         sum += av[e]*(fixed ? __shfl_sync(0xffffffffu, route, e) : w[e*w_s1]);
     }
     xs[n_conv - 1] = sum;
@@ -4336,6 +4336,7 @@ static __global__ void inkling_moe_sum_conv_kernel(const float * __restrict__ a,
 }
 
 // the rows of a window: a thread per channel walks the tokens in order (the statements of the single-token kernel)
+template<bool prefix = false>
 static __global__ void inkling_moe_sum_conv_rows_kernel(const float * __restrict__ a, const int64_t a_s1, const int64_t a_s2,
         const float * __restrict__ w, const int w_s1, const int w_s2,
         const float * __restrict__ conv_w, float * __restrict__ state, const int64_t state_s1, const int32_t * __restrict__ rs_ids,
@@ -4358,12 +4359,12 @@ static __global__ void inkling_moe_sum_conv_rows_kernel(const float * __restrict
     for (int row = 0; row < n_rows; ++row) {
         float av[8];
 #pragma unroll
-        for (int e = 0; e < 8; ++e) {
+        for (int e = prefix ? 4 : 0; e < 8; ++e) {
             av[e] = e < n_used ? a[c + e*a_s1 + row*a_s2] : 0.0f;
         }
         const float res = residual[c + row*res_s1];
-        float sum = 0.0f;
-        for (int e = 0; e < n_used; ++e) {
+        float sum = prefix ? a[c + row*a_s2] : 0.0f;
+        for (int e = prefix ? 4 : 0; e < n_used; ++e) {
             sum += av[e]*w[e*w_s1 + row*w_s2];
         }
 #pragma unroll
@@ -4397,7 +4398,7 @@ static __global__ void inkling_moe_sum_conv_rows_kernel(const float * __restrict
     }
 }
 
-void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst, bool prefix) {
     const ggml_tensor * a        = dst->src[0];
     const ggml_tensor * w        = dst->src[1];
     const ggml_tensor * conv_w   = dst->src[2];
@@ -4416,7 +4417,8 @@ void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_ten
 
     const int block = 256;
     if (dst->ne[1] > 1) {
-        inkling_moe_sum_conv_rows_kernel<<<(n_embd + block - 1)/block, block, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float), a->nb[2]/sizeof(float),
+        const auto kernel = prefix ? inkling_moe_sum_conv_rows_kernel<true> : inkling_moe_sum_conv_rows_kernel<false>;
+        kernel<<<(n_embd + block - 1)/block, block, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float), a->nb[2]/sizeof(float),
                 (const float *) w->data, (int) (w->nb[1]/sizeof(float)), (int) (w->nb[2]/sizeof(float)), (const float *) conv_w->data,
                 (float *) state->data, state->nb[1]/sizeof(float), (const int32_t *) rs_ids->data, write_cell, ggml_get_op_params_i32(dst, 4),
                 ggml_get_op_params_i32(dst, 3), chan_offset, scale, (const float *) residual->data, residual->nb[1]/sizeof(float),
@@ -4425,7 +4427,8 @@ void ggml_cuda_op_inkling_moe_sum_conv(ggml_backend_cuda_context & ctx, ggml_ten
     }
     const bool fast = ggml_cuda_inkling_fast_glue(ctx) && n_used == 8 && n_conv == 4 && n_embd == 2304;
     const int width = fast ? 64 : block;
-    const auto kernel = fast ? inkling_moe_sum_conv_kernel<true> : inkling_moe_sum_conv_kernel<false>;
+    const auto kernel = prefix ? (fast ? inkling_moe_sum_conv_kernel<true, true> : inkling_moe_sum_conv_kernel<false, true>) :
+                                 (fast ? inkling_moe_sum_conv_kernel<true> : inkling_moe_sum_conv_kernel<false>);
     kernel<<<(n_embd + width - 1)/width, width, 0, ctx.stream()>>>((const float *) a->data, a->nb[1]/sizeof(float),
             (const float *) w->data, (int) (w->nb[1]/sizeof(float)), (const float *) conv_w->data, (float *) state->data, state->nb[1]/sizeof(float),
             (const int32_t *) rs_ids->data, write_cell, chan_offset, scale, (const float *) residual->data, (float *) dst->data, n_embd, n_used, n_conv);
