@@ -15,7 +15,7 @@ if [[ ${B_PLAIN:-0} == 1 ]]; then
 fi
 ubatch=${B_UBATCH:-512}
 args=(-m "$MODEL" -ngl 99 -ctk q8_0 -ctv q8_0)
-bench=(build/p11/p9-tools/llama-bench "${args[@]}" -fa 1 -ot token_embd.weight=CUDA0 -b 2048 -ub "$ubatch" -o json)
+bench=("${B_BENCH_TOOL:-build/p11/p9-tools/llama-bench}" "${args[@]}" -fa 1 -ot token_embd.weight=CUDA0 -b 2048 -ub "$ubatch" -o json)
 mode=$1
 shift
 case $mode in
@@ -23,6 +23,7 @@ case $mode in
     probe)
         out=$1 label=$2 width=$3
         export SPEC_KINDS=$4 SPEC_REPS=$5 SPEC_MAXT=$6 SPEC_TOKEN_IDS=1
+        if [[ $out == build/p11/matrix-* ]] && python3 perf/p11/b/probe_complete.py "$out" "$label" "$4" "$5" "$6"; then exit 0; fi
         mkdir -p "$out"
         export SPEC_SERVER_LOG="$out/$label.server.log"
         extra=()

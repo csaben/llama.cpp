@@ -1,4 +1,4 @@
-// Run one layer-zero expert projection on the selected backend with repeatable routing and activations.
+// Run one expert projection on the selected backend with repeatable routing and activations.
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpp.h"
@@ -12,6 +12,7 @@
 #include <fstream>
 #include <numeric>
 #include <random>
+#include <string>
 #include <vector>
 
 int main(int argc, char ** argv) {
@@ -24,10 +25,11 @@ int main(int argc, char ** argv) {
     if ((!gate && std::strcmp(argv[2], "down")) || cols < 1 || cols > 512) {
         return 2;
     }
-    const char * name = gate ? "blk.0.ffn_gate_up_exps.weight" : "blk.0.ffn_down_exps.weight";
+    const int layer = std::getenv("P11_LAYER") ? std::atoi(std::getenv("P11_LAYER")) : 0;
+    const std::string name = "blk." + std::to_string(layer) + (gate ? ".ffn_gate_up_exps.weight" : ".ffn_down_exps.weight");
     gguf_context_ptr meta(gguf_init_from_file(argv[1], {true, nullptr}));
     GGML_ASSERT(meta);
-    const int64_t index = gguf_find_tensor(meta.get(), name);
+    const int64_t index = gguf_find_tensor(meta.get(), name.c_str());
     GGML_ASSERT(index >= 0);
     const int64_t * ne = gguf_get_tensor_ne(meta.get(), index);
     GGML_ASSERT(ne[2] == 128 && ne[3] == 1);
@@ -37,7 +39,8 @@ int main(int argc, char ** argv) {
     GGML_ASSERT(backend);
     ggml_context_ptr ctx(ggml_init({ggml_tensor_overhead()*8 + ggml_graph_overhead(), nullptr, true}));
     ggml_tensor * weights = ggml_new_tensor_3d(ctx.get(), gguf_get_tensor_type(meta.get(), index), ne[0], ne[1], ne[2]);
-    ggml_tensor * input = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, ne[0], gate ? 1 : 8, cols);
+    const bool q8 = std::getenv("P11_EXPERT_Q8") != nullptr;
+    ggml_tensor * input = ggml_new_tensor_3d(ctx.get(), q8 ? GGML_TYPE_Q8_1 : GGML_TYPE_F32, ne[0], gate ? 1 : 8, cols);
     ggml_tensor * ids = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 8, cols);
     ggml_tensor * output = ggml_mul_mat_id(ctx.get(), weights, input, ids);
     if (cols <= 7) {
@@ -63,7 +66,6 @@ int main(int argc, char ** argv) {
     for (float & value : activations) {
         value = (int(rng() & 65535) - 32768)/32768.0f;
     }
-    ggml_backend_tensor_set(input, activations.data(), 0, ggml_nbytes(input));
     std::array<int32_t, 128> experts;
     std::iota(experts.begin(), experts.end(), 0);
     std::vector<int32_t> routes(ggml_nelements(ids));
@@ -71,6 +73,19 @@ int main(int argc, char ** argv) {
         std::shuffle(experts.begin(), experts.end(), rng);
         std::copy_n(experts.begin(), 8, routes.begin() + col*8);
     }
+    std::vector<char> quantized;
+    if (q8) {
+        GGML_ASSERT(std::getenv("P11_EXPERT_INPUT_DIR"));
+        quantized.resize(ggml_nbytes(input));
+    }
+    if (const char * directory = std::getenv("P11_EXPERT_INPUT_DIR")) {
+        const std::string prefix = std::string(directory) + "/" + argv[2];
+        std::ifstream x(prefix + ".input", std::ios::binary);
+        std::ifstream routed(prefix + ".ids", std::ios::binary);
+        GGML_ASSERT(x.read(q8 ? quantized.data() : reinterpret_cast<char *>(activations.data()), ggml_nbytes(input)));
+        GGML_ASSERT(routed.read(reinterpret_cast<char *>(routes.data()), ggml_nbytes(ids)));
+    }
+    ggml_backend_tensor_set(input, q8 ? (const void *) quantized.data() : (const void *) activations.data(), 0, ggml_nbytes(input));
     ggml_backend_tensor_set(ids, routes.data(), 0, ggml_nbytes(ids));
     auto run = [&]() {
         GGML_ASSERT(ggml_backend_graph_compute(backend.get(), graph) == GGML_STATUS_SUCCESS);
@@ -78,7 +93,16 @@ int main(int argc, char ** argv) {
     for (int i = 0; i < 8; ++i) {
         run();
     }
-    const int reps = cols > 7 ? 16 : 128;
+    int reps = cols > 7 ? 16 : 128;
+    if (std::getenv("P11_STEADY")) {
+        const int64_t start = ggml_time_us();
+        int count = 0;
+        do {
+            run();
+            ++count;
+        } while (ggml_time_us()-start < 1000000);
+        reps = std::max(1, count/10);
+    }
     std::array<double, 9> times;
     for (double & us : times) {
         const int64_t start = ggml_time_us();
