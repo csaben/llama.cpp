@@ -1,0 +1,7 @@
+leg	prompt_tok_s	decode_tok_s	process_GPU0_MiB	process_GPU1_MiB	board_GPU0_MiB	board_GPU1_MiB
+olda	1705.97	204.64	0	18278	unsampled	18301
+newa	1697.24	208.58	416	18278	1653	18275
+newb	1689.28	208.83	416	18252	1655	18275
+oldb	1710.89	208.09	0	18252	unsampled	18275
+p9 mean	1708.43	206.37
+candidate mean	1693.26	208.70
