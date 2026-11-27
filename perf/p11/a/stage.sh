@@ -16,8 +16,14 @@ files=(llama-server libggml.so.1 libggml-base.so.1 libggml-cpu.so.1 libggml-cuda
 mkdir "$tmp/bin"
 for f in "${files[@]}"; do cp -pL -- "$runtime/$f" "$tmp/bin/$f"; done
 (cd "$tmp/bin" && sha256sum "${files[@]}") >"$tmp/manifest"
+cp -- "$tmp/manifest" "$tmp/bin/SHA256SUMS"
 if [[ -e $snapshot ]]; then
     (cd "$snapshot" && sha256sum --strict --check "$tmp/manifest")
+    if [[ -e $snapshot/SHA256SUMS ]]; then
+        cmp "$snapshot/SHA256SUMS" "$tmp/manifest"
+    else
+        cp -- "$tmp/manifest" "$snapshot/SHA256SUMS"
+    fi
 else
     mv -T -- "$tmp/bin" "$snapshot"
 fi
