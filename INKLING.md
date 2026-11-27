@@ -214,6 +214,26 @@ Open work:
 - **Glue megakernel** (in progress): persistent kernels that keep the per-pass glue on-chip and overlap it with
   weight streaming. The target is about 0.7 ms of glue, which gives about 185 tok/s exact and 200+ on the variant.
 - **Two-GPU tensor parallel** with the P2P driver (`perf/p2p/`): about 96 all-reduces per token. Estimated
-  ~320–380 tok/s once the glue is small, because the glue does not shrink when the model is split.
+  ~320–380 tok/s once the glue is small, because the glue does not shrink when the model is split. Phase 11 (below)
+  measured what the driver buys today.
 - DSpark speculative decoding pays on edits only (phase 6 above); a cheaper drafter head and tensor-core expert
   matvecs are the open pieces.
+
+## Two GPUs over P2P, and gpu-unlock (phase 11)
+
+With aikitoria's P2P open kernel modules (branch `615.71.09-p2p`) one 3090 can write straight into the other's memory
+in ~2.9 µs (`perf/p2p/p2p-check.cu`); [zagitta/gpu-unlock](https://github.com/zagitta/gpu-unlock) puts the tensor
+cores at full rate (BF16 GEMM 74-78 -> 120-131 TFLOPS). Splitting the 201,024-row output head across the two cards,
+with the second card writing its logits directly into the first card's buffer, is the one placement that paid:
+
+| uncensored 2-bit, tok/s | p9, one card | p11a, split head |
+|---|---:|---:|
+| plain tg128 at 0 / 4K / 16K / 32K / 64K | 239.9 / 220.5 / 208.0 / 191.5 / 161.8 | 245.8 / 225.5 / 212.4 / 195.4 / 164.2 |
+| DSpark edit, 384 / 3,000 tokens | 348.4 / 295.6 | 355.2 / 301.1 |
+| prefill 4K / 16K | 3,527 / 3,218 | 3,582 / 3,259 |
+
+Bit-identical to one card: all 194 release-matrix cells (347,520 IDs), PPL 3.0571 / 4.1915 (calibrated 3.0530 /
+4.1979), the rollback battery. A drafter on the second card, expert sharding and whole-layer splits lost to
+synchronization; full-rate tensor cores barely move this bandwidth-bound model. Reports:
+[`perf/p11/a/REPORT.md`](perf/p11/a/REPORT.md), branch `inkling-3090-p11b` `perf/p11/b/REPORT.md`; launcher
+`perf/live/deploy-p11a.sh`. The `uvx` quick start above is still the one-card release.
