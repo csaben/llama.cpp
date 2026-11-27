@@ -4978,7 +4978,7 @@ static void ik_run_peer_experts(ggml_backend_cuda_context & ctx, const ggml_tens
     h.src[0] = &gate;
     h.src[1] = &up;
     if (mma && gu_w->type == GGML_TYPE_Q2_K) {
-        ggml_cuda_ik_moe_four(ctx, gu_w, input, &ids, &gu);
+        ggml_cuda_ik_moe_shard(ctx, gu_w, input, &ids, &gu);
     } else if (gu.ne[2] > 1) {
         GGML_ASSERT(ggml_cuda_ik_mmvq_mr(ctx, gu_w, input, &ids, &gu));
     } else {
@@ -4988,7 +4988,7 @@ static void ik_run_peer_experts(ggml_backend_cuda_context & ctx, const ggml_tens
     if (prefix_route) {
         ggml_cuda_ik_return_q2_prefix(ctx, down_w, &h, &ids, prefix_route, (float *) dest.data);
     } else if (mma && down_w->type == GGML_TYPE_Q2_0) {
-        ggml_cuda_ik_moe_four(ctx, down_w, &h, &ids, &dest);
+        ggml_cuda_ik_moe_shard(ctx, down_w, &h, &ids, &dest);
     } else if (gu.ne[2] > 1) {
         GGML_ASSERT(ggml_cuda_ik_mmvq_mr(ctx, down_w, &h, &ids, &dest));
     } else {
@@ -5036,7 +5036,12 @@ static int ik_peer_experts(ggml_backend_cuda_context & ctx, ggml_cgraph * graph,
         return 0;
     }
     static const int configured = ggml_cuda_env_int("IK_PEER_SLOTS", 4);
-    const int slots = cols == 1 && mode == 0 && configured >= 2 && configured <= 4 ? configured : 4;
+    static const bool single = ggml_cuda_env_flag("IK_PEER_SINGLE");
+    if (single && cols != 1) {
+        return 0;
+    }
+    const bool asymmetric = mode == 0 || (single && configured == 3);
+    const int slots = cols == 1 && asymmetric && configured >= 2 && configured <= 4 ? configured : 4;
     const int kept = 8-slots;
     static const bool direct = ggml_cuda_env_flag("IK_PEER_EXPERT_DIRECT");
     static const bool sum_prefix = ggml_cuda_env_flag("IK_PEER_PREFIX");

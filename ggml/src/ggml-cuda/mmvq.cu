@@ -2503,9 +2503,9 @@ static __global__ void ik_q2k_moe(
     }
 }
 
-void ggml_cuda_ik_moe_four(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, const ggml_tensor * ids, ggml_tensor * out) {
+void ggml_cuda_ik_moe_shard(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, const ggml_tensor * ids, ggml_tensor * out) {
     const int cols = out->ne[2];
-    const dim3 grid(w->ne[1]/16, 4*cols);
+    const dim3 grid(w->ne[1]/16, out->ne[1]*cols);
     const dim3 block(32, w->ne[0]/(w->type == GGML_TYPE_Q2_K ? ik_mma_traits<GGML_TYPE_Q2_K>::cpw : ik_mma_traits<GGML_TYPE_Q2_0>::cpw));
     const auto stream = ctx.stream();
     const auto * weights = (const uint8_t *) w->data;
@@ -2515,6 +2515,19 @@ void ggml_cuda_ik_moe_four(ggml_backend_cuda_context & ctx, const ggml_tensor * 
     const uint32_t s_ids = ids->nb[1]/sizeof(int32_t), s_tok = x->nb[2]/sizeof(block_q8_1);
     const uint32_t s_slot = x->ne[1] > 1 ? x->nb[1]/sizeof(block_q8_1) : 0;
     const uint32_t d_tok = out->nb[2]/sizeof(float), d_slot = out->nb[1]/sizeof(float);
+    if (out->ne[1] != 4) {
+        GGML_ASSERT(cols == 1 && (out->ne[1] == 3 || out->ne[1] == 5));
+        auto launch = [&](auto slots) {
+            if (w->type == GGML_TYPE_Q2_K) {
+                ik_q2k_moe<1, decltype(slots)::value><<<grid, block, 0, stream>>>(weights, y, id, result, w->nb[1], w->nb[2], cols, s_ids, s_tok, s_slot, d_tok, d_slot);
+            } else {
+                ik_mma_moe<GGML_TYPE_Q2_0, 1, decltype(slots)::value><<<grid, block, 0, stream>>>(weights, y, id, result, w->nb[1], w->nb[2], cols, s_ids, s_tok, s_slot, d_tok, d_slot);
+            }
+        };
+        if (out->ne[1] == 3) { launch(std::integral_constant<int, 3>{}); }
+        else { launch(std::integral_constant<int, 5>{}); }
+        return;
+    }
     if (w->type == GGML_TYPE_Q2_K) {
         auto launch = [&](auto width) {
             ik_q2k_moe<decltype(width)::value, 4><<<grid, block, 0, stream>>>(weights, y, id, result, w->nb[1], w->nb[2], cols, s_ids, s_tok, s_slot, d_tok, d_slot);
