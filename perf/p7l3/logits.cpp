@@ -77,6 +77,9 @@ int main(int argc, char ** argv) {
     cp.n_batch = 2048;
     cp.n_ubatch = 512;
     cp.n_seq_max = sequences;
+    if (const char * swa = getenv("LOGITS_SWA_FULL")) {
+        cp.swa_full = atoi(swa) != 0;
+    }
     if (interleave) {
         cp.kv_unified = true;
     }
