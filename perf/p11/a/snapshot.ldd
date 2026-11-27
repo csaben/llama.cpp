@@ -1,0 +1,22 @@
+	linux-vdso.so.1
+	libllama-server-impl.so => /home/arelius/inkling-live-bin-p11a-a16c61e5/libllama-server-impl.so
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6
+	libllama-common.so.1 => /home/arelius/inkling-live-bin-p11a-a16c61e5/libllama-common.so.1
+	libmtmd.so.1 => /home/arelius/inkling-live-bin-p11a-a16c61e5/libmtmd.so.1
+	libllama.so.1 => /home/arelius/inkling-live-bin-p11a-a16c61e5/libllama.so.1
+	libggml.so.1 => /home/arelius/inkling-live-bin-p11a-a16c61e5/libggml.so.1
+	libggml-base.so.1 => /home/arelius/inkling-live-bin-p11a-a16c61e5/libggml-base.so.1
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6
+	/lib64/ld-linux-x86-64.so.2
+	libggml-cpu.so.1 => /home/arelius/inkling-live-bin-p11a-a16c61e5/libggml-cpu.so.1
+	libggml-cuda.so.1 => /home/arelius/inkling-live-bin-p11a-a16c61e5/libggml-cuda.so.1
+	libgomp.so.1 => /lib/x86_64-linux-gnu/libgomp.so.1
+	libcudart.so.12 => /lib/x86_64-linux-gnu/libcudart.so.12
+	libcublas.so.12 => /lib/x86_64-linux-gnu/libcublas.so.12
+	libcublasLt.so.12 => /lib/x86_64-linux-gnu/libcublasLt.so.12
+	libcuda.so.1 => /lib/x86_64-linux-gnu/libcuda.so.1
+	libdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2
+	libpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0
+	librt.so.1 => /lib/x86_64-linux-gnu/librt.so.1

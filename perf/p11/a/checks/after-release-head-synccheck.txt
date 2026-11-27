@@ -1,0 +1,9 @@
+width 1: 16384 FP32 values matched over four inputs
+width 2: 32768 FP32 values matched over four inputs
+width 3: 49152 FP32 values matched over four inputs
+width 4: 65536 FP32 values matched over four inputs
+width 5: 81920 FP32 values matched over four inputs
+width 6: 98304 FP32 values matched over four inputs
+width 7: 114688 FP32 values matched over four inputs
+width 8: 131072 FP32 values matched over four inputs
+========= ERROR SUMMARY: 0 errors
