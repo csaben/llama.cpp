@@ -1,0 +1,3 @@
+edit-193408 {'prompt_n': 193408, 'prompt_per_second': 1276.5584541672329, 'predicted_n': 3000, 'predicted_per_second': 78.5100627831804, 'draft_n': None, 'draft_n_accepted': None}
+full message equal True emitted IDs equal True
+samples 959 peak used MiB 20290 min free MiB 3880

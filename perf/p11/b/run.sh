@@ -10,6 +10,9 @@ export LD_LIBRARY_PATH="${B_LIBS:-$HOME/inkling-live-bin-p9-72fd097}:$PWD/build/
 export SPEC_SERVER_BIN="${LD_LIBRARY_PATH%%:*}/llama-server"
 export LLAMA_DSPARK_ADAPTIVE=${B_ADAPT:-1} LLAMA_DSPARK_POLICY=${B_POLICY:-1}
 export IK_WINDOW_COLS=$window_cols IK_MMA=${B_MMA:-3} IK_MR=${B_MR:-1}
+if [[ ${B_PLAIN:-0} == 1 ]]; then
+    unset IK_MR IK_MMA IK_WINDOW_COLS IK_QUEUE_INPUTS GGML_CUDA_GRAPH_CHUNK_SIZE
+fi
 ubatch=${B_UBATCH:-512}
 args=(-m "$MODEL" -ngl 99 -ctk q8_0 -ctv q8_0)
 bench=(build/p11/p9-tools/llama-bench "${args[@]}" -fa 1 -ot token_embd.weight=CUDA0 -b 2048 -ub "$ubatch" -o json)
