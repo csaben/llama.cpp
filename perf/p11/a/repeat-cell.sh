@@ -26,6 +26,8 @@ if [[ $setting == *-adapt ]]; then export P11_ADAPT=1; fi
 d="perf/p11/a/replay/$family/$suite/$budget"
 log="build/p11a/replay/$family/$suite/$budget"
 mkdir -p "$d" "$log"
+exec {cell_lock}>"$log/$setting.lock"
+flock "$cell_lock"
 if [[ ! -e "$log/$setting.done" ]]; then
     P11_OUT="$d" P11_LOG="$log/$setting.server" perf/p11/a/probe.sh "$mode" "$dev" "$setting"
     for kind in ${P11_KINDS//,/ }; do
