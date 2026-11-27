@@ -44,6 +44,9 @@ if ((B_MIN_FREE_MIB >= 11000)); then
     if [[ ${B_PPL_TICKET:-} =~ ^(old|new)[12]$ ]]; then
         queue=(flock "build/p11/stream-b-ppl-${B_PPL_TICKET}.lock")
     fi
+    if [[ ${B_ROLLBACK_DEPTH:-} =~ ^(2558|3069|4094)$ ]]; then
+        queue=(flock "build/p11/stream-b-rollback-${B_ROLLBACK_DEPTH}.lock")
+    fi
 elif [[ ${B_OPERATOR_SWEEP:-0} == 1 ]]; then
     queue=(flock "build/p11/stream-b-operator-$((PPID % 4)).lock")
     for arg in "$@"; do
@@ -52,6 +55,9 @@ elif [[ ${B_OPERATOR_SWEEP:-0} == 1 ]]; then
             break
         fi
     done
+    if [[ ${B_REPLAY_SLOT:-} =~ ^[0-5]$ ]]; then
+        queue=(flock "build/p11/stream-b-native-replay-${B_REPLAY_SLOT}.lock")
+    fi
 fi
 if [[ ${B_LOCAL_GROUP_FD:-} =~ ^[0-9]+$ && /proc/self/fd/$B_LOCAL_GROUP_FD -ef build/p11/stream-b.lock ]]; then
     flock -n "$B_LOCAL_GROUP_FD"

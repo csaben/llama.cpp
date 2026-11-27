@@ -18,7 +18,9 @@ assert kind in ('tg', 'pp')
 legs = ('old1', 'new1', 'new2', 'old2')
 runtimes = ('old', 'new')
 timed = [work / f'{kind}-timed-{leg}.json' for leg in legs]
-if '--tail' in sys.argv:
+if '--outputs' in sys.argv:
+    timed = []
+elif '--tail' in sys.argv:
     timed[2:] = [work / 'tail' / f'{kind}-timed-{leg}.json' for leg in legs[2:]]
     for predecessor, current in zip(timed[1:], timed[2:]):
         assert predecessor.with_suffix('.done').stat().st_mtime_ns <= current.with_suffix('.start').stat().st_mtime_ns
@@ -28,7 +30,8 @@ for file in timed + captures:
 metrics = [json.loads(f.read_bytes()) for f in timed]
 for label in runtimes:
     metrics.append(json.loads((work / f'{kind}-output-{label}.json').read_bytes()))
-columns = ['cell', *legs, 'old_mean', 'new_mean', 'delta_pct', 'rows', 'input_ids', 'input_sha256', 'logit_sha256']
+rate_columns = [*legs, 'old_mean', 'new_mean', 'delta_pct'] if timed else []
+columns = ['cell', *rate_columns, 'rows', 'input_ids', 'input_sha256', 'logit_sha256']
 output = io.StringIO()
 writer = csv.writer(output, delimiter='\t', lineterminator='\n')
 writer.writerow(columns)
@@ -51,18 +54,22 @@ with captures[0].open('rb') as old, captures[1].open('rb') as new:
             assert np.isfinite(np.frombuffer(data, dtype='<f4')).all()
             token_hash.update(width + tokens)
             logit_hash.update(data)
-        rates = [r['avg_ts'] for r in group[:4]]
-        before, after = statistics.mean(rates[::3]), statistics.mean(rates[1:3])
-        writer.writerow([f'{kind}{d}', *(round(x, 4) for x in (*rates, before, after, 100*(after/before-1))),
+        values = []
+        if timed:
+            rates = [r['avg_ts'] for r in group[:4]]
+            before, after = statistics.mean(rates[::3]), statistics.mean(rates[1:3])
+            values = [*rates, before, after, 100*(after/before-1)]
+        writer.writerow([f'{kind}{d}', *(round(x, 4) for x in values),
                          len(sizes), sum(sizes), token_hash.hexdigest(), logit_hash.hexdigest()])
     assert old.read(1) == new.read(1) == b''
-table = dest / f'{kind}.tsv'
+label = kind if timed else f'{kind}-output-proof'
+table = dest / f'{label}.tsv'
 table.write_text(output.getvalue())
 paths = [table, *timed, *(p.with_suffix('.done') for p in timed)]
-for label in runtimes:
-    paths.extend(work / f'{kind}-output-{label}.{ext}' for ext in ('json', 'done'))
+for runtime in runtimes:
+    paths.extend(work / f'{kind}-output-{runtime}.{ext}' for ext in ('json', 'done'))
 paths.extend(p.with_suffix('.start') for p in timed if p.with_suffix('.start').is_file())
-archive = dest / f'{kind}-measurements.tar.gz'
+archive = dest / f'{label}-measurements.tar.gz'
 with tarfile.open(archive, 'w:gz') as t:
     for p in paths:
         t.add(p, arcname=p.name)
