@@ -2,7 +2,7 @@
 
 Stream B staged the byte-identical p9 runtime at `~/inkling-live-bin-p11b-72fd097` for the uncensored 2-bit model on GPU0. Its manual deployment selects 128K, port 8031, alias `inkling-mini` and the Q8 vision projector. The snapshot passed all nine hashes and eight library-resolution checks. The deploy script was syntax-checked and left unexecuted. [Stream B report](p11/b/REPORT.md), [manifest](p11/b/snapshot.sha256), [deployment](live/deploy-p11b.sh).
 
-The experimental source at `p11b-wide-verify` retains an opt-in exact-width Q2_K kernel for five to seven rows and an opt-in lower DSpark verify-cost prior. A 40-column prefill tile was removed after replaying model routing. Separate native release qualification was interrupted when another server occupied 21,354 MiB of GPU0. The report records which numerical and performance checks completed. [Tuning evidence](p11/b/REPORT.md#profiles-and-tuning), [release checks](p11/b/REPORT.md#verification-and-gpu-availability).
+The experimental source at `p11b-wide-verify` retains an opt-in exact-width Q2_K kernel for five to seven rows and an opt-in lower DSpark verify-cost prior. A 40-column prefill tile was removed after replaying model routing. After a separate server released 21,354 MiB of GPU0, the native 384-token crossover measured 337.4 to 348.9 tok/s on edit. All four prompts matched both plain controls, including the complete messages and every ID. The report records the full release checks. [Tuning evidence](p11/b/REPORT.md#profiles-and-tuning), [release checks](p11/b/REPORT.md#verification-and-gpu-availability).
 
 # Phase 9
 
