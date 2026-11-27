@@ -1,0 +1,6 @@
+n4             code      prompt     47   384 tok   208.4 tok/s    1385 chars  accepted/proposed 231/606  runs 208/208/208
+n4             edit      prompt   1025   384 tok   330.8 tok/s    1135 chars  accepted/proposed 299/336  runs 331/331/331
+n4             prose     prompt     36   384 tok   186.0 tok/s    1468 chars  accepted/proposed 213/670  runs 186/186/186
+n4             edit@16K  prompt  16044   384 tok   270.2 tok/s    1242 chars  accepted/proposed 288/378  runs 270/270/270
+n4             edit@32K  prompt  32045   384 tok   271.4 tok/s    1173 chars  accepted/proposed 294/353  runs 271/271/272
+n4             agent     prompt   2025   384 tok   279.1 tok/s    1300 chars  accepted/proposed 285/388  runs 279/279/279
