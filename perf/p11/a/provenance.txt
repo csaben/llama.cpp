@@ -1,0 +1,9 @@
+Release source: a16c61e5 (p11a-direct-head), rebuilt from a clean detached worktree.
+The server and shared libraries used by the release-matrix, release ABBA, and release numerical checks are in build/p11a/repro-direct/bin.
+CMake Release, GGML_CUDA=ON, CMAKE_CUDA_ARCHITECTURES=86, CMAKE_CUDA_COMPILER=$HOME/opt/cuda-12.8/bin/nvcc, CUDAToolkit_ROOT=/usr, LLAMA_CURL=OFF.
+The clean build reports LLAMA_COMMIT=a16c61e5 and GGML_COMMIT=a16c61e5. The existing build used for screening had older embedded version strings.
+
+The development snapshot and clean build each contained 152 SM86 cubins and 8,337 GPU executable sections.
+After normalizing NVCC's translation-unit identifiers, 8,336 sections were byte-identical, including all 19 ik_iq4_nl_window variants and all 6 symbols containing peer.
+The remaining kernel was flash_attn_tile<96,96,2,8,false>. The uncensored target and folded drafter report 128-dimensional key/value heads.
+The complete release tests use the clean build as a unit. Development snapshot measurements retain their original labels.

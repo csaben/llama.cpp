@@ -11,12 +11,13 @@ for ctx in "$@"; do
     label="$name-$ctx"
     if perf/p11/a/capacity.sh "$place" draft "$label" "$ctx" "$depth" 3000; then
         ref="p9-ref-$ctx"
-        if [[ ! -s perf/p11/a/capacity/$ref.ids ]]; then
+        if [[ $ctx == 131072 ]]; then ref=p9-128-plain; fi
+        if [[ ! -s perf/p11/a/capacity/$ref.timings ]]; then
             env -u IK_PEER_NATIVE -u IK_PEER_DIRECT -u IK_PEER_HEAD P11_BIN="$HOME/inkling-live-bin-p9-72fd097" perf/p11/a/capacity.sh one plain "$ref" "$ctx" "$depth" 3000
         fi
         for ext in ids json; do cmp "perf/p11/a/capacity/$ref.$ext" "perf/p11/a/capacity/$label.$ext"; done
         echo "$ctx completed and matched"
-        break
+        exit 0
     else
         rc=$?
         [[ $rc != 75 ]] || exit "$rc"
@@ -24,3 +25,4 @@ for ctx in "$@"; do
         echo "$ctx exceeded memory"
     fi
 done
+exit 1

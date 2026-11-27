@@ -19,8 +19,10 @@ if [[ $placement != one ]]; then
     if [[ $placement == separate-both ]]; then
         args=(--device CUDA0,CUDA1 -ts 1/0)
         draft_args=(--spec-draft-device CUDA1 --spec-draft-override-tensor mask_embd.weight=CUDA1)
-    elif [[ $placement == head ]]; then
+    elif [[ $placement == head || $placement == layer || $placement == table ]]; then
         args=(-ts 1/0)
+        if [[ $placement == layer ]]; then args=(--device CUDA1,CUDA0 -ts 1/48); fi
+        if [[ $placement == table ]]; then export LLAMA_ARG_OVERRIDE_TENSOR='token_embd.weight=CUDA1'; fi
         draft_args=(--spec-draft-device CUDA0)
         export IK_PEER_HEAD=CUDA1
     else
@@ -37,7 +39,9 @@ ulimit -c 0
 pid=$!
 nvidia-smi -i "$cards" --query-gpu=timestamp,index,memory.used,memory.free --format=csv,noheader,nounits -lms 250 >"build/p11a/capacity/$label.vram" &
 monitor=$!
-trap 'kill "$pid" "$monitor" 2>/dev/null || :; wait "$pid" || :; wait "$monitor" || :' EXIT
+nvidia-smi -i "$cards" --query-compute-apps=gpu_uuid,pid,used_gpu_memory --format=csv,noheader,nounits -lms 250 >"build/p11a/capacity/$label.process-vram" &
+process_monitor=$!
+trap 'kill "$pid" "$monitor" "$process_monitor" 2>/dev/null || :; wait "$pid" || :; wait "$monitor" || :; wait "$process_monitor" || :' EXIT
 for i in {1..240}; do
     kill -0 "$pid" || exit 1
     if curl -fsS --max-time 1 http://127.0.0.1:18502/health >/dev/null 2>&1; then break; fi
@@ -52,3 +56,4 @@ fi
 rg 'n_ctx_slot =|model buffer size =|KV buffer size =|compute buffer size =' "$log" >"$out.memory"
 nvidia-smi -i "$cards" --query-compute-apps=gpu_uuid,pid,used_gpu_memory --format=csv,noheader | awk -F', ' -v p="$pid" '$2 == p' >>"$out.memory"
 awk -F', ' '{d=$2; if ($3>peak[d]) peak[d]=$3; if (!(d in free) || $4<free[d]) free[d]=$4} END {for (d in peak) print "physical", d, "peak used MiB", peak[d], "min free MiB", free[d]}' "build/p11a/capacity/$label.vram" >>"$out.memory"
+awk -F', ' -v pid="$pid" '$2 == pid && $3+0 > peak[$1]+0 {peak[$1]=$3+0} END {for (uuid in peak) print "process peak MiB", uuid, peak[uuid]}' "build/p11a/capacity/$label.process-vram" >>"$out.memory"
