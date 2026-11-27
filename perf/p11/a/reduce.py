@@ -20,6 +20,7 @@ for mode, depths in (("tg", (0, 4096, 16384, 32768, 65536)), ("pp", (4096, 16384
     for depth in depths:
         key = f"{mode}{depth}"
         vals = []
+        times = []
         for leg in legs:
             if bench != work:
                 batch = json.loads((bench / f"{bench.name}-{leg}-{mode}.json").read_text())
@@ -31,7 +32,12 @@ for mode, depths in (("tg", (0, 4096, 16384, 32768, 65536)), ("pp", (4096, 16384
             assert entry["n_gen"] == (128 if mode == "tg" else 0)
             assert entry["n_depth"] == (depth if mode == "tg" else 0)
             assert len(entry["samples_ts"]) == 3 and min(entry["samples_ts"]) > 0
+            assert entry["n_batch"] == 2048 and entry["n_ubatch"] == 512
+            assert entry["type_k"] == entry["type_v"] == "q8_0" and entry["flash_attn"] == 1
+            assert Path(entry["model_filename"]).name == "Inkling-2-Mini-AtomicChat-Uncensored-Q2K-Q2_0-fit.gguf"
+            times.append(entry["test_time"])
             vals.append(entry["avg_ts"])
+        assert times == sorted(times) and len(set(times)) == 4, (key, times)
         emit(key, vals)
 for budget in (384, 3000):
     key = f"edit{budget}"
