@@ -19,6 +19,10 @@ if [[ $placement != one ]]; then
     if [[ $placement == separate-both ]]; then
         args=(--device CUDA0,CUDA1 -ts 1/0)
         draft_args=(--spec-draft-device CUDA1 --spec-draft-override-tensor mask_embd.weight=CUDA1)
+    elif [[ $placement == head ]]; then
+        args=(-ts 1/0)
+        draft_args=(--spec-draft-device CUDA0)
+        export IK_PEER_HEAD=CUDA1
     else
         args=(--device CUDA0)
         draft_args=(--spec-draft-device CUDA0)
