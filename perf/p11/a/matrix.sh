@@ -5,6 +5,7 @@ cd "$(dirname "$0")/../../.."
 root=${1:?output directory} placement=${2:?placement}
 for pass in controls drafted; do
     for budget in 384 3000; do
+        if [[ -n ${P11_MATRIX_BUDGET:-} && $budget != "$P11_MATRIX_BUDGET" ]]; then continue; fi
         for suite in main prose fixed; do
             out="$root/$suite/$budget"
             log="build/p11a/matrix/$(basename "$root")/$suite/$budget"
@@ -37,4 +38,6 @@ for pass in controls drafted; do
         done
     done
 done
-python3 perf/p8bc/summarize.py "$root" >"$root/cells.tsv"
+if [[ -z ${P11_MATRIX_BUDGET:-} ]]; then
+    python3 perf/p8bc/summarize.py "$root" >"$root/cells.tsv"
+fi

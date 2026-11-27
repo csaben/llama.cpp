@@ -31,6 +31,7 @@ if [[ $placement != one ]]; then
         row|tensor) args=(-sm "$placement" -ts 1/1);;
         separate) args=(--device CUDA0); draft_args=(--spec-draft-device CUDA1 --spec-draft-override-tensor mask_embd.weight=CUDA1);;
         separate-both) args=(--device CUDA0,CUDA1 -ts 1/0); draft_args=(--spec-draft-device CUDA1 --spec-draft-override-tensor mask_embd.weight=CUDA1);;
+        balanced) args=(--device CUDA1,CUDA0 -ts "${P11_LAYER_SPLIT:-1/3}"); draft_args=(--spec-draft-device CUDA0); export IK_PEER_HEAD=CUDA1;;
         head) args=(-ts 1/0); draft_args=(--spec-draft-device CUDA0); export IK_PEER_HEAD=CUDA1;;
         peer) args=(--device CUDA0); draft_args=(--spec-draft-device CUDA0);;
         *) exit 2;;
