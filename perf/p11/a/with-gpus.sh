@@ -25,9 +25,14 @@ while [[ ! -e $repo/perf/STOP ]]; do
     [[ $rc == 73 ]] || exit "$rc"
 
     # Give one-card work a turn if GPU0 stays busy. Increase the reservation after repeated collisions.
-    if flock "$turn_lock" flock -E 74 -w "$reserve" "$shared_lock" flock -n -E 73 "$active_lock" "${rank[@]}" "$@"; then exit 0; else rc=$?; fi
-    [[ $rc == 74 || $rc == 73 ]] || exit "$rc"
-    reserve=$((2*reserve))
+    if flock -n -E 76 "$turn_lock" flock -E 74 -w "$reserve" "$shared_lock" flock -n -E 73 "$active_lock" "${rank[@]}" "$@"; then exit 0; else rc=$?; fi
+    if [[ $rc == 76 ]]; then
+        sleep 0.15
+    elif [[ $rc == 74 || $rc == 73 ]]; then
+        reserve=$((2*reserve))
+    else
+        exit "$rc"
+    fi
     [[ $(date +%s) -lt $(date -d "${P11_UNTIL:-2026-11-27 07:30 EST}" +%s) ]] || exit 75
 done
 exit 75
