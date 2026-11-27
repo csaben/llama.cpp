@@ -12,7 +12,7 @@ for cols in "${widths[@]}"; do
     for projection in gate down; do
         name="$suite-$label-$projection-$cols"
         if [[ -s "$raw/$name.tsv" ]]; then continue; fi
-        B_MIN_FREE_MIB=1000 perf/p11/b/gpu.sh env LD_LIBRARY_PATH="$runtime" IK_MMA=3 IK_MR=1 GGML_CUDA_GRAPH_CHUNK_SIZE=0 \
+        B_MIN_FREE_MIB=1000 perf/p11/b/gpu.sh env LD_LIBRARY_PATH="$runtime" IK_MMA="${B_MMA:-3}" IK_MR=1 GGML_CUDA_GRAPH_CHUNK_SIZE=0 \
             build/p11/expert "$model" "$projection" "$cols" "$work/$name.f32" >"$work/$name.times" 2>"$work/$name.log"
         test "$(stat -c %s "$work/$name.f32")" = "$((4*2304*8*cols))"
         digest=$(sha256sum "$work/$name.f32" | cut -d' ' -f1)

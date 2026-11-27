@@ -15,7 +15,7 @@ if ((width)); then
     mode=dspark
     extra=(--spec-type draft-dspark --spec-draft-model "$P8_DRAFT" --spec-draft-n-max "$width" --spec-draft-n-ubatch 512 --spec-draft-p-min 0)
 fi
-export LLAMA_DSPARK_ADAPTIVE=1
+export LLAMA_DSPARK_ADAPTIVE=1 IK_MMA=${B_MMA:-3} IK_WINDOW_COLS=${B_WINDOW_COLS:-1}
 python3 - "$W/client.py" <<'PY'
 from pathlib import Path
 import sys

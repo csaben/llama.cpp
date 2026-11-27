@@ -31,9 +31,9 @@ rows = re.findall(r'(\d+) (?:output )?rows (?:up to position|in \d+ steps).*?: (
 assert len(rows) == 11 and sum(int(n) for n, _ in rows) == 2714 and all(b == '0' for _, b in rows), rows
 PY
 cat perf/ppl.txt perf/ppl.txt >"$work/depth-input"
-for pack in 0 1; do
+for pack in 0 1 ${B_EXTRA_PACK:-}; do
     for depth in 200 4096 16384 32768; do
-        MR_RS=6 MR_SIZES=2,3,4,5,6,7 MR_RAND=37 MR_PLAIN_PCT=0 MR_CTX=34816 IK_WINDOW_COLS=$pack mr "wide-$pack-$depth" "$work/depth-input" "$depth" 64
+        MR_RS=6 MR_SIZES=2,3,4,5,6,7 MR_RAND=37 MR_PLAIN_PCT=0 MR_CTX=34816 B_WINDOW_COLS=$pack mr "wide-$pack-$depth" "$work/depth-input" "$depth" 64
     done
 done
 for width in 2 3 4 5 6 7; do

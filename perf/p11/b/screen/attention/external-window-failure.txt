@@ -1,0 +1,1 @@
+/home/arelius/llama.cpp-fast/ggml/src/ggml-cuda/inkling.cu:3951: GGML_ASSERT(!ext && !v1 && n_rows <= 8 && a.n_head_kv*n_rows <= 64) failed
