@@ -7,6 +7,7 @@ from pathlib import Path
 root = Path(__file__).parent
 name = sys.argv[1]
 work = root / "paired" / name
+bench = root / "paired" / sys.argv[2] if len(sys.argv) > 2 else work
 legs = ["olda", "newa", "newb", "oldb"]
 
 def emit(key, values):
@@ -20,7 +21,12 @@ for mode, depths in (("tg", (0, 4096, 16384, 32768, 65536)), ("pp", (4096, 16384
         key = f"{mode}{depth}"
         vals = []
         for leg in legs:
-            entry, = json.loads((work / f"{name}-{leg}-{key}.json").read_text())
+            if bench != work:
+                batch = json.loads((bench / f"{bench.name}-{leg}-{mode}.json").read_text())
+                field = "n_depth" if mode == "tg" else "n_prompt"
+                entry, = [row for row in batch if row[field] == depth]
+            else:
+                entry, = json.loads((work / f"{name}-{leg}-{key}.json").read_text())
             assert entry["n_prompt"] == (depth if mode == "pp" else 0)
             assert entry["n_gen"] == (128 if mode == "tg" else 0)
             assert entry["n_depth"] == (depth if mode == "tg" else 0)
