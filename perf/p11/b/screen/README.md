@@ -17,3 +17,5 @@ The operator sweeps save one full-output SHA-256 and nine timing groups per shap
 
 
 The [first operator sample archive](overlap-operator-samples.tar.gz) contains all 473 expert and 291 attention measurements collected during the other server's GPU reservation. Their completion times and SHA-256 digests are in `index.tsv`. The [ordinary-device replay samples](native-operator-samples.tar.gz) have the same layout and contain only measurements taken after GPU0 was released. Run `python3 perf/p11/b/screen/archive_samples.py native` to package the completed replay files.
+
+To replay exactly the original holdings, extract the `expert/` files from the first sample archive into `build/p11/occupied/screen/micro` and the `attention/` files into `build/p11/finished-scan`, stripping the first path component. The `replay-experts.py` recipe enumerates all 473 original expert measurements. Each invocation of its benchmark fixes the runtime and kernel configuration while varying representative routes and sizes. The driver constructs fresh tensors per case, saves all FP32 output bytes, and releases the shared lock before the Python caller hashes them.

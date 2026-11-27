@@ -18,7 +18,16 @@ fi
 export B_MIN_FREE_MIB
 queue=(flock build/p11/stream-b.lock)
 if ((B_MIN_FREE_MIB >= 11000)); then
-    queue=(flock "build/p11/stream-b-resident-$((PPID % 8)).lock")
+    queue=(flock "build/p11/stream-b-resident-$((PPID % 6)).lock")
+    if [[ ${2:-} == probe ]]; then
+        case ${3:-} in
+            build/p11/matrix-narrow/*)
+                suite=${3%/*}
+                queue=(flock "build/p11/stream-b-narrow-${suite##*/}.lock") ;;
+            build/p11/matrix-p9/main/*) queue=(flock build/p11/stream-b-p9-main.lock) ;;
+            build/p11/matrix-p9/*) queue=(flock build/p11/stream-b-p9-extra.lock) ;;
+        esac
+    fi
 elif [[ ${B_OPERATOR_SWEEP:-0} == 1 ]]; then
     queue=(flock "build/p11/stream-b-operator-$((PPID % 4)).lock")
 fi

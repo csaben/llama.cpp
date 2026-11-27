@@ -2,6 +2,7 @@
 # Run the p9 release matrix with one lock acquisition per server.
 set -euo pipefail
 out=${1:?output directory}
+worker=$BASHPID
 for budget in ${B_MATRIX_BUDGETS:-384 3000}; do
     for suite in ${B_MATRIX_SUITES:-main prose fixed}; do
         dir="$out/$suite/$budget"
@@ -23,13 +24,13 @@ for budget in ${B_MATRIX_BUDGETS:-384 3000}; do
                 perf/p11/b/gpu.sh perf/p11/b/run.sh probe "$dir" "$row" "$width" "$kinds" "$reps" "$budget"
             fi
             if [[ $row != plain ]]; then
-                SPEC_KINDS="$kinds" SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py "$dir" plain "$row" >"$dir/$row.equal.$BASHPID"
-                mv "$dir/$row.equal.$BASHPID" "$dir/$row.equal"
+                SPEC_KINDS="$kinds" SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py "$dir" plain "$row" >"$dir/$row.equal.$worker"
+                mv "$dir/$row.equal.$worker" "$dir/$row.equal"
             fi
         done
     done
 done
 if [[ -z ${B_MATRIX_SUITES:-} && -z ${B_MATRIX_BUDGETS:-} ]]; then
-    python3 perf/p8bc/summarize.py "$out" >"$out/cells.tsv.$BASHPID"
-    mv "$out/cells.tsv.$BASHPID" "$out/cells.tsv"
+    python3 perf/p8bc/summarize.py "$out" >"$out/cells.tsv.$worker"
+    mv "$out/cells.tsv.$worker" "$out/cells.tsv"
 fi
