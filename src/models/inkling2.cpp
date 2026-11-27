@@ -1406,7 +1406,11 @@ void llama_model_inkling2::graph::build_output(ggml_tensor * cur, const std::vec
         ggml_prec_set_acc(logits, GGML_PREC_F32);
         return logits;
     };
-    if (m.output_half[1] && fused && cur->ne[1] <= 8) {
+    static const bool native = getenv("IK_PEER_NATIVE") && atoi(getenv("IK_PEER_NATIVE")) != 0;
+    if (native && m.output_half[1] && fused && (cur->ne[1] == 1 || mr)) {
+        cur = project(model.output);
+        cur->extra = m.output_half[1];
+    } else if (!native && m.output_half[1] && fused && cur->ne[1] <= 8) {
         auto * upper = project(m.output_half[1]);
         ggml_build_forward_expand(gf, upper);
         auto * lower = project(m.output_half[0]);

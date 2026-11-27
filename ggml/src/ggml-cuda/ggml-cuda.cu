@@ -2539,9 +2539,91 @@ static bool ggml_cuda_should_fuse_mul_mat_q(const ggml_tensor * up, const ggml_t
     return ggml_cuda_mmq_fusion_is_efficient(x_up->type, ggml_prec_get_src(up, 1), x_up->ne[1], ncols, nchannels, device);
 }
 
+static __global__ void ik_peer_copy(const float * src, float * dst, int rows, int src_stride, int dst_stride) {
+    const int row = blockIdx.x*blockDim.x + threadIdx.x;
+    if (row < rows) {
+        dst[blockIdx.y*dst_stride + row] = src[blockIdx.y*src_stride + row];
+    }
+}
+
+static bool ik_peer_head(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, ggml_tensor * dst) {
+    static const bool enabled = ggml_cuda_env_flag("IK_PEER_NATIVE");
+    if (!enabled || !dst->extra || !ggml_cuda_p2p_enabled() || ggml_cuda_info().device_count != 2 ||
+            ctx.curr_stream_no != 0 || !ctx.stream_context().concurrent_events.empty() ||
+            w->type != GGML_TYPE_IQ4_NL || strcmp(w->name, "output.weight") != 0 || !ggml_is_matrix(w) ||
+            x->type != GGML_TYPE_F32 || !ggml_is_matrix(x) || !ggml_is_contiguous(x) || !ggml_is_contiguous(dst) ||
+            x->ne[1] > 8 || (x->ne[1] > 1 && ggml_get_op_params_i32(dst, 15) != GGML_IK_MR_MAGIC)) {
+        return false;
+    }
+    const int other = 1 - ctx.device;
+    const auto * upper = static_cast<const ggml_tensor *>(dst->extra);
+    if (ggml_backend_buffer_get_type(upper->buffer) != ggml_backend_cuda_buffer_type(other) ||
+            upper->type != w->type || w->ne[1] != 2*upper->ne[1] || upper->ne[0] != w->ne[0] ||
+            upper->ne[1] % 8 != 0 || ggml_cuda_info().devices[other].cc != GGML_CUDA_CC_AMPERE_GA10X ||
+            ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X) {
+        return false;
+    }
+
+    auto & state = ctx.stream_context();
+    auto main_stream = ctx.stream();
+    if (!state.ik_peer) {
+        int can_send, can_return;
+        CUDA_CHECK(cudaDeviceCanAccessPeer(&can_send, ctx.device, other));
+        CUDA_CHECK(cudaDeviceCanAccessPeer(&can_return, other, ctx.device));
+        if (!can_send || !can_return) {
+            return false;
+        }
+        CUDA_CHECK(cudaEventCreateWithFlags(&state.ik_start, cudaEventDisableTiming));
+        ggml_cuda_set_device(other);
+        CUDA_CHECK(cudaEventCreateWithFlags(&state.ik_done, cudaEventDisableTiming));
+        state.ik_peer = std::make_unique<ggml_backend_cuda_context>(other);
+    }
+
+    auto & peer = *state.ik_peer;
+    ggml_cuda_set_device(other);
+    auto peer_stream = peer.stream();
+    const int n = x->ne[0], cols = x->ne[1], rows = upper->ne[1];
+    ggml_cuda_pool_alloc<float> peer_x(peer.pool(), n*cols);
+    ggml_cuda_pool_alloc<float> peer_out(peer.pool(), rows*cols);
+
+    ggml_cuda_set_device(ctx.device);
+    ik_peer_copy<<<dim3((n+255)/256, cols), 256, 0, main_stream>>>((const float *) x->data, peer_x.get(), n, n, n);
+    CUDA_CHECK(cudaEventRecord(state.ik_start, main_stream));
+    auto project = [&](ggml_backend_cuda_context & rank, const ggml_tensor * weights, const ggml_tensor * act, ggml_tensor * out) {
+        if (cols == 1) {
+            ggml_cuda_mul_mat_vec_q(rank, weights, act, nullptr, out);
+        } else {
+            GGML_ASSERT(ggml_cuda_ik_mmvq_mr(rank, weights, act, nullptr, out));
+        }
+    };
+
+    ggml_cuda_set_device(other);
+    CUDA_CHECK(cudaStreamWaitEvent(peer_stream, state.ik_start));
+    ggml_tensor act = *x, remote = *dst;
+    act.data = peer_x.get();
+    remote.data = peer_out.get();
+    remote.ne[0] = rows;
+    remote.nb[1] = rows*sizeof(float);
+    remote.nb[2] = remote.nb[3] = remote.nb[1]*cols;
+    project(peer, upper, &act, &remote);
+    ik_peer_copy<<<dim3((rows+255)/256, cols), 256, 0, peer_stream>>>(peer_out.get(), (float *) dst->data + rows, rows, rows, 2*rows);
+    CUDA_CHECK(cudaEventRecord(state.ik_done, peer_stream));
+
+    ggml_cuda_set_device(ctx.device);
+    ggml_tensor lower = *w, local = *dst;
+    lower.ne[1] = rows;
+    local.ne[0] = rows;
+    project(ctx, &lower, x, &local);
+    CUDA_CHECK(cudaStreamWaitEvent(main_stream, state.ik_done));
+    return true;
+}
+
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_TENSOR_BINARY_OP_LOCALS
 
+    if (dst->extra && ik_peer_head(ctx, src0, src1, dst)) {
+        return;
+    }
     if (ggml_cuda_op_mul_mat_use_fwht(dst) && ggml_cuda_op_fwht(ctx, src1, dst)) {
         return;
     }

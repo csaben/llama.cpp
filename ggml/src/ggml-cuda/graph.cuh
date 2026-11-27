@@ -213,6 +213,19 @@ struct ggml_cuda_concurrent_event {
 };
 
 struct ggml_cuda_stream_context {
+    std::unique_ptr<ggml_backend_cuda_context> ik_peer;
+    cudaEvent_t ik_start = nullptr;
+    cudaEvent_t ik_done = nullptr;
+
+    ~ggml_cuda_stream_context() {
+        if (ik_start) {
+            CUDA_CHECK(cudaEventDestroy(ik_start));
+        }
+        if (ik_done) {
+            CUDA_CHECK(cudaEventDestroy(ik_done));
+        }
+    }
+
     std::unordered_map<const ggml_tensor *, ggml_cuda_concurrent_event> concurrent_events;
 
     void reset() {
