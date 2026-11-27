@@ -1,3 +1,7 @@
+# Phase 11, Stream A
+
+The staged direct output head uses both cards. The nine-file package is `~/inkling-live-bin-p11a-a16c61e5`, for a 131,072-token vision slot and alias `inkling-mini` on port 8031. The direct-head candidate measured 239.93 to 245.84 tok/s plain, 348.40 to 355.20 tok/s short edit, 295.60 to 301.10 tok/s long edit. 34/34 configurations, 194/194 cells, 360 drafted replies, 347,520 IDs plus complete messages equal. [Report](p11/a/REPORT.md), [manual deploy with p9 fallback](live/deploy-p11a.sh), [manifest](p11/a/snapshot.sha256).
+
 # Phase 9
 
 Local runtime `72fd097e` (`p9-runtime`) includes the three safe upstream fixes and direct Q8_0 tiles for SM86 Inkling prefill. At 16K the final profile had zero whole-cache conversions against 3,072 frozen. At 64K the compute buffer fell from 2,078 to 1,816 MiB and process memory fell from 13,034 to 12,772 MiB. Prefill PPL remained 3.0530. The 16K tool turn measured 5.673 s plain and 5.796 s at cap 6.

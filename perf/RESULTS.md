@@ -1824,3 +1824,22 @@ For each upstream-only matrix the same runner used `P8_LIBS` and `SPEC_SERVER_BI
 All 194 matrix cells matched frozen P8m, including the ordered IDs and complete assistant messages. The 360 drafted replies contained 347,520 generated IDs. Every short repeat agreed with its same-flags plain control. Guarded adaptive cap 6 delivered 304.1 / 329.0 tok/s on the 384 / 3,000-token agent replay, compared with 218.4 / 216.4 plain (+39.2% / +52.0%). All eleven 3,000-token prompts beat plain, with a minimum lift of 22.3%. Seven of the eleven short prompts beat plain. The largest short deficit was 1.56% on dialogue. [All cell rates and digests](p9/matrix/cells.tsv), [frozen-control audit](p9/matrix/audit.txt).
 
 The immutable snapshot at `~/inkling-live-bin-p9-72fd097` contains the server and eight project libraries. SHA-256 verified all nine files, and the loader resolved every project library inside the snapshot. Four fresh server processes (plain before, release, model-only, plain after) on localhost port 18433 ran edit, prose and agent requests five times per setting. All 30 drafted replies and 11,520 IDs matched both plain controls and the release matrix. The manual deploy script checks the manifest before switching services and invokes Phase 5 restore on startup or health failure. It passed `bash -n` and was left unexecuted. [Manifest](p9/snapshot.sha256), [loader and checks](p9/snapshot-checks.txt), [snapshot probes](p9/snapshot-probes/), [manual deploy](live/deploy-p9.sh).
+
+## Phase 11, Stream A
+
+The staged direct output head uses both cards. 34/34 configurations, 194/194 cells, 360 drafted replies, 347,520 IDs plus complete messages equal. Both 512/512 vision servers completed 250,944 prompt tokens plus 3,000 generated tokens in a 253,952-token slot. [Report and exact coverage](p11/a/REPORT.md), [paired throughput](p11/a/performance.tsv), [per-card memory](p11/a/capacity-paired.tsv).
+
+| Uncensored Q2, tok/s | One-card p9 | Split output head | Change |
+|---|---:|---:|---:|
+| Plain decode at 0 | 239.93 | 245.84 | +2.46% |
+| Plain decode at 4,096 | 220.51 | 225.51 | +2.27% |
+| Plain decode at 16,384 | 208.03 | 212.40 | +2.10% |
+| Plain decode at 32,768 | 191.47 | 195.41 | +2.06% |
+| Plain decode at 65,536 | 161.83 | 164.23 | +1.48% |
+| DSpark edit, 384 generated | 348.40 | 355.20 | +1.95% |
+| DSpark edit, 3,000 generated | 295.60 | 301.10 | +1.86% |
+| Prefill at 4,096 | 3,527.25 | 3,582.34 | +1.56% |
+| Prefill at 16,384 | 3,218.00 | 3,258.62 | +1.26% |
+| Prefill at 65,536 | 2,441.15 | 2,445.14 | +0.16% |
+| Near-full prefill, 128,064 tokens | 1,708.43 | 1,693.26 | -0.89% |
+| Near-full DSpark, 3,000 generated | 206.37 | 208.71 | +1.13% |
