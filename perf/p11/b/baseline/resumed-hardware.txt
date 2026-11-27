@@ -1,0 +1,4 @@
+2026-11-27T07:24:36-05:00
+pci.bus_id, name, memory.free [MiB], memory.used [MiB], power.limit [W], pstate, temperature.gpu, clocks.current.sm [MHz], clocks.current.memory [MHz]
+00000000:01:00.0, NVIDIA GeForce RTX 3090, 22936 MiB, 1233 MiB, 370.00 W, P2, 83, 1560 MHz, 9501 MHz
+Existing compute allocations: 2 processes, 1038 MiB in total.

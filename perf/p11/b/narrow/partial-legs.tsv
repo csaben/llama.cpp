@@ -1,0 +1,27 @@
+scope	case	prompt	leg	tok_s	interpretation
+individual-bench	pp4096	-	new1	3218.135251	raw timing only
+individual-bench	pp4096	-	old1	3238.868691	raw timing only
+individual-bench	tg0	-	new1	226.492765	raw timing only
+individual-bench	tg0	-	new2	222.486882	raw timing only
+individual-bench	tg0	-	old1	222.769625	raw timing only
+individual-bench	tg32768	-	new1	186.19273	raw timing only
+individual-bench	tg32768	-	old1	184.940082	raw timing only
+grouped-bench	pp4096	-	new1	3284.888531	raw timing only
+grouped-bench	pp16384	-	new1	3009.818982	raw timing only
+grouped-bench	pp65536	-	new1	2154.644257	raw timing only
+grouped-bench	pp4096	-	old1	3278.019225	raw timing only
+grouped-bench	pp16384	-	old1	2978.977327	raw timing only
+grouped-bench	pp65536	-	old1	2071.035426	raw timing only
+grouped-bench	tg0	-	old1	220.75301	raw timing only
+grouped-bench	tg4096	-	old1	209.127523	raw timing only
+grouped-bench	tg16384	-	old1	196.030365	raw timing only
+grouped-bench	tg32768	-	old1	178.9103	raw timing only
+grouped-bench	tg65536	-	old1	155.439462	raw timing only
+served	short3000	code	old1	264.3	matched p9 and candidate plain
+served	short3000	edit	old1	284.6	matched p9 and candidate plain
+served	short3000	prose	old1	315.1	matched p9 and candidate plain
+served	short3000	agent	old1	316.0	matched p9 and candidate plain
+served	deep384	edit@16K	old1	250.5	matched p9 and candidate plain
+served	deep384	edit@32K	old1	223.0	matched p9 and candidate plain
+served	deep384	edit@16K	new1	261.4	matched p9 and candidate plain
+served	deep384	edit@32K	new1	239.1	matched p9 and candidate plain
