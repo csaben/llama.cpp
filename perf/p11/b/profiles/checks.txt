@@ -1,0 +1,3 @@
+p9-prefill.sqlite.xz: 19080 launches, 45 kernel names, all counts and durations match Nsight
+p9-16k-prefill.sqlite.xz: 76176 launches, 45 kernel names, all counts and durations match Nsight
+p9-verify.sqlite.xz: 51431 launches, 196 kernel names, all counts and durations match Nsight
