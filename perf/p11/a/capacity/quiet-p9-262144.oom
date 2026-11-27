@@ -1,0 +1,3 @@
+0.02.231.550 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 98.80 MiB on device 0: cudaMalloc failed: out of memory
+0.02.232.662 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 72.00 MiB on device 0: cudaMalloc failed: out of memory
+0.04.926.634 E CUDA error: the resource allocation failed
