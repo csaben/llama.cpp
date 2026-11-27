@@ -1,0 +1,6 @@
+baseline
+greedy check: 48 of the server's tokens are not the argmax of the single-token logits (first: the token at position 1033, generated token 8, its logit is 0.267 below the best)
+replay of /home/arelius/llama.cpp-p11b/build/p11/checks/n3.trace: prompt 1025 tokens, 1699 output rows up to position 2723 (rows by step size: 1:1 2:0 3:0 4:1698 5+:0): 0 rows differ from single-token decode, max |logit diff| 0
+narrow
+greedy check: 48 of the server's tokens are not the argmax of the single-token logits (first: the token at position 1033, generated token 8, its logit is 0.267 below the best)
+replay of /home/arelius/llama.cpp-p11b/build/p11/checks.kWK55s/n3.trace: prompt 1025 tokens, 1699 output rows up to position 2723 (rows by step size: 1:1 2:0 3:0 4:1698 5+:0): 0 rows differ from single-token decode, max |logit diff| 0
