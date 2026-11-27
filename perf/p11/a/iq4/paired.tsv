@@ -1,0 +1,4 @@
+development snapshot a16c61e5, IQ4_NL-dense, 8192 slot, target and draft microbatch 128
+test	old_a	new_a	new_b	old_b	p9_mean	candidate_mean	change_pct
+bench	195.819	199.724	200.398	196.263	196.041	200.061	2.051
+edit	242.100	246.100	245.500	245.700	243.900	245.800	0.779

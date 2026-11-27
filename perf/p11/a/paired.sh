@@ -4,7 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../../.."
 name=${1:?label} candidate=${2:?runtime directory} suite=${3:?bench, draft, or capacity}
 out="$PWD/perf/p11/a/paired/$name"
-mkdir -p "$out"
+mkdir -p "$out" build/p11a
+exec {suite_lock}>"build/p11a/paired-$name-$suite.lock"
+flock "$suite_lock"
 for leg in olda newa newb oldb; do
     (
         unset IK_PEER_HEAD IK_PEER_NATIVE IK_PEER_EXPERTS IK_PEER_FLAGS IK_PEER_DIRECT
