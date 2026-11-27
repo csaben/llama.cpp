@@ -1,0 +1,12 @@
+blk.0.ffn_gate_up_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 2
+blk.0.ffn_down_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 2
+blk.0.ffn_gate_up_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 3
+blk.0.ffn_down_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 3
+blk.0.ffn_gate_up_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 4
+blk.0.ffn_down_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 4
+blk.0.ffn_gate_up_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 5
+blk.0.ffn_down_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 5
+blk.0.ffn_gate_up_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 6
+blk.0.ffn_down_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 6
+blk.0.ffn_gate_up_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 7
+blk.0.ffn_down_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0 input_type q8_1 columns 7

@@ -69,11 +69,18 @@ static int measure(const char * model, const char * projection, int cols, const 
         std::copy_n(experts.begin(), 8, routes.begin() + col*8);
     }
     std::vector<char> quantized;
+    const char * directory = std::getenv("P11_EXPERT_INPUT_DIR");
+    const char * windows = std::getenv("P11_EXPERT_WINDOW_DIR");
+    std::string window_directory;
+    if (windows) {
+        window_directory = std::string(windows) + "/" + std::to_string(cols);
+        directory = window_directory.c_str();
+    }
     if (q8) {
-        GGML_ASSERT(std::getenv("P11_EXPERT_INPUT_DIR"));
+        GGML_ASSERT(directory);
         quantized.resize(ggml_nbytes(input));
     }
-    if (const char * directory = std::getenv("P11_EXPERT_INPUT_DIR")) {
+    if (directory) {
         const std::string prefix = std::string(directory) + "/" + projection;
         std::ifstream x(prefix + ".input", std::ios::binary);
         std::ifstream routed(prefix + ".ids", std::ios::binary);

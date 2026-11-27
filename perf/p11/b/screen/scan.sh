@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 label=${1:?label}
-raw=perf/p11/b/screen/scan
-work=build/p11/micro
+raw=${B_SCAN_RAW:-perf/p11/b/screen/scan}
+work=${B_SCAN_WORK:-build/p11/micro}
 mkdir -p "$raw" "$work"
 for length in ${B_SCAN_LENGTHS:-4096 16384 65536}; do
     args=()
