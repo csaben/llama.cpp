@@ -6,12 +6,21 @@ lock=/home/arelius/llama.cpp-fast/perf/p11/gpu0.lock
 mkdir -p build/p11
 # Queue one Stream B request at the shared lock. Release both locks before waiting for an unrelated GPU user.
 while true; do
+    if [[ -r build/p11/gpu-free.cache ]] && read -r observed available <build/p11/gpu-free.cache; then
+        age=$(( $(date +%s) - observed ))
+        if ((available < ${B_MIN_FREE_MIB:-21000} && age >= 0 && age < 45)); then
+            if [[ -e perf/STOP || -e /home/arelius/llama.cpp-fast/perf/STOP ]]; then exit 75; fi
+            sleep "$((45 - age))"
+        fi
+    fi
     status=0
     flock build/p11/stream-b.lock flock "$lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0 P8_GPU=0 bash -c '
         set -eu
         if [[ -e perf/STOP || -e /home/arelius/llama.cpp-fast/perf/STOP ]]; then exit 75; fi
         if [[ $(TZ=America/New_York date +%F) == 2026-11-27 && $(TZ=America/New_York date +%H%M) > 0729 ]]; then exit 75; fi
         free=$(nvidia-smi -i 0 --query-gpu=memory.free --format=csv,noheader,nounits)
+        echo "$(date +%s) $free" >build/p11/gpu-free.cache.tmp
+        mv build/p11/gpu-free.cache.tmp build/p11/gpu-free.cache
         if ((free < ${B_MIN_FREE_MIB:-21000})); then exit 78; fi
         exec "$@"
     ' p11b "$@" || status=$?

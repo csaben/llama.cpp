@@ -1,0 +1,2 @@
+ggml_cuda_compute_forward: REL_BIAS failed
+CUDA error: too many resources requested for launch
