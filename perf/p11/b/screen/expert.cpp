@@ -15,19 +15,14 @@
 #include <string>
 #include <vector>
 
-int main(int argc, char ** argv) {
-    if (argc != 5) {
-        fprintf(stderr, "usage: expert MODEL gate|down COLUMNS OUTPUT.f32\n");
-        return 2;
-    }
-    const bool gate = std::strcmp(argv[2], "gate") == 0;
-    const int cols = std::atoi(argv[3]);
-    if ((!gate && std::strcmp(argv[2], "down")) || cols < 1 || cols > 512) {
+static int measure(const char * model, const char * projection, int cols, const char * output_path) {
+    const bool gate = std::strcmp(projection, "gate") == 0;
+    if ((!gate && std::strcmp(projection, "down")) || cols < 1 || cols > 512) {
         return 2;
     }
     const int layer = std::getenv("P11_LAYER") ? std::atoi(std::getenv("P11_LAYER")) : 0;
     const std::string name = "blk." + std::to_string(layer) + (gate ? ".ffn_gate_up_exps.weight" : ".ffn_down_exps.weight");
-    gguf_context_ptr meta(gguf_init_from_file(argv[1], {true, nullptr}));
+    gguf_context_ptr meta(gguf_init_from_file(model, {true, nullptr}));
     GGML_ASSERT(meta);
     const int64_t index = gguf_find_tensor(meta.get(), name.c_str());
     GGML_ASSERT(index >= 0);
@@ -52,7 +47,7 @@ int main(int argc, char ** argv) {
     ggml_build_forward_expand(graph, output);
     ggml_backend_buffer_ptr buf(ggml_backend_alloc_ctx_tensors(ctx.get(), backend.get()));
     GGML_ASSERT(buf && ggml_nbytes(weights) == gguf_get_tensor_size(meta.get(), index));
-    std::ifstream file(argv[1], std::ios::binary);
+    std::ifstream file(model, std::ios::binary);
     file.seekg(gguf_get_data_offset(meta.get()) + gguf_get_tensor_offset(meta.get(), index));
     std::vector<char> block(1 << 20);
     for (size_t offset = 0; offset < ggml_nbytes(weights); offset += block.size()) {
@@ -79,7 +74,7 @@ int main(int argc, char ** argv) {
         quantized.resize(ggml_nbytes(input));
     }
     if (const char * directory = std::getenv("P11_EXPERT_INPUT_DIR")) {
-        const std::string prefix = std::string(directory) + "/" + argv[2];
+        const std::string prefix = std::string(directory) + "/" + projection;
         std::ifstream x(prefix + ".input", std::ios::binary);
         std::ifstream routed(prefix + ".ids", std::ios::binary);
         GGML_ASSERT(x.read(q8 ? quantized.data() : reinterpret_cast<char *>(activations.data()), ggml_nbytes(input)));
@@ -113,13 +108,26 @@ int main(int argc, char ** argv) {
     }
     std::vector<float> values(ggml_nelements(output));
     ggml_backend_tensor_get(output, values.data(), 0, ggml_nbytes(output));
-    std::ofstream capture(argv[4], std::ios::binary);
+    std::ofstream capture(output_path, std::ios::binary);
     GGML_ASSERT(capture.write(reinterpret_cast<const char *>(values.data()), ggml_nbytes(output)));
     capture.close();
     GGML_ASSERT(capture);
-    printf("%s\t%d\t%d", argv[2], cols, reps);
+    printf("%s\t%d\t%d", projection, cols, reps);
     for (double us : times) {
         printf("\t%.3f", us);
     }
     printf("\n");
+    return 0;
+}
+
+int main(int argc, char ** argv) {
+    if (argc < 5 || (argc - 3) % 2) {
+        fprintf(stderr, "usage: expert MODEL gate|down COLUMNS OUTPUT [COLUMNS OUTPUT ...]\n");
+        return 2;
+    }
+    for (int i = 3; i < argc; i += 2) {
+        const int status = measure(argv[1], argv[2], std::atoi(argv[i]), argv[i + 1]);
+        if (status != 0) { return status; }
+    }
+    return 0;
 }

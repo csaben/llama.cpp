@@ -13,13 +13,7 @@
 #include <random>
 #include <vector>
 
-int main(int argc, char ** argv) {
-    if (argc != 4) {
-        fprintf(stderr, "usage: attention KV_LENGTH ROWS CAPTURE\n");
-        return 2;
-    }
-    const int length = std::atoi(argv[1]);
-    const int rows = std::atoi(argv[2]);
+static int measure(int length, int rows, const char * output_path) {
     if (rows < 1 || rows > 7 || length < rows || length > 131072) {
         return 2;
     }
@@ -94,7 +88,7 @@ int main(int argc, char ** argv) {
     ggml_backend_tensor_set(mask, causal.data(), 0, ggml_nbytes(mask));
     auto run = [&]() { GGML_ASSERT(ggml_backend_graph_compute(backend.get(), graph) == GGML_STATUS_SUCCESS); };
     run();
-    std::ofstream capture(argv[3], std::ios::binary);
+    std::ofstream capture(output_path, std::ios::binary);
     for (auto * t : {out, state, k, v}) {
         const size_t off = t == k || t == v ? (length-rows)*t->nb[2] : 0;
         std::vector<char> bytes(ggml_nbytes(t)-off);
@@ -122,4 +116,17 @@ int main(int argc, char ** argv) {
         printf("\t%.3f", double(ggml_time_us()-start)/repeats);
     }
     printf("\n");
+    return 0;
+}
+
+int main(int argc, char ** argv) {
+    if (argc < 4 || (argc - 2) % 2) {
+        fprintf(stderr, "usage: attention KV_LENGTH ROWS CAPTURE [ROWS CAPTURE ...]\n");
+        return 2;
+    }
+    for (int i = 2; i < argc; i += 2) {
+        const int status = measure(std::atoi(argv[1]), std::atoi(argv[i]), argv[i + 1]);
+        if (status != 0) { return status; }
+    }
+    return 0;
 }

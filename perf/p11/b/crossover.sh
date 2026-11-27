@@ -16,6 +16,9 @@ for test in ${B_TESTS:-$(if [[ $stage == synthetic ]]; then echo tg0 tg4096 tg16
             B_WINDOW_COLS=${BRACKET_NEW_WINDOW:-1}
             B_MMA=${BRACKET_NEW_MMA:-3}
         fi
+        if [[ ${B_RESUME:-0} == 1 && $test != short* && $test != deep* ]]; then
+            if python3 -c 'import json,sys; d,=json.load(open(sys.argv[1])); assert d["avg_ts"] > 0 and len(d["samples_ts"]) == 3' "$out/$test-$leg.json" 2>/dev/null; then continue; fi
+        fi
         case $test in
             tg*) "${gpu[@]}" bench -p 0 -n 128 -d "${test#tg}" -r 3 >"$out/$test-$leg.json" 2>"$out/$test-$leg.log" ;;
             pp*) "${gpu[@]}" bench -p "${test#pp}" -n 0 -r 3 >"$out/$test-$leg.json" 2>"$out/$test-$leg.log" ;;
@@ -27,7 +30,9 @@ for test in ${B_TESTS:-$(if [[ $stage == synthetic ]]; then echo tg0 tg4096 tg16
                 if [[ $budget == 384 ]]; then reps=3; fi
                 cap=6
                 if [[ $leg == new* ]]; then cap=${BRACKET_CAP:-6}; fi
-                "${gpu[@]}" probe "$out/$test" "$leg" "$cap" "$kinds" "$reps" "$budget"
+                if [[ ${B_RESUME:-0} != 1 ]] || ! python3 perf/p11/b/probe_complete.py "$out/$test" "$leg" "$kinds" "$reps" "$budget"; then
+                    "${gpu[@]}" probe "$out/$test" "$leg" "$cap" "$kinds" "$reps" "$budget"
+                fi
                 if [[ $leg != old1 ]]; then
                     SPEC_KINDS="$kinds" SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py "$out/$test" old1 "$leg" >"$out/$test/$leg.equal"
                 fi ;;
