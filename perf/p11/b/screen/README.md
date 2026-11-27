@@ -11,7 +11,9 @@ Run these experiments from the repository root with the configured SM86 build. E
 
 The prototype patch sets and build recipes are stored in [expert and scheduling trials](prototypes.tar.gz), [additional CUDA trials](additional-recipes.tar.gz), and [attention trials](scan-recipes.tar.gz). The original scripts use paths under `build/p11`. Use the source commit and candidate runtime directory identified in the report when reproducing paired measurements.
 
-
 The [native replay recipes](native-recipes.tar.gz) include the runtime brackets, real activation capture, operator sweeps, numerical checks and long-context checks. Extract them into `build/p11` from this worktree. Run `bash build/p11/build-fixtures.sh` and `bash build/p11/build-fixtures.sh build/p11/sweep` to build the standalone drivers. For the synthetic output checks, first run `python3 perf/p11/b/screen/bench_capture.py`. The original p9 frontend and GGUF paths are listed in the main report. The qualification recipe expects the frozen p9 snapshot and a separately built candidate snapshot in `build/p11/narrow-bin`.
 
 The operator sweeps save one full-output SHA-256 and nine timing groups per shape. To reproduce the three checked graph-input layers, run `python3 build/p11/window-tokens.py`, then use `window-capture.sh` and `window-native-control.sh`. The latter verifies each captured tensor against an ordinary device allocation. The primary PPL, server, matrix, and throughput runs use ordinary device allocations.
+
+
+The [first operator sample archive](overlap-operator-samples.tar.gz) contains all 473 expert and 291 attention measurements collected during the other server's GPU reservation. Their completion times and SHA-256 digests are in `index.tsv`. The [ordinary-device replay samples](native-operator-samples.tar.gz) have the same layout and contain only measurements taken after GPU0 was released. Run `python3 perf/p11/b/screen/archive_samples.py native` to package the completed replay files.
