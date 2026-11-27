@@ -1,1 +1,2 @@
 llama_model_load: error loading model: device CUDA0 does not support split buffers
+llama_model_load: error loading model: LLAMA_SPLIT_MODE_TENSOR not implemented for architecture 'inkling2_loop'
