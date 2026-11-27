@@ -1,0 +1,1 @@
+/home/arelius/llama.cpp-fast/build/p11a/source-direct/src/models/inkling2.cpp:1331: GGML_ASSERT(!mr || (moe_fused && router_fused && x_q8 != nullptr)) failed

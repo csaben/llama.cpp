@@ -1271,11 +1271,11 @@ attn_done:
     if (moe_op == 3 && (n_tokens == 1 || mr) && a_type == GGML_TYPE_Q8_1 && gate_up && down &&
             (gate_up->type == GGML_TYPE_Q2_K || gate_up->type == GGML_TYPE_Q3_K) &&
             (down->type == GGML_TYPE_Q2_0 || down->type == GGML_TYPE_Q4_0 || down->type == GGML_TYPE_IQ4_NL)) {
-        const auto dev = model.dev_layer(il);
-        if (dev && strncmp(ggml_backend_dev_name(dev), "CUDA", 4) == 0 && gate_up->buffer && down->buffer) {
-            const auto buft = ggml_backend_dev_buffer_type(dev);
-            mixed_cuda_experts = ggml_backend_buffer_get_type(gate_up->buffer) == buft &&
-                                 ggml_backend_buffer_get_type(down->buffer) == buft;
+        if (gate_up->buffer && down->buffer) {
+            const auto buft = ggml_backend_buffer_get_type(gate_up->buffer);
+            const auto dev = ggml_backend_buft_get_device(buft);
+            mixed_cuda_experts = dev && strncmp(ggml_backend_dev_name(dev), "CUDA", 4) == 0 &&
+                                 buft == ggml_backend_dev_buffer_type(dev) && ggml_backend_buffer_get_type(down->buffer) == buft;
         }
     }
     const bool moe_fused = moe_op && (n_tokens == 1 || mr) && ubatch.n_seqs == 1 && rs_ids != nullptr &&
