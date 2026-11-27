@@ -1,0 +1,2 @@
+blk.0.ffn_gate_up_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0
+blk.0.ffn_down_exps.weight MUL_MAT_ID weights CUDA0 activations CUDA0 result CUDA0

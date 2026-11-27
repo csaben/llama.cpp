@@ -1,0 +1,3 @@
+case	old1_us	new1_us	new2_us	old2_us	old_mean_us	new_mean_us	delta_pct	bit_equal
+down-512	566.903	487.263	488.629	572.282	569.592	487.946	-14.334	1
+gate-512	1195.060	1178.141	1184.464	1190.048	1192.554	1181.303	-0.943	1
