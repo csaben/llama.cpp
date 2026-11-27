@@ -1,0 +1,3 @@
+canAccessPeer 0->1:1 1->0:1
+peer access OFF | 9 KB round trip   26.9 us | 9 KB kernel peer-write    n/a   | 256 MB copy   5.9 GB/s
+peer access ON  | 9 KB round trip   14.6 us | 9 KB kernel peer-write 2.932 us | 256 MB copy  13.2 GB/s
