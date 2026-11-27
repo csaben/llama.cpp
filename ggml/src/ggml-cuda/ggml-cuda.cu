@@ -2632,6 +2632,60 @@ static bool ik_peer_capture(ggml_backend_cuda_context & ctx, cudaStream_t main_s
     return true;
 }
 
+static void ik_join_msg(ggml_backend_cuda_context & ctx) {
+    auto & state = ctx.stream_context();
+    if (state.ik_msg_pending) {
+        CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(), state.ik_msg_done));
+        state.ik_msg_pending = false;
+    }
+}
+
+static void ik_queue_msg(ggml_backend_cuda_context & ctx, ggml_tensor * msg) {
+    if (!msg->extra || strcmp(msg->name, "loop.peer.messages") != 0 || ctx.curr_stream_no != 0 ||
+            !ctx.stream_context().concurrent_events.empty() || !ggml_cuda_p2p_enabled() || ggml_cuda_info().device_count != 2 ||
+            msg->ne[0] != 2304 || msg->ne[1] != 1 || msg->ne[2] != 48 || !ggml_is_contiguous(msg)) {
+        return;
+    }
+    const int other = 1 - ctx.device;
+    const auto * w = static_cast<const ggml_tensor *>(msg->extra);
+    if (ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(other)) { return; }
+    auto * peer = ik_get_peer(ctx, other);
+    if (!peer) { return; }
+    auto & state = ctx.stream_context();
+    ggml_cuda_set_device(ctx.device);
+    if (!state.ik_msg_done) {
+        cudaStreamCaptureStatus capture;
+        CUDA_CHECK(cudaStreamIsCapturing(ctx.stream(), &capture));
+        if (capture != cudaStreamCaptureStatusNone) { return; }
+        CUDA_CHECK(cudaMalloc(&state.ik_msg_parts, 48*64*sizeof(float2)));
+        ggml_cuda_set_device(other);
+        CUDA_CHECK(cudaMalloc(&state.ik_msg_copy, 48*2304*sizeof(float)));
+        CUDA_CHECK(cudaEventCreateWithFlags(&state.ik_msg_done, cudaEventDisableTiming));
+        ggml_cuda_set_device(ctx.device);
+    }
+    ik_join_msg(ctx);
+    CUDA_CHECK(cudaEventRecord(state.ik_start, ctx.stream()));
+    ggml_cuda_set_device(other);
+    auto stream = peer->stream();
+    CUDA_CHECK(cudaStreamWaitEvent(stream, state.ik_start));
+    ik_peer_copy<<<dim3(9, 48), 256, 0, stream>>>((const float *) msg->data, state.ik_msg_copy, 2304, 2304, 2304);
+    ggml_cuda_ik_msg_terms(stream, (const half *) w->data, state.ik_msg_copy, state.ik_msg_parts);
+    CUDA_CHECK(cudaEventRecord(state.ik_msg_done, stream));
+    ggml_cuda_set_device(ctx.device);
+    state.ik_msg_base = msg;
+    state.ik_msg_pending = true;
+}
+
+const float2 * ggml_cuda_ik_get_msg_terms(ggml_backend_cuda_context & ctx, const ggml_tensor * msg) {
+    auto & state = ctx.stream_context();
+    if (!state.ik_msg_base || msg->view_src != state.ik_msg_base || !msg->view_offs ||
+            msg->view_offs % (2304*sizeof(float)) != 0) { return nullptr; }
+    const int group = msg->view_offs/(2304*sizeof(float));
+    if (group < 4 || group + msg->ne[2] > 48) { return nullptr; }
+    ik_join_msg(ctx);
+    return state.ik_msg_parts + group*64;
+}
+
 static __global__ void ik_send_gate_input(const int * x, int * dst, unsigned * ready) {
     for (int i = threadIdx.x; i < 72*sizeof(block_q8_1)/sizeof(int); i += blockDim.x) {
         dst[i] = x[i];
@@ -3373,6 +3427,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_RES_MIX:
             ggml_cuda_op_res_mix(ctx, dst);
+            if (dst->extra) { ik_queue_msg(ctx, dst); }
             break;
         case GGML_OP_SHORTCONV_RES:
             ggml_cuda_op_shortconv_res(ctx, dst);
@@ -3810,6 +3865,8 @@ static void ggml_cuda_graph_launch_chunk(ggml_backend_cuda_context * cuda_ctx, g
         CUDA_CHECK(cudaStreamWaitEvent(cuda_ctx->stream(), state.ik_done));
         state.ik_open = false;
     }
+    ik_join_msg(*cuda_ctx);
+    state.ik_msg_base = nullptr;
     CUDA_CHECK(cudaStreamEndCapture(cuda_ctx->stream(), &cuda_graph));
 
     if (idx < graph->instances.size()) {
@@ -6284,6 +6341,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     }
 
     ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
+    ik_join_msg(*cuda_ctx);
+    cuda_ctx->stream_context().ik_msg_base = nullptr;
 
     return GGML_STATUS_SUCCESS;
 }

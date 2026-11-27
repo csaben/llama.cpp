@@ -2663,6 +2663,7 @@ struct llama_model_inkling2_loop : public llama_model_inkling2 {
     // indexed by physical layer - core_start
     std::vector<loop_layer> loop_layers;
     ggml_tensor * core_msg_queries = nullptr;
+    ggml_tensor * peer_msg_down = nullptr;
 
     struct graph : public llama_model_inkling2::graph {
         graph(const llm_graph_params & params);

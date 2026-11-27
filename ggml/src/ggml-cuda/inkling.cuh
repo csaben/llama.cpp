@@ -30,3 +30,6 @@ void ggml_cuda_ik_peer_gates_finish(ggml_backend_cuda_context & ctx);
 
 void ggml_cuda_ik_return_q2_prefix(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x,
         const ggml_tensor * ids, const float * route, float * dst);
+
+void ggml_cuda_ik_msg_terms(cudaStream_t stream, const half * weights, const float * msgs, float2 * terms);
+const float2 * ggml_cuda_ik_get_msg_terms(ggml_backend_cuda_context & ctx, const ggml_tensor * msg);

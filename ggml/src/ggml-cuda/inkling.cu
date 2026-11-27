@@ -1057,6 +1057,38 @@ static int ik_ctrl_gemm_min() {
     return v;
 }
 
+static __global__ void ik_pass_msg_terms(const half * weights, const float * msgs, float2 * terms) {
+    const int t = threadIdx.x, rank = blockIdx.x, group = blockIdx.y;
+    const half * w = weights + (group*64 + rank)*2304;
+    float sb = 0.0f, db = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 9; ++j) {
+        const int i = j*256 + t;
+        const float m = msgs[group*2304 + i];
+        sb += m*m;
+        db += m*__half2float(w[i]);
+    }
+    const float moments[] = {0.0f, 0.0f, sb, db};
+    const int moment = __brev(t%32) >> 27;
+    const float v = ik_reduce_moments(moments, t%32);
+    __shared__ float partial[8][2];
+    if (moment == 2 || moment == 3) { partial[t/32][moment-2] = v; }
+    __syncthreads();
+    if (!t) {
+        sb = db = 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            sb += partial[j][0];
+            db += partial[j][1];
+        }
+        terms[group*64 + rank] = make_float2(sb, db);
+    }
+}
+
+void ggml_cuda_ik_msg_terms(cudaStream_t stream, const half * weights, const float * msgs, float2 * terms) {
+    ik_pass_msg_terms<<<dim3(64, 48), 256, 0, stream>>>(weights, msgs, terms);
+}
+
 struct ik_mix_ctrl_args {
     ik_state_ptrs st;
     const float4 * query;
@@ -1064,12 +1096,13 @@ struct ik_mix_ctrl_args {
     const float * msg;
     float * mixed;
     float * down;
+    const float2 * parts;
     int cols;
     size_t q_stride, msg_stride;
     float eps, scale, ctrl_eps;
 };
 
-template <int ns, bool compact = false, int ranks = 2>
+template <int ns, bool compact = false, int ranks = 2, bool precomputed = false>
 static __global__ void __launch_bounds__(compact ? 576 : 640) ik_mix_down(ik_mix_ctrl_args a) {
     constexpr int threads = compact ? 576 : 640;
     const int b = blockIdx.y, t = threadIdx.x;
@@ -1091,9 +1124,11 @@ static __global__ void __launch_bounds__(compact ? 576 : 640) ik_mix_down(ik_mix
             const int i = j*256 + k;
             const float x = mixed[i];
             sa += x*x;
-            const float v = a.msg[b*a.msg_stride + i];
-            sb += v*v;
-            db += v*__half2float(w[2304+i]);
+            if constexpr (!precomputed) {
+                const float v = a.msg[b*a.msg_stride + i];
+                sb += v*v;
+                db += v*__half2float(w[2304+i]);
+            }
             da += x*__half2float(w[i]);
         }
         if constexpr (compact) {
@@ -1123,6 +1158,11 @@ static __global__ void __launch_bounds__(compact ? 576 : 640) ik_mix_down(ik_mix
             da += p.y;
             sb += p.z;
             db += p.w;
+        }
+        if constexpr (precomputed) {
+            const float2 m = a.parts[b*64+ranks*blockIdx.x+t];
+            sb = m.x;
+            db = m.y;
         }
         a.down[b*64+ranks*blockIdx.x+t] = da*rsqrtf(sa/2304 + a.ctrl_eps) + db*rsqrtf(sb/2304 + a.ctrl_eps);
     }
@@ -1170,9 +1210,15 @@ bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml
     a.eps = ggml_get_op_params_f32(mix, 0);
     a.scale = ggml_get_op_params_f32(mix, 1);
     a.ctrl_eps = ggml_get_op_params_f32(down, 0);
+    a.parts = ggml_cuda_ik_get_msg_terms(ctx, down->src[2]);
     auto launch = [&](auto count) {
         constexpr int n = decltype(count)::value;
         if (ggml_cuda_inkling_fast_glue(ctx)) {
+            if (a.parts) {
+                if (down->ne[2] == 3) { ik_mix_down<n, true, 4, true><<<dim3(16, 3), 576, 0, ctx.stream()>>>(a); }
+                else { ik_mix_down<n, true, 2, true><<<dim3(32, down->ne[2]), 576, 0, ctx.stream()>>>(a); }
+                return;
+            }
             if (down->ne[2] == 3) {
                 ik_mix_down<n, true, 4><<<dim3(16, 3), 576, 0, ctx.stream()>>>(a);
             } else {
