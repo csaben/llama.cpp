@@ -1,0 +1,1 @@
+n6-adapt       code      prompt     47   384 tok   250.9 tok/s    1385 chars  accepted/proposed 184/240  runs 250/251/251

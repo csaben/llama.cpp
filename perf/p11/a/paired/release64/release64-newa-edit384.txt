@@ -1,0 +1,1 @@
+release64-newa-edit384 edit      prompt   1025   384 tok   356.6 tok/s    1135 chars  accepted/proposed 291/299  runs 352/357/363

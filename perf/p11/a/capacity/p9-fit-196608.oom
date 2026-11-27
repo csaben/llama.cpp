@@ -1,0 +1,4 @@
+0.01.650.047 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 5271.97 MiB on device 0: cudaMalloc failed: out of memory
+0.01.650.050 E ggml_gallocr_reserve_n_impl: failed to allocate CUDA0 buffer of size 5528061184
+0.01.650.050 E graph_reserve: failed to allocate compute buffers
+0.01.654.465 E llama_init_from_model: failed to initialize the context: failed to allocate compute pp buffers

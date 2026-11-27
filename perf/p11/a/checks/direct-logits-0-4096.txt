@@ -1,0 +1,1 @@
+d3f8db9fc73e9d847a2fcdf8e3f4f879e8250b14ad72967dbc97bd1a89fdcebf  /home/arelius/llama.cpp-fast/build/p11a/checks/direct-logits-0-4096.log.bin

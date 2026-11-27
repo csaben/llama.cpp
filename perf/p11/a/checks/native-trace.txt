@@ -1,0 +1,1 @@
+replay of /home/arelius/llama.cpp-fast/build/p11a/checks/native.trace: prompt 1025 tokens, 1699 output rows up to position 2723 (rows by step size: 1:1 2:0 3:0 4:1698 5+:0): 0 rows differ from single-token decode, max |logit diff| 0

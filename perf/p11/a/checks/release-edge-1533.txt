@@ -1,0 +1,1 @@
+73 rows in 24 steps (positions 1533..1605) after a 1533-token prefix: 0 rows differ from single-token decode, max |logit diff| 0
