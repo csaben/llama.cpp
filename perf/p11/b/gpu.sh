@@ -33,6 +33,12 @@ if ((B_MIN_FREE_MIB >= 11000)); then
     fi
 elif [[ ${B_OPERATOR_SWEEP:-0} == 1 ]]; then
     queue=(flock "build/p11/stream-b-operator-$((PPID % 4)).lock")
+    for arg in "$@"; do
+        if [[ $arg == --cases ]]; then
+            queue=(flock "build/p11/stream-b-operator-replay-$((PPID % 5)).lock")
+            break
+        fi
+    done
 fi
 if [[ ${B_LOCAL_GROUP_FD:-} =~ ^[0-9]+$ && /proc/self/fd/$B_LOCAL_GROUP_FD -ef build/p11/stream-b.lock ]]; then
     flock -n "$B_LOCAL_GROUP_FD"
