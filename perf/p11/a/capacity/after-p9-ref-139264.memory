@@ -1,0 +1,14 @@
+0.00.618.902 I load_tensors:        CUDA0 model buffer size =  9130.59 MiB
+0.01.601.796 I llama_kv_cache:      CUDA0 KV buffer size =  2312.00 MiB
+0.01.602.033 I llama_kv_cache:      CUDA0 KV buffer size =   127.50 MiB
+0.01.664.603 I sched_reserve:      CUDA0 compute buffer size =  3759.97 MiB
+0.01.664.606 I sched_reserve:  CUDA_Host compute buffer size =   417.02 MiB
+0.01.772.976 I mtmd_context:      CUDA0 compute buffer size =    98.80 MiB
+0.01.772.978 I mtmd_context:        CPU compute buffer size =    18.78 MiB
+0.01.788.530 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 139264, kv_unified = 'false'
+0.02.198.373 I slot   operator(): id  0 | task 0 | new prompt, n_ctx_slot = 139264, n_keep = 0, task.n_tokens = 136256
+0.02.293.402 I sched_reserve:      CUDA0 compute buffer size =  3759.97 MiB
+0.02.293.405 I sched_reserve:  CUDA_Host compute buffer size =   417.02 MiB
+GPU-afe18a20-ce24-20de-9935-7b37fbd27581, 1767862, 16418 MiB
+physical 1 peak used MiB 16441 min free MiB 7737
+process peak MiB GPU-afe18a20-ce24-20de-9935-7b37fbd27581 16418
