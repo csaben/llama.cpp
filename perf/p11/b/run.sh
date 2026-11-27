@@ -10,8 +10,9 @@ export LD_LIBRARY_PATH="${B_LIBS:-$HOME/inkling-live-bin-p9-72fd097}:$PWD/build/
 export SPEC_SERVER_BIN="${LD_LIBRARY_PATH%%:*}/llama-server"
 export LLAMA_DSPARK_ADAPTIVE=${B_ADAPT:-1} LLAMA_DSPARK_POLICY=${B_POLICY:-1}
 export IK_WINDOW_COLS=$window_cols IK_MMA=${B_MMA:-3} IK_MR=${B_MR:-1}
+ubatch=${B_UBATCH:-512}
 args=(-m "$MODEL" -ngl 99 -ctk q8_0 -ctv q8_0)
-bench=(build/p11/p9-tools/llama-bench "${args[@]}" -fa 1 -ot token_embd.weight=CUDA0 -b 2048 -ub 512 -o json)
+bench=(build/p11/p9-tools/llama-bench "${args[@]}" -fa 1 -ot token_embd.weight=CUDA0 -b 2048 -ub "$ubatch" -o json)
 mode=$1
 shift
 case $mode in
@@ -23,7 +24,7 @@ case $mode in
         export SPEC_SERVER_LOG="$out/$label.server.log"
         extra=()
         if ((width)); then extra+=(--spec-draft-n-ubatch 512); fi
-        exec bash perf/p8bc/probe.sh "$out" "$label" "$width" -b 2048 -ub 512 --alias inkling-mini "${extra[@]}" "${@:7}" ;;
+        exec bash perf/p8bc/probe.sh "$out" "$label" "$width" -b 2048 -ub "$ubatch" --alias inkling-mini "${extra[@]}" "${@:7}" ;;
     logits) exec build/p11/p9-tools/logits "$MODEL" perf/ppl.txt "$@" ;;
     ops) exec build/bin/test-backend-ops test -b CUDA0 "$@" ;;
     ppl) exec build/p11/p9-tools/llama-perplexity "${args[@]}" -fa on -f perf/ppl.txt "$@" ;;
