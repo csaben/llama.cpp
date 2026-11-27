@@ -9,3 +9,7 @@ The remaining kernel was flash_attn_tile<96,96,2,8,false>. The uncensored target
 The complete release tests use the clean build as a unit. Development snapshot measurements retain their original labels.
 
 At prefix 128064 the raw-logits test selects LOGITS_SWA_FULL=0 to match the server's compact sliding-window KV. The unmodified C API default reserved a separate full-depth 10,646.25 MiB SWA cache and the one-card p9 control could not allocate the 3,848.77 MiB prefill graph. Both builds use the same cache setting for each comparison. The prior shallow tests retain the existing harness default.
+
+The benchmark executable is build/bin/llama-bench for both sides. Its embedded commit string refers to that executable. LD_LIBRARY_PATH selects the frozen p9 or clean a16c61e5 shared libraries on each leg. Served checks launch llama-server from the matching runtime directory. The paired synthetic runs use the same executable and the same ordered depth list.
+
+The p9 matrix entry point in this checkout is perf/p9/verify.sh matrix. It invokes perf/p8bc/matrix.sh, perf/p8bc/summarize.py and the historical audit. Phase 11's matrix.sh retains the six p9 suites, width/policy settings and repeat counts, selects the uncensored model, and runs each configuration under the shared GPU lease. The same spec_probe.py checks all repetitions and r4_cmp.py checks the matching plain control. finalize-matrix.py validates the placement and compares the raw IDs and whole messages to the uncensored p9 controls; the historical calibrated output hashes belong to a different model.
