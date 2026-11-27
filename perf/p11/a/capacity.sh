@@ -6,9 +6,6 @@ placement=$1 mode=$2 label=$3 ctx=$4 depth=$5 budget=$6
 if [[ ${P11_CAP_LOCKED:-0} != 1 ]]; then
     exec perf/p11/a/with-gpus.sh "$placement" env P11_CAP_LOCKED=1 bash "$0" "$@"
 fi
-if [[ $placement == one && ${P11_PRIMARY_READY:-0} != 1 ]]; then
-    exec flock -s build/p11a/gpu1-turn.lock flock build/p11a/gpu1-use.lock env P11_PRIMARY_READY=1 bash "$0" "$@"
-fi
 export P8_GPU=1
 source perf/p8bc/env.sh
 export LLAMA_DSPARK_ADAPTIVE=1

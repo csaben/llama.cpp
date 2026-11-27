@@ -7,9 +7,6 @@ shift 3
 if [[ ${P11_CHECK_LOCKED:-0} != 1 ]]; then
     exec perf/p11/a/with-gpus.sh "$placement" env P11_CHECK_LOCKED=1 bash "$0" "$placement" "$kind" "$label" "$@"
 fi
-if [[ $placement == one && ${P11_PRIMARY_READY:-0} != 1 ]]; then
-    exec flock -s build/p11a/gpu1-turn.lock flock build/p11a/gpu1-use.lock env P11_PRIMARY_READY=1 bash "$0" "$placement" "$kind" "$label" "$@"
-fi
 . perf/p5env.sh
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 MR_PRIMARY_DEVICE=CUDA0
 export LD_LIBRARY_PATH="${P11_BIN:-$HOME/inkling-live-bin-p9-72fd097}:$PWD/build/bin"
@@ -31,6 +28,9 @@ case $kind in
         build/bin/llama-perplexity -m "$model" -ngl 99 -ctk q8_0 -ctv q8_0 -fa on -f perf/ppl.txt "${opts[@]}" "${args[@]}" >"$log" 2>&1
         rg 'Final estimate' "$log" >"$out/$label.txt";;
     mr)
+        if [[ -z ${MR_CTX:-} && $# == 2 ]] && (( $1 + 8*$2 > 8192 )); then
+            export MR_CTX=$(( (($1 + 8*$2 + 2047)/2048)*2048 ))
+        fi
         build/p11a/mr_check "$model" "${P11_CORPUS:-perf/ppl.txt}" "$@" >"$log" 2>&1
         rg '0 rows differ from single-token decode, max \|logit diff\| 0$' "$log" >"$out/$label.txt";;
     logits)

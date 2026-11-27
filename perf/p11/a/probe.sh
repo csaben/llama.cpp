@@ -10,9 +10,6 @@ export P8_GPU=1
 if [[ ${P11_LOCKED:-} != 1 ]]; then
     exec perf/p11/a/with-gpus.sh "$placement" env P11_LOCKED=1 bash "$0" "$mode" "$placement" "$label" "$@"
 fi
-if [[ $placement == one && ${P11_PRIMARY_READY:-0} != 1 ]]; then
-    exec flock -s build/p11a/gpu1-turn.lock flock build/p11a/gpu1-use.lock env P11_PRIMARY_READY=1 bash "$0" "$mode" "$placement" "$label" "$@"
-fi
 [[ ! -e perf/STOP ]] || exit 75
 if [[ ${P11_LOG:-} == build/p11a/matrix/*/*.server && -e ${P11_LOG%.server}.done ]]; then exit 0; fi
 source perf/p8bc/env.sh
