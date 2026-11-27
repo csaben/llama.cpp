@@ -23,9 +23,10 @@ if ((B_MIN_FREE_MIB >= 11000)); then
         case ${3:-} in
             build/p11/matrix-narrow/*)
                 suite=${3%/*}
-                queue=(flock "build/p11/stream-b-narrow-${suite##*/}.lock") ;;
-            build/p11/matrix-p9/main/*) queue=(flock build/p11/stream-b-p9-main.lock) ;;
-            build/p11/matrix-p9/*) queue=(flock build/p11/stream-b-p9-extra.lock) ;;
+                queue=(flock "build/p11/stream-b-narrow-${suite##*/}-${3##*/}.lock") ;;
+            build/p11/matrix-p9/*)
+                suite=${3%/*}
+                queue=(flock "build/p11/stream-b-p9-${suite##*/}.lock") ;;
         esac
     fi
     if [[ ${2:-} == bench && ${B_BENCH_GRID_LANE:-} =~ ^(timed|output)$ ]]; then
