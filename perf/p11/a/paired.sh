@@ -5,7 +5,11 @@ cd "$(dirname "$0")/../../.."
 name=${1:?label} candidate=${2:?runtime directory} suite=${3:?bench, draft, or capacity}
 out="$PWD/perf/p11/a/paired/$name"
 mkdir -p "$out" build/p11a
-exec {suite_lock}>"build/p11a/paired-$name-$suite.lock"
+budget_filter=${P11_PAIR_BUDGET:-}
+if [[ -n $budget_filter ]]; then
+    [[ $suite == draft && ( $budget_filter == 384 || $budget_filter == 3000 ) ]] || exit 2
+fi
+exec {suite_lock}>"build/p11a/paired-$name-$suite${budget_filter:+-$budget_filter}.lock"
 flock "$suite_lock"
 for leg in olda newa newb oldb; do
     (
@@ -36,6 +40,7 @@ for leg in olda newa newb oldb; do
             draft)
                 export SPEC_REPS=3 P11_KINDS=edit
                 for budget in 384 3000; do
+                    if [[ -n $budget_filter && $budget != "$budget_filter" ]]; then continue; fi
                     export SPEC_MAXT="$budget"
                     run "edit$budget" draft
                 done;;
