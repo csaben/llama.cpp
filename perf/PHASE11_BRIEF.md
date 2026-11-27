@@ -64,3 +64,6 @@ paired old/new/new/old benchmark and matching outputs. Save evidence under `perf
 
 Rules: never push; never open PRs/issues/comments on ggml-org, unslothai or any upstream; don't start/stop systemd units
 or containers; small commits; cite sources; concise final report.
+
+## Orchestrator note 03:35 EST
+The unrelated llama-qwen38-27b service (on GPU0+GPU1 since 02:02) has been stopped for the night. GPU0 now has ~22 GB free and GPU1 is yours again. Re-run any check or timing that failed to allocate or ran next to it after 02:02.

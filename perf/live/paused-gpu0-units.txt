@@ -1,2 +1,3 @@
 clark-voice baldree-voice qwen-asr uvr-service toki-clean-audio inkling-3090-experiment
 # paused 2026-11-27T01:05:07-05:00 for phase 11; inkling-3090-experiment restore via deploy-p9v-uncensored-128k.sh or the p11 deploy
+llama-qwen38-27b  # stopped 03:3x by orchestrator: crash-looped until GPU0 was freed, then took 21 GB GPU0 + 6 GB GPU1; decide in the morning
