@@ -18,3 +18,9 @@ The built-in tensor split rejected the inkling2_loop architecture and row mode r
 - [P2P kernel module used on this machine](https://github.com/aikitoria/open-gpu-kernel-modules/tree/0d96f83bbb4669b17f5978c3d5eaef23f3e5415f).
 - [gpu-unlock revision used on this machine](https://github.com/zagitta/gpu-unlock/tree/7eb51bccae0a0b7e599e084d971170e9a1e82d0c).
 - [NVIDIA CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/index.html), [Phase 9 verification](../../p9/verify.sh), [Phase 10 benchmark definitions](../../PHASE10_NUMBERS.md).
+
+## Native output head pilot
+
+Five 128-token runs per leg measured 240.26 / 246.97 / 247.04 / 242.34 tok/s at zero depth. On the 1,025-token edit, the three-repeat medians were 350.2 / 357.4 / 355.1 / 354.5 tok/s. All 12 edits matched the independent p9 plain message and every emitted ID. The output projection keeps whole weight rows on each rank, so the partial dot products within a row retain their original order. [Raw paired results](native-pilot.txt).
+
+The 128K p9 vision control completed a 128,064-token prompt and 3,000 generated tokens in both modes. The full replies matched. Peak board memory was 16,351 MiB in plain mode and 18,301 MiB with the drafter on GPU1. A 262,144-token DSpark slot reached its health endpoint but logged insufficient GPU memory for device-side features and the projector workspace. Capacity below is based on completed requests.

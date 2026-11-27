@@ -1,0 +1,1 @@
+native-draft-newa edit      prompt   1025   384 tok   357.4 tok/s    1135 chars  accepted/proposed 291/299  runs 353/357/365

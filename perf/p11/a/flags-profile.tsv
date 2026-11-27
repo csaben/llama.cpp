@@ -1,0 +1,10 @@
+cuda_device	kernel	grid_x	grid_y	calls	mean_us
+0	ik_peer_request	1	1	1364	2.943
+0	ik_peer_wait	1	1	1364	12.01
+0	ik_peer_send_experts	3	1	88	3.093
+1	ik_q2_down_rows	288	4	1452	6.408
+1	mul_mat_vec_q	576	4	1452	11.21
+1	situ_q8_1_kernel	18	1	1452	1.628
+1	ik_peer_return	1	1	1364	8.266
+1	ik_peer_wait	1	1	1364	50.62
+1	ik_peer_copy	36	1	88	5.523

@@ -1,0 +1,11 @@
+olda tg128 240.264151 [240.516, 240.1, 240.244, 240.055, 240.405]
+native-draft-olda edit      prompt   1025   384 tok   350.2 tok/s    1135 chars  accepted/proposed 290/295  runs 347/350/353
+newa tg128 246.965373 [246.567, 246.943, 247.043, 247.4, 246.874]
+native-draft-newa edit      prompt   1025   384 tok   357.4 tok/s    1135 chars  accepted/proposed 291/299  runs 353/357/365
+newb tg128 247.03908 [247.629, 246.959, 247.027, 246.696, 246.884]
+native-draft-newb edit      prompt   1025   384 tok   355.1 tok/s    1135 chars  accepted/proposed 291/299  runs 352/355/358
+oldb tg128 242.335481 [241.327, 242.539, 243.003, 242.099, 242.71]
+native-draft-oldb edit      prompt   1025   384 tok   354.5 tok/s    1135 chars  accepted/proposed 291/296  runs 352/355/363
+All twelve edit completions matched p9 plain on the complete message and all 384 IDs per completion.
+ids f5695916254a706dd9d437110ebd2e616b1657feee4d5dc110753c85372ac46b
+json 894afdd2d9e17c1f82fd1d0f17c5cbeb0d1a8b410157d65b98963fd428a83d2d
