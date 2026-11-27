@@ -44,7 +44,11 @@ for i in {1..240}; do
     sleep 0.5
 done
 curl -fsS --max-time 2 http://127.0.0.1:18502/health >/dev/null
-if (( depth > 0 )); then python3 perf/p11/a/deep.py "$depth" "$budget" "$out"; fi
+if [[ -n ${P11_IMAGE:-} ]]; then
+    python3 perf/p11/a/image-check.py "$P11_IMAGE" "$budget" "$out"
+elif (( depth > 0 )); then
+    python3 perf/p11/a/deep.py "$depth" "$budget" "$out"
+fi
 rg 'n_ctx_slot =|model buffer size =|KV buffer size =|compute buffer size =' "$log" >"$out.memory"
 nvidia-smi -i "$cards" --query-compute-apps=gpu_uuid,pid,used_gpu_memory --format=csv,noheader | awk -F', ' -v p="$pid" '$2 == p' >>"$out.memory"
 awk -F', ' '{d=$2; if ($3>peak[d]) peak[d]=$3; if (!(d in free) || $4<free[d]) free[d]=$4} END {for (d in peak) print "physical", d, "peak used MiB", peak[d], "min free MiB", free[d]}' "build/p11a/capacity/$label.vram" >>"$out.memory"

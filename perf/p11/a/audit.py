@@ -5,7 +5,7 @@ import re
 import sys
 from pathlib import Path
 
-root, reference = map(Path, sys.argv[1:])
+root, reference, *extra_controls = map(Path, sys.argv[1:])
 keys = ("suite", "budget", "prompt", "setting")
 
 def cells(directory):
@@ -16,8 +16,10 @@ def cells(directory):
         raise ValueError(f"{directory} has {len(rows)} cells, {len(result)} unique")
     return result
 
-rows, old = cells(root), cells(reference)
-assert rows.keys() == old.keys()
+rows = cells(root)
+old = cells(reference) if (reference / "cells.tsv").is_file() else None
+if old is not None:
+    assert rows.keys() == old.keys()
 replies = ids = 0
 for (suite, budget, prompt, setting), cell in rows.items():
     here = root / suite / budget
@@ -30,7 +32,11 @@ for (suite, budget, prompt, setting), cell in rows.items():
         data = (here / f"{setting}.{prompt}.{ext}").read_bytes()
         assert data == (here / f"plain.{prompt}.{ext}").read_bytes(), (suite, budget, prompt, setting, ext)
         assert data == (p9 / f"plain.{prompt}.{ext}").read_bytes(), (suite, budget, prompt, setting, ext)
-        assert hashlib.sha256(data).hexdigest() == cell[key] == old[suite, budget, prompt, setting][key]
+        for control in extra_controls:
+            assert data == (control / suite / budget / f"plain.{prompt}.{ext}").read_bytes()
+        assert hashlib.sha256(data).hexdigest() == cell[key]
+        if old is not None:
+            assert cell[key] == old[suite, budget, prompt, setting][key]
         if ext == "ids":
             assert len(data) == 4*int(budget)
     if setting != "plain":
@@ -38,3 +44,4 @@ for (suite, budget, prompt, setting), cell in rows.items():
         ids += reps*int(budget)
 assert (replies, ids) == (360, 347520)
 print(f"{len(rows)} cells, {replies} drafted replies, {ids:,} IDs and complete messages match same-flags plain and p9. Every short repeat agreed.")
+print("Control directories:", reference, *extra_controls)
