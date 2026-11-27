@@ -1,0 +1,4 @@
+w3-s1.15       code      prompt     47   384 tok   231.8 tok/s    1385 chars  accepted/proposed 175/216  runs 232/232
+w3-s1.15       edit      prompt   1025   384 tok   331.3 tok/s    1135 chars  accepted/proposed 300/303  runs 314/331
+w3-s1.15       prose     prompt     36   384 tok   218.1 tok/s    1468 chars  accepted/proposed 154/223  runs 217/218
+w3-s1.15       agent     prompt   2025   384 tok   260.1 tok/s    1300 chars  accepted/proposed 249/276  runs 260/260

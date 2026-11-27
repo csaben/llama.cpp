@@ -1,0 +1,2 @@
+single token: 4.54 ms per step
+72 rows in 72 steps (positions 200..271) after a 200-token prefix: 0 rows differ from single-token decode, max |logit diff| 0

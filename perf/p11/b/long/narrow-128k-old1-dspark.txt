@@ -1,0 +1,2 @@
+edit-127872 {'prompt_n': 127872, 'prompt_per_second': 1461.3888409970039, 'predicted_n': 3000, 'predicted_per_second': 191.53351606614297, 'draft_n': 2270, 'draft_n_accepted': 2116}
+samples 529 peak used MiB 19523 min free MiB 4647
