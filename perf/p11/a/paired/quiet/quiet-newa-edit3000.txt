@@ -1,0 +1,1 @@
+quiet-newa-edit3000 edit      prompt   1025  3000 tok   300.6 tok/s    9410 chars  accepted/proposed 1969/2118  runs 299/301/302

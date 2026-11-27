@@ -1,0 +1,1 @@
+quiet-newb-edit3000 edit      prompt   1025  3000 tok   301.6 tok/s    9410 chars  accepted/proposed 1968/2120  runs 300/302/304
