@@ -947,19 +947,19 @@ static __global__ void ik_q2_down_rows(const block_q2_0 * weights, const block_q
     }
 }
 
-bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int slots) {
     static const bool enabled = !getenv("IK_Q2_DOWN_ROWS") || atoi(getenv("IK_Q2_DOWN_ROWS")) == 2;
     const ggml_tensor * w = dst->src[0];
     const ggml_tensor * x = dst->src[1];
     const ggml_tensor * ids = dst->src[2];
     if (!enabled || w->type != GGML_TYPE_Q2_0 || ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X ||
-            w->ne[0] != 1152 || w->ne[1] != 2304 || w->ne[2] != 128 || w->ne[3] != 1 || x->ne[1] != 8 ||
-            !ggml_is_matrix(x) || !ggml_is_vector(ids) || ids->ne[0] != 8 || !ggml_is_matrix(dst) ||
+            w->ne[0] != 1152 || w->ne[1] != 2304 || w->ne[2] != 128 || w->ne[3] != 1 || x->ne[1] != slots ||
+            !ggml_is_matrix(x) || !ggml_is_vector(ids) || ids->ne[0] != slots || !ggml_is_matrix(dst) ||
             !ggml_is_contiguous(w) || !ggml_is_contiguous(x) || !ggml_is_contiguous(ids) || !ggml_is_contiguous(dst) ||
             !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device)) {
         return false;
     }
-    ik_q2_down_rows<<<dim3(2304/8, 8), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
+    ik_q2_down_rows<<<dim3(2304/8, slots), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
             (const block_q2_0 *) w->data, (const block_q8_1 *) x->data, (const int32_t *) ids->data, (float *) dst->data);
     return true;
 }

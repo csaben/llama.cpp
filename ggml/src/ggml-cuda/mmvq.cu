@@ -2172,7 +2172,7 @@ template <> struct ik_mma_w<GGML_TYPE_Q2_0> {
 
 // Expert matvecs of a window (MUL_MAT_ID): grid (16-row tiles, (token, slot) pairs), a warp per column slice.
 // NC = 1: one token, only the output column 0 of the tile is finished (the same operations per value as NC = 8).
-template <ggml_type type, int NC>
+template <ggml_type type, int NC, int slots = 8>
 static __global__ void ik_mma_moe(
         const uint8_t * GGML_CUDA_RESTRICT vx, const block_q8_1 * GGML_CUDA_RESTRICT vy, const int32_t * GGML_CUDA_RESTRICT ids,
         float * GGML_CUDA_RESTRICT dst, const uint32_t row_bytes, const size_t expert_bytes, const uint32_t n_tok, const uint32_t ids_stride,
@@ -2182,12 +2182,12 @@ static __global__ void ik_mma_moe(
 
     const int lane = threadIdx.x, warp = threadIdx.y;
     const int g = lane >> 2, t = lane & 3;
-    const uint32_t slot = blockIdx.y, nslots = n_tok*8;
+    const uint32_t slot = blockIdx.y, nslots = n_tok*slots;
 
     // the pairs of the window with this block's expert (after ingine's slot_mask)
-    const int lo = (uint32_t) lane      < nslots ? ids[(lane & 7) + (lane >> 3)*ids_stride]        : -1;
-    const int hi = (uint32_t) lane + 32 < nslots ? ids[(lane & 7) + ((lane + 32) >> 3)*ids_stride] : -2;
-    const int e  = ids[(slot & 7) + (slot >> 3)*ids_stride];
+    const int lo = (uint32_t) lane      < nslots ? ids[(lane % slots) + (lane / slots)*ids_stride]        : -1;
+    const int hi = (uint32_t) lane + 32 < nslots ? ids[(lane % slots) + ((lane + 32) / slots)*ids_stride] : -2;
+    const int e  = ids[(slot % slots) + (slot / slots)*ids_stride];
     const uint64_t mask = (uint64_t) __ballot_sync(0xffffffffu, lo == e) | ((uint64_t) __ballot_sync(0xffffffffu, hi == e) << 32);
     if (__ffsll((long long) mask) - 1 != (int) slot) {
         return; // an earlier pair owns the expert
@@ -2199,13 +2199,13 @@ static __global__ void ik_mma_moe(
 
     // B: token g; the output columns of this lane: tokens 2t and 2t+1
     // (a token without this expert reads token 0: its columns of the tile are never written)
-    const uint32_t kg = (uint32_t) (mask >> (8*g)) & 0xffu;
+    const uint32_t kg = (uint32_t) (mask >> (slots*g)) & ((1u << slots)-1);
     const block_q8_1 * yb = vy + (kg ? g*y_stride_tok + (__ffs(kg) - 1)*y_stride_slot : 0) + warp*(cpw/QK8_1);
     const block_q8_1 * yd[2];
     uint32_t           ks[2];
 #pragma unroll
     for (int c = 0; c < 2; ++c) {
-        ks[c] = (uint32_t) (mask >> (8*(2*t + c))) & 0xffu;
+        ks[c] = (uint32_t) (mask >> (slots*(2*t + c))) & ((1u << slots)-1);
         yd[c] = vy + (ks[c] ? (2*t + c)*y_stride_tok + (__ffs(ks[c]) - 1)*y_stride_slot : 0) + warp*(cpw/QK8_1);
     }
 
@@ -2333,7 +2333,7 @@ static __global__ void ik_mma_moe(
 
 // (Measured alternatives, slower: two rows per lane; a block that walks the distinct experts 8 apart instead of one
 // block per pair, with or without the next expert's weights loaded ahead: 59.6 / 70 us against 56 us for 4 tokens.)
-template <int NC>
+template <int NC, int slots = 8>
 static __global__ void ik_q2k_moe(
         const uint8_t * GGML_CUDA_RESTRICT vx, const block_q8_1 * GGML_CUDA_RESTRICT vy, const int32_t * GGML_CUDA_RESTRICT ids,
         float * GGML_CUDA_RESTRICT dst, const uint32_t row_bytes, const size_t expert_bytes, const uint32_t n_tok, const uint32_t ids_stride,
@@ -2344,7 +2344,7 @@ static __global__ void ik_q2k_moe(
 
     const int lane = threadIdx.x, warp = threadIdx.y;
     const int H = lane & 1;
-    const uint32_t slot = blockIdx.y, nslots = n_tok*8;
+    const uint32_t slot = blockIdx.y, nslots = n_tok*slots;
 
     unsigned long long mask;
     int e;
@@ -2352,9 +2352,9 @@ static __global__ void ik_q2k_moe(
         e    = ids[slot];
         mask = 1ull << slot;
     } else {
-        const int lo = (uint32_t) lane      < nslots ? ids[(lane & 7) + (lane >> 3)*ids_stride]        : -1;
-        const int hi = (uint32_t) lane + 32 < nslots ? ids[(lane & 7) + ((lane + 32) >> 3)*ids_stride] : -2;
-        e    = ids[(slot & 7) + (slot >> 3)*ids_stride];
+        const int lo = (uint32_t) lane      < nslots ? ids[(lane % slots) + (lane / slots)*ids_stride]        : -1;
+        const int hi = (uint32_t) lane + 32 < nslots ? ids[(lane % slots) + ((lane + 32) / slots)*ids_stride] : -2;
+        e    = ids[(slot % slots) + (slot / slots)*ids_stride];
         mask = (unsigned long long) __ballot_sync(0xffffffffu, lo == e) | ((unsigned long long) __ballot_sync(0xffffffffu, hi == e) << 32);
         if (__ffsll((long long) mask) - 1 != (int) slot) {
             return; // an earlier pair owns the expert
@@ -2379,7 +2379,7 @@ static __global__ void ik_q2k_moe(
     uint32_t yo[NC], ks[NC];
 #pragma unroll
     for (int n = 0; n < NC; ++n) {
-        ks[n] = NC == 1 ? 1u << slot : (uint32_t) (mask >> (8*n)) & 0xffu;
+        ks[n] = NC == 1 ? 1u << slot : (uint32_t) (mask >> (slots*n)) & ((1u << slots)-1);
         yo[n] = n*y_stride_tok + (ks[n] ? __ffs(ks[n]) - 1 : 0)*y_stride_slot;
     }
     const uint32_t nblk = blockDim.y*8;
@@ -2459,6 +2459,35 @@ static __global__ void ik_q2k_moe(
                 dst[n*dst_stride_tok + (__ffs(ks[n]) - 1)*dst_stride_slot + row0] = r;
             }
         }
+    }
+}
+
+void ggml_cuda_ik_moe_four(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, const ggml_tensor * ids, ggml_tensor * out) {
+    const int cols = out->ne[2];
+    const dim3 grid(w->ne[1]/16, 4*cols);
+    const dim3 block(32, w->ne[0]/(w->type == GGML_TYPE_Q2_K ? ik_mma_traits<GGML_TYPE_Q2_K>::cpw : ik_mma_traits<GGML_TYPE_Q2_0>::cpw));
+    const auto stream = ctx.stream();
+    const auto * weights = (const uint8_t *) w->data;
+    const auto * y = (const block_q8_1 *) x->data;
+    const auto * id = (const int32_t *) ids->data;
+    auto * result = (float *) out->data;
+    const uint32_t s_ids = ids->nb[1]/sizeof(int32_t), s_tok = x->nb[2]/sizeof(block_q8_1);
+    const uint32_t s_slot = x->ne[1] > 1 ? x->nb[1]/sizeof(block_q8_1) : 0;
+    const uint32_t d_tok = out->nb[2]/sizeof(float), d_slot = out->nb[1]/sizeof(float);
+    if (w->type == GGML_TYPE_Q2_K) {
+        auto launch = [&](auto width) {
+            ik_q2k_moe<decltype(width)::value, 4><<<grid, block, 0, stream>>>(weights, y, id, result, w->nb[1], w->nb[2], cols, s_ids, s_tok, s_slot, d_tok, d_slot);
+        };
+        if (cols == 1) { launch(std::integral_constant<int, 1>{}); }
+        else if (cols == 2) { launch(std::integral_constant<int, 2>{}); }
+        else if (cols <= 4) { launch(std::integral_constant<int, 4>{}); }
+        else { launch(std::integral_constant<int, 8>{}); }
+    } else {
+        auto launch = [&](auto width) {
+            ik_mma_moe<GGML_TYPE_Q2_0, decltype(width)::value, 4><<<grid, block, 0, stream>>>(weights, y, id, result, w->nb[1], w->nb[2], cols, s_ids, s_tok, s_slot, d_tok, d_slot);
+        };
+        if (cols == 1) { launch(std::integral_constant<int, 1>{}); }
+        else { launch(std::integral_constant<int, 8>{}); }
     }
 }
 

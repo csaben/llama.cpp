@@ -338,6 +338,36 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         LLAMA_LOG_INFO("%s: %lld output rows on %s\n", __func__, (long long) rows, peer_name);
     }
 
+    if (const char * peer_device = getenv("IK_PEER_EXPERTS")) {
+        auto * dev = ggml_backend_dev_by_name(peer_device);
+        if (!dev || strncmp(ggml_backend_dev_name(dev), "CUDA", 4) != 0) {
+            throw std::runtime_error("IK_PEER_EXPERTS requires a CUDA peer");
+        }
+        auto * buft = ggml_backend_dev_buffer_type(dev);
+        peer_experts.resize(n_layer_phys());
+        for (int i = 0; i < n_layer_phys(); ++i) {
+            ggml_tensor * weights[] = {layers[i].ffn_gate_up_exps, layers[i].ffn_down_exps};
+            if (!weights[0] || !weights[1] || weights[0]->type != GGML_TYPE_Q2_K || weights[1]->type != GGML_TYPE_Q2_0) {
+                continue;
+            }
+            for (int j = 0; j < 2; ++j) {
+                auto * src = weights[j];
+                if (ggml_backend_buffer_get_type(src->buffer) == buft) {
+                    throw std::runtime_error("place the target and expert replicas on different devices");
+                }
+                auto * dup = ggml_dup_tensor(fused_context(), src);
+                ggml_backend_buffer_ptr buf { ggml_backend_buft_alloc_buffer(buft, ggml_backend_buft_get_alloc_size(buft, dup)) };
+                if (!buf || ggml_backend_tensor_alloc(buf.get(), dup, ggml_backend_buffer_get_base(buf.get())) != GGML_STATUS_SUCCESS) {
+                    throw std::runtime_error("inkling2: failed to allocate peer expert weights");
+                }
+                ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+                ggml_backend_tensor_copy(src, dup);
+                peer_experts[i][j] = dup;
+                fused_bufs.emplace_back(std::move(buf));
+            }
+        }
+    }
+
     // the fused projection matrices
     for (int i = 0; i < n_layer_phys(); ++i) {
         auto & fa = fused_attn[i];
@@ -1316,6 +1346,10 @@ attn_done:
             if (moe_op == 3) {
                 // the merged gate|up matmul, then the activation on its two halves, quantized for the down matmul
                 ggml_tensor * gate_up = mr_mark(ggml_mul_mat_id(ctx0, gu, x3, selected_experts)); // [2*n_ff, n_expert_used, 1]
+                const auto & peer = static_cast<const llama_model_inkling2 &>(model).peer_experts;
+                if (!peer.empty()) {
+                    gate_up->extra = peer[ip][0];
+                }
                 ggml_tensor * gate = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
                 ggml_tensor * up   = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], n_ff*gate_up->nb[0]);
                 h = ggml_situ_split_out(ctx0, gate, up, hparams.situ_beta, hparams.situ_linear_beta, n_ff % ggml_blck_size(GGML_TYPE_Q8_1) == 0 ? a_type : GGML_TYPE_F32);
@@ -1333,6 +1367,10 @@ attn_done:
             }
             cb(h, "ffn_moe_situ", il);
             ggml_tensor * d = mr_mark(ggml_mul_mat_id(ctx0, layer.ffn_down_exps, h, selected_experts)); // [n_embd, n_expert_used, 1]
+            const auto & peer = static_cast<const llama_model_inkling2 &>(model).peer_experts;
+            if (!peer.empty()) {
+                d->extra = peer[ip][1];
+            }
             cb(d, "ffn_moe_down", il);
             if (proj_op && router_fused) {
                 // the epilogue is deferred into the next layer's fused projection op (or flushed before any other consumer)

@@ -21,3 +21,5 @@ void ggml_cuda_op_mul_mat_vec_q(
 // distinct expert of the window is read once. Returns false when the device or the types are not supported.
 bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst);
 bool ggml_cuda_ik_mma_moe_ok(const ggml_tensor * src0, const ggml_tensor * dst);
+
+void ggml_cuda_ik_moe_four(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, const ggml_tensor * ids, ggml_tensor * out);

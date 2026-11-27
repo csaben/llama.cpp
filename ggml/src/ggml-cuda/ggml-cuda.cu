@@ -2546,6 +2546,24 @@ static __global__ void ik_peer_copy(const float * src, float * dst, int rows, in
     }
 }
 
+static ggml_backend_cuda_context * ik_get_peer(ggml_backend_cuda_context & ctx, int other) {
+    auto & state = ctx.stream_context();
+    if (!state.ik_peer) {
+        int can_send, can_return;
+        CUDA_CHECK(cudaDeviceCanAccessPeer(&can_send, ctx.device, other));
+        CUDA_CHECK(cudaDeviceCanAccessPeer(&can_return, other, ctx.device));
+        if (!can_send || !can_return) {
+            return nullptr;
+        }
+        CUDA_CHECK(cudaEventCreateWithFlags(&state.ik_start, cudaEventDisableTiming));
+        ggml_cuda_set_device(other);
+        CUDA_CHECK(cudaEventCreateWithFlags(&state.ik_done, cudaEventDisableTiming));
+        state.ik_peer = std::make_unique<ggml_backend_cuda_context>(other);
+    }
+
+    return state.ik_peer.get();
+}
+
 static bool ik_peer_head(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, ggml_tensor * dst) {
     static const bool enabled = ggml_cuda_env_flag("IK_PEER_NATIVE");
     if (!enabled || !dst->extra || !ggml_cuda_p2p_enabled() || ggml_cuda_info().device_count != 2 ||
@@ -2566,17 +2584,8 @@ static bool ik_peer_head(ggml_backend_cuda_context & ctx, const ggml_tensor * w,
 
     auto & state = ctx.stream_context();
     auto main_stream = ctx.stream();
-    if (!state.ik_peer) {
-        int can_send, can_return;
-        CUDA_CHECK(cudaDeviceCanAccessPeer(&can_send, ctx.device, other));
-        CUDA_CHECK(cudaDeviceCanAccessPeer(&can_return, other, ctx.device));
-        if (!can_send || !can_return) {
-            return false;
-        }
-        CUDA_CHECK(cudaEventCreateWithFlags(&state.ik_start, cudaEventDisableTiming));
-        ggml_cuda_set_device(other);
-        CUDA_CHECK(cudaEventCreateWithFlags(&state.ik_done, cudaEventDisableTiming));
-        state.ik_peer = std::make_unique<ggml_backend_cuda_context>(other);
+    if (!ik_get_peer(ctx, other)) {
+        return false;
     }
 
     auto & peer = *state.ik_peer;
@@ -4705,6 +4714,127 @@ static int ik_attention_projection_end(ggml_backend_cuda_context & ctx, const gg
 }
 
 // try and fuse nodes and return the number of nodes to skip
+// Pack the four selected expert IDs of each token beside its quantized activation.
+static __global__ void ik_peer_send_experts(const int * x, int * peer_x, const int * ids, int * peer_ids, int words, int ids_stride) {
+    const int i = blockIdx.x*blockDim.x + threadIdx.x;
+    const int col = blockIdx.y;
+    if (i < words) {
+        peer_x[col*words+i] = x[col*words+i];
+    }
+    if (i < 4) {
+        peer_ids[col*4+i] = ids[col*ids_stride+4+i];
+    }
+}
+
+static ggml_tensor ik_four_slots(const ggml_tensor & t, void * data) {
+    ggml_tensor result = t;
+    result.data = data;
+    result.ne[1] = 4;
+    result.nb[2] = 4*t.nb[1];
+    result.nb[3] = result.ne[2]*result.nb[2];
+    return result;
+}
+
+static void ik_run_four_experts(ggml_backend_cuda_context & ctx, const ggml_tensor * gu_w, const ggml_tensor * down_w,
+        const ggml_tensor * input, ggml_tensor ids, const ggml_tensor & gu_orig, const ggml_tensor & h_orig, ggml_tensor dest, bool mma) {
+    auto & pool = ctx.pool();
+    ggml_cuda_pool_alloc<float> gu_data(pool, ggml_nelements(&gu_orig)/2);
+    ggml_cuda_pool_alloc<char> h_data(pool, ggml_nbytes(&h_orig)/2);
+    auto gu = ik_four_slots(gu_orig, gu_data.get());
+    auto gate = ik_four_slots(*h_orig.src[0], gu_data.get());
+    auto up = ik_four_slots(*h_orig.src[1], gu_data.get() + gate.ne[0]);
+    auto h = ik_four_slots(h_orig, h_data.get());
+    h.src[0] = &gate;
+    h.src[1] = &up;
+    if (mma) {
+        ggml_cuda_ik_moe_four(ctx, gu_w, input, &ids, &gu);
+    } else {
+        ggml_cuda_mul_mat_vec_q(ctx, gu_w, input, &ids, &gu);
+    }
+    ggml_cuda_op_situ(ctx, &h);
+    if (mma) {
+        ggml_cuda_ik_moe_four(ctx, down_w, &h, &ids, &dest);
+    } else {
+        dest.src[0] = const_cast<ggml_tensor *>(down_w);
+        dest.src[1] = &h;
+        dest.src[2] = &ids;
+        if (!ggml_cuda_inkling_q2_down(ctx, &dest, 4)) {
+            ggml_cuda_mul_mat_vec_q(ctx, down_w, &h, &ids, &dest);
+        }
+    }
+}
+
+static bool ik_peer_experts(ggml_backend_cuda_context & ctx, ggml_cgraph * graph, int i) {
+    const auto * gu = graph->nodes[i];
+    static const int mode = ggml_cuda_env_int("IK_MMA", 0);
+    if (!gu->extra || !getenv("IK_PEER_EXPERTS") || !ggml_cuda_p2p_enabled() || ggml_cuda_info().device_count != 2 ||
+            ctx.curr_stream_no != 0 || !ctx.stream_context().concurrent_events.empty() || (mode != 0 && mode != 3) ||
+            !ggml_can_fuse_subgraph(graph, i, {GGML_OP_MUL_MAT_ID, GGML_OP_VIEW, GGML_OP_VIEW, GGML_OP_GLU, GGML_OP_MUL_MAT_ID}, {i+4})) {
+        return false;
+    }
+    const auto * h = graph->nodes[i+3];
+    auto * down = graph->nodes[i+4];
+    const auto * w = gu->src[0];
+    const auto * v = down->src[0];
+    const auto * x = gu->src[1];
+    const auto * ids = gu->src[2];
+    const int cols = gu->ne[2];
+    const int other = 1 - ctx.device;
+    const int output = i+4;
+    if (!down->extra || h->src[0]->view_src != gu || h->src[1]->view_src != gu || h->src[0]->view_offs != 0 ||
+            h->src[1]->view_offs != 1152*sizeof(float) || ggml_get_glu_op(h) != GGML_GLU_OP_SITU || down->src[1] != h || down->src[2] != ids ||
+            w->type != GGML_TYPE_Q2_K || v->type != GGML_TYPE_Q2_0 || w->ne[0] != 2304 || w->ne[1] != 2304 || w->ne[2] != 128 ||
+            v->ne[0] != 1152 || v->ne[1] != 2304 || v->ne[2] != 128 || x->type != GGML_TYPE_Q8_1 || x->ne[1] != 1 ||
+            h->type != GGML_TYPE_Q8_1 || ids->ne[0] != 8 || gu->ne[1] != 8 || cols > 7 || (cols > 1 && mode != 3) ||
+            !ggml_is_contiguous(x) || !ggml_is_contiguous(down) || !ggml_cuda_check_fusion_memory_ranges(graph, i, 5, &output, 1) ||
+            ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_AMPERE_GA10X || ggml_cuda_info().devices[other].cc != GGML_CUDA_CC_AMPERE_GA10X) {
+        return false;
+    }
+    const auto * peer_w = static_cast<const ggml_tensor *>(gu->extra);
+    const auto * peer_v = static_cast<const ggml_tensor *>(down->extra);
+    if (ggml_backend_buffer_get_type(peer_w->buffer) != ggml_backend_cuda_buffer_type(other) ||
+            ggml_backend_buffer_get_type(peer_v->buffer) != ggml_backend_cuda_buffer_type(other)) {
+        return false;
+    }
+    const auto main_stream = ctx.stream();
+    auto * peer = ik_get_peer(ctx, other);
+    if (!peer) {
+        return false;
+    }
+    auto & state = ctx.stream_context();
+    ggml_cuda_set_device(other);
+    auto peer_stream = peer->stream();
+    const int words = ggml_nbytes(x)/(cols*sizeof(int));
+    const int rows = 4*down->ne[0];
+    ggml_cuda_pool_alloc<int> peer_input(peer->pool(), words*cols);
+    ggml_cuda_pool_alloc<int> peer_ids(peer->pool(), 4*cols);
+    ggml_cuda_pool_alloc<float> peer_out(peer->pool(), rows*cols);
+    ggml_cuda_set_device(ctx.device);
+    ik_peer_send_experts<<<dim3((words+255)/256, cols), 256, 0, main_stream>>>((const int *) x->data, peer_input.get(),
+            (const int *) ids->data, peer_ids.get(), words, ids->nb[1]/sizeof(int));
+    CUDA_CHECK(cudaEventRecord(state.ik_start, main_stream));
+
+    ggml_tensor local_ids = *ids;
+    local_ids.ne[0] = 4;
+    ggml_tensor remote_ids = local_ids, remote_x = *x;
+    remote_ids.data = peer_ids.get();
+    remote_ids.nb[1] = 4*sizeof(int);
+    remote_ids.nb[2] = remote_ids.nb[3] = cols*remote_ids.nb[1];
+    remote_x.data = peer_input.get();
+    ggml_cuda_set_device(other);
+    CUDA_CHECK(cudaStreamWaitEvent(peer_stream, state.ik_start));
+    ik_run_four_experts(*peer, peer_w, peer_v, &remote_x, remote_ids, *gu, *h, ik_four_slots(*down, peer_out.get()), mode == 3);
+    ik_peer_copy<<<dim3((rows+255)/256, cols), 256, 0, peer_stream>>>(peer_out.get(), (float *) down->data+rows, rows, rows, 2*rows);
+    CUDA_CHECK(cudaEventRecord(state.ik_done, peer_stream));
+
+    ggml_cuda_set_device(ctx.device);
+    ggml_tensor local = *down;
+    local.ne[1] = 4; // retain the full eight-slot token stride
+    ik_run_four_experts(ctx, w, v, x, local_ids, *gu, *h, local, mode == 3);
+    CUDA_CHECK(cudaStreamWaitEvent(main_stream, state.ik_done));
+    return true;
+}
+
 static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
 
     if (ggml_cuda_fusion_disabled()) {
@@ -4712,6 +4842,10 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     }
 
     ggml_tensor * node = cgraph->nodes[i];
+
+    if (node->op == GGML_OP_MUL_MAT_ID && node->extra && ik_peer_experts(*cuda_ctx, cgraph, i)) {
+        return 4;
+    }
 
     if (node->op == GGML_OP_RES_MIX && (node->flags & GGML_TENSOR_FLAG_COMPUTE) &&
             cuda_ctx->curr_stream_no == 0 && cuda_ctx->stream_context().concurrent_events.empty()) {
