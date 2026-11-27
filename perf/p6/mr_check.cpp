@@ -198,6 +198,15 @@ int main(int argc, char ** argv) {
     llama_log_set([](ggml_log_level l, const char * t, void *) { if (l >= GGML_LOG_LEVEL_ERROR) fputs(t, stderr); }, nullptr);
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = 99;
+    ggml_backend_dev_t devices[] = { nullptr, nullptr };
+    if (const char * primary = getenv("MR_PRIMARY_DEVICE")) {
+        devices[0] = ggml_backend_dev_by_name(primary);
+        if (!devices[0]) {
+            fprintf(stderr, "unknown primary device %s\n", primary);
+            return 1;
+        }
+        mp.devices = devices;
+    }
     llama_model * model = llama_model_load_from_file(argv[1], mp);
     if (!model) return 1;
     if (getenv("MR_TRACE")) { const int r = replay(model, getenv("MR_TRACE")); llama_model_free(model); return r; }

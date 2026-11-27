@@ -1,0 +1,4 @@
+request=9216 reply=9216 roundtrip_us=7.397 checked=4096 steps
+request=9216 reply=36864 roundtrip_us=9.288 checked=4096 steps
+request=9216 reply=36864 roundtrip_us=9.289 checked=4096 steps
+request=9216 reply=9216 roundtrip_us=7.349 checked=4096 steps
