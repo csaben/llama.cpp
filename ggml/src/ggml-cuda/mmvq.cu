@@ -1954,7 +1954,7 @@ static __global__ void ik_mmvq_mr_pairs(
 }
 
 // One warp reads two weight rows for the whole window. Sum the four partials in single-token order.
-template <int NC, int K>
+template <int NC, int K, bool peer_store = false>
 static __global__ void ik_iq4_nl_window(const void * weights, const block_q8_1 * x, float * dst,
         uint32_t rows, uint32_t weight_stride, uint32_t x_stride, uint32_t dst_stride) {
     constexpr int lanes = QI4_NL/VDR_IQ4_NL_Q8_1_MMVQ;
@@ -1987,16 +1987,53 @@ static __global__ void ik_iq4_nl_window(const void * weights, const block_q8_1 *
             }
         }
     }
+    __shared__ float tile[peer_store ? NC : 1][peer_store ? 32 : 1];
 #pragma unroll
     for (int t = 0; t < NC; ++t) {
 #pragma unroll
         for (int r = 0; r < 2; ++r) {
             const float sum = warp_reduce_sum<32>(sums[t][r]);
             if (lane == r) {
-                dst[t*dst_stride + row + r] = sum;
+                if constexpr (peer_store) {
+                    tile[t][2*threadIdx.y + r] = sum;
+                } else {
+                    dst[t*dst_stride + row + r] = sum;
+                }
             }
         }
     }
+    if constexpr (peer_store) {
+        __syncthreads();
+        if (threadIdx.y < NC) {
+            dst[threadIdx.y*dst_stride + blockIdx.x*32 + lane] = tile[threadIdx.y][lane];
+        }
+    }
+}
+
+bool ggml_cuda_ik_peer_project(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, ggml_tensor * dst) {
+    const int cols = x->ne[1], rows = w->ne[1];
+    if (w->ne[0] != 2304 || rows%32 != 0 || cols < 1 || cols > 7) {
+        return false;
+    }
+    const int padded = GGML_PAD(2304, MATRIX_ROW_PADDING);
+    ggml_cuda_pool_alloc<block_q8_1> q(ctx.pool(), cols*padded/QK8_1);
+    quantize_row_q8_1_cuda((const float *) x->data, q.get(), 2304, x->nb[1]/sizeof(float), x->nb[2]/sizeof(float),
+            x->nb[3]/sizeof(float), padded, cols, 1, 1, ctx.stream());
+    auto launch = [&](auto n) {
+        constexpr int nc = decltype(n)::value;
+        ik_iq4_nl_window<nc, 2304, true><<<rows/32, dim3(32, 16), 0, ctx.stream()>>>(w->data, q.get(), (float *) dst->data,
+                rows, w->nb[1]/sizeof(block_iq4_nl), padded/QK8_1, dst->nb[1]/sizeof(float));
+    };
+    switch (cols) {
+        case 1: launch(std::integral_constant<int, 1>{}); break;
+        case 2: launch(std::integral_constant<int, 2>{}); break;
+        case 3: launch(std::integral_constant<int, 3>{}); break;
+        case 4: launch(std::integral_constant<int, 4>{}); break;
+        case 5: launch(std::integral_constant<int, 5>{}); break;
+        case 6: launch(std::integral_constant<int, 6>{}); break;
+        case 7: launch(std::integral_constant<int, 7>{}); break;
+    }
+    return true;
 }
 
 template <ggml_type type>

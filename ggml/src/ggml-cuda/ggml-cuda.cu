@@ -2685,8 +2685,14 @@ static bool ik_peer_head(ggml_backend_cuda_context & ctx, const ggml_tensor * w,
     remote.ne[0] = rows;
     remote.nb[1] = rows*sizeof(float);
     remote.nb[2] = remote.nb[3] = remote.nb[1]*cols;
-    project(peer, upper, &act, &remote);
-    ik_peer_copy<<<dim3((rows+255)/256, cols), 256, 0, peer_stream>>>(peer_out.get(), (float *) dst->data + rows, rows, rows, 2*rows);
+    static const bool direct = ggml_cuda_env_flag("IK_PEER_DIRECT");
+    ggml_tensor direct_out = *dst;
+    direct_out.data = (float *) dst->data + rows;
+    direct_out.ne[0] = rows;
+    if (!direct || !ggml_cuda_ik_peer_project(peer, upper, &act, &direct_out)) {
+        project(peer, upper, &act, &remote);
+        ik_peer_copy<<<dim3((rows+255)/256, cols), 256, 0, peer_stream>>>(peer_out.get(), (float *) dst->data + rows, rows, rows, 2*rows);
+    }
     if (flags) { ik_peer_signal<<<1, 1, 0, peer_stream>>>(state.ik_reply); }
     else { CUDA_CHECK(cudaEventRecord(state.ik_done, peer_stream)); }
 
