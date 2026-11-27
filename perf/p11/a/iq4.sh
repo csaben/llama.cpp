@@ -5,15 +5,20 @@ export P11_MODEL="$HOME/models/inkling-2-mini/Inkling-2-Mini-IQ4_NL-dense-iq4nl.
 export P11_CTX=8192 P11_UB=128 P11_DRAFT_UB=128 SPEC_REPS=3 SPEC_MAXT=384
 export P11_OUT="${P11_IQ4_OUT:-$PWD/perf/p11/a/iq4}" P11_TELEMETRY=1
 mkdir -p "$P11_OUT"
-perf/p11/a/probe.sh plain one plain
+if [[ ! -s $P11_OUT/plain.edit.ids || ! -s $P11_OUT/plain.edit.json || ! -s $P11_OUT/plain.txt ]]; then
+    perf/p11/a/probe.sh plain one plain
+fi
 for leg in olda newa newb oldb; do
     (
+        if [[ -s $P11_OUT/$leg.equal ]]; then exit 0; fi
         dev=one
         if [[ $leg == new* ]]; then
             dev=head
             export P11_BIN="${1:?runtime}" IK_PEER_NATIVE=1 IK_PEER_DIRECT=1
         fi
-        perf/p11/a/probe.sh bench "$dev" "iq4-bench-$leg" -p 0 -n 128 -r 5
+        if ! python3 -c 'import json, sys; rows=json.load(open(sys.argv[1])); assert len(rows)==1 and len(rows[0]["samples_ts"])==5' "$P11_OUT/iq4-bench-$leg.json" 2>/dev/null; then
+            perf/p11/a/probe.sh bench "$dev" "iq4-bench-$leg" -p 0 -n 128 -r 5
+        fi
         perf/p11/a/probe.sh draft "$dev" "iq4-edit-$leg"
         SPEC_KINDS=edit SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py "$P11_OUT" plain "iq4-edit-$leg" >"$P11_OUT/$leg.equal"
     )

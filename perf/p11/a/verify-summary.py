@@ -47,3 +47,11 @@ for key in ("head", "inkling"):
     pairs = re.findall(r"(\d+)/(\d+) tests passed", contents(f"{name}-ops-{key}"))
     assert len(pairs) == 1 and int(pairs[0][0]) > 0 and pairs[0][0] == pairs[0][1], pairs
     print(f"test-backend-ops {key}: {pairs[0][0]}/{pairs[0][1]}.")
+for method in ("test", "memcheck", "synccheck"):
+    log = contents(f"after-{name}-head-{method}")
+    widths = [(int(w), int(n)) for w, n in re.findall(r"^width (\d+): (\d+) FP32 values matched over four inputs$", log, re.M)]
+    assert widths == [(w, 16384*w) for w in range(1, 9)], (method, widths)
+    assert sum(n for _, n in widths) == 589824
+    if method != "test":
+        assert re.search(r"SUMMARY: 0 errors", log), method
+    print(f"Direct IQ4 output, {method}: 589,824 FP32 values exact across widths 1-8 and four inputs.")

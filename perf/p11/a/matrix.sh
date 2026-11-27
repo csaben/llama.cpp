@@ -27,13 +27,17 @@ for pass in controls drafted; do
                 [[ $setting != *-adapt ]] || export P11_ADAPT=1
                 [[ $setting != plain ]] || mode=plain
                 export P11_OUT="$out" P11_LOG="$log/$setting.server"
-                if [[ ! -f "$log/$setting.done" ]]; then
-                    perf/p11/a/probe.sh "$mode" "$placement" "$setting"
-                    if [[ $mode == draft ]]; then
-                        SPEC_KINDS="$P11_KINDS" SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py "$out" plain "$setting" >"$out/$setting.equal"
+                (
+                    exec {cell_lock}>"$log/$setting.lock"
+                    flock "$cell_lock"
+                    if [[ ! -f "$log/$setting.done" ]]; then
+                        perf/p11/a/probe.sh "$mode" "$placement" "$setting"
+                        if [[ $mode == draft ]]; then
+                            SPEC_KINDS="$P11_KINDS" SPEC_REQUIRE_IDS=1 python3 perf/p6/r4_cmp.py "$out" plain "$setting" >"$out/$setting.equal"
+                        fi
+                        touch "$log/$setting.done"
                     fi
-                    touch "$log/$setting.done"
-                fi
+                )
                 if [[ ${P11_YIELD:-0} != 0 ]]; then sleep "$P11_YIELD"; fi
             done
         done
