@@ -1088,6 +1088,8 @@ struct llm_graph_amax_src1 {
     ggml_tensor * scale_s; // scale to undo on the matmul result, or nullptr
 };
 
+bool llm_can_read_peer_rows(ggml_backend_dev_t consumer, const ggml_tensor * src);
+
 struct llm_graph_context {
     const llama_model & model;
 
@@ -1607,6 +1609,8 @@ struct llm_graph_context {
     //
 
     void build_sampling() const;
+
+    ggml_tensor * build_peer_rows(ggml_tensor * src, ggml_tensor * ids) const;
 
     // write enabled layer inputs into layer_inp_dev at their batch rows
     void build_layer_inp_dev() const;

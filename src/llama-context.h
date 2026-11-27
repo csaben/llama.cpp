@@ -482,6 +482,7 @@ private:
     //   read    - recorded by the reader after it consumed the rows, waited on by this context
     ggml_backend_event_ptr ev_layer_inp_written;
     ggml_backend_event_ptr ev_layer_inp_read;
+    ggml_backend_event_ptr ev_peer_layer_read;
     bool ev_layer_inp_read_recorded = false;
 
     // device buffer with the h_nextn rows, F32 [n_embd_out, n_batch + n_seq_max]:
@@ -494,6 +495,7 @@ private:
     ggml_backend_t          h_nextn_backend = nullptr;
     ggml_backend_event_ptr  ev_h_nextn_written;
     ggml_backend_event_ptr  ev_h_nextn_read;
+    ggml_backend_event_ptr  ev_peer_picks_read;
     bool ev_h_nextn_written_recorded = false;
     bool ev_h_nextn_read_recorded    = false;
 

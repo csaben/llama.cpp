@@ -221,7 +221,7 @@ ggml_tensor * llama_model_dflash::build_inp_target_features(llm_graph_context & 
         inp.embd_rows = ggml_new_tensor_1d(g.ctx0, GGML_TYPE_I32, g.n_tokens);
         ggml_set_input(inp.embd_rows);
 
-        return ggml_get_rows(g.ctx0, g.layer_inp_src, inp.embd_rows);
+        return g.build_peer_rows(g.layer_inp_src, inp.embd_rows);
     }
 
     inp.embd = ggml_new_tensor_2d(g.ctx0, GGML_TYPE_F32, n_embd_inp, g.n_tokens);

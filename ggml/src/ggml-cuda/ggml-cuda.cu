@@ -7730,8 +7730,20 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
     GGML_UNUSED(reg);
 }
 
+static bool ggml_cuda_can_read_peer(ggml_backend_dev_t dst, ggml_backend_dev_t src) {
+    if (!ggml_cuda_p2p_enabled() || ggml_cuda_info().device_count != 2 || ggml_cuda_info().physical_device_count != 2 || dst == src) {
+        return false;
+    }
+    static const bool accessible = [] {
+        int to0 = 0, to1 = 0;
+        return cudaDeviceCanAccessPeer(&to0, 1, 0) == cudaSuccess && cudaDeviceCanAccessPeer(&to1, 0, 1) == cudaSuccess && to0 && to1;
+    }();
+    return accessible;
+}
+
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
+    if (strcmp(name, "ggml_cuda_can_read_peer") == 0) { return (void *) ggml_cuda_can_read_peer; }
     if (strcmp(name, "ggml_backend_comm_init") == 0) {
         return (void *)ggml_backend_cuda_comm_init;
     }

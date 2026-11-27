@@ -1518,6 +1518,8 @@ bool llama_context::supports_embd_row() const {
         return false;
     }
 
+    if (llm_can_read_peer_rows(model.dev_output(), src)) { return true; }
+
     // one of our backends must be able to read the buffer, e.g. not a draft on another GPU than the target output
     ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(src->buffer);
     for (const auto & backend : backends) {
@@ -1722,6 +1724,8 @@ bool llama_context::supports_state_row() const {
     if (src == nullptr || (!verify && src->ne[0] != (int64_t) llama_batch_ext_select_n_embd_state(cparams.ctx_type, model.hparams))) {
         return false;
     }
+
+    if (verify && llm_can_read_peer_rows(model.dev_output(), src)) { return true; }
 
     // one of our backends must be able to read the buffer
     ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(src->buffer);
@@ -2448,8 +2452,9 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     // ordering for the layer input device buffer
     llama_context * inject_src     = has_embd_row ? cparams.ctx_other : nullptr;
     ggml_backend_t  inject_backend = nullptr;
+    const bool peer_features = inject_src && llm_can_read_peer_rows(model.dev_output(), inject_src->get_layer_inp_dev());
     if (inject_src) {
-        inject_backend = inject_src->ev_layer_inp_written ? backend_from_dev(inject_src->layer_inp_dev_dev) : nullptr;
+        inject_backend = inject_src->ev_layer_inp_written ? backend_from_dev(peer_features ? model.dev_output() : inject_src->layer_inp_dev_dev) : nullptr;
         if (inject_backend) {
             // wait on the host: a device-side wait would stall our queue for the whole target batch,
             // which trips the Metal command buffer timeout on long prompts
@@ -2467,11 +2472,15 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         ggml_backend_event_wait(layer_inp_backend, ev_layer_inp_read.get());
     }
 
+    if (layer_inp_dev && ev_peer_layer_read) {
+        ggml_backend_event_wait(layer_inp_backend, ev_peer_layer_read.get());
+    }
     // ordering for the h_nextn device buffer, as for the layer input buffer
     llama_context * state_src     = has_state_row ? cparams.ctx_state_src : nullptr;
     ggml_backend_t  state_backend = nullptr;
+    const bool peer_picks = state_src && model.arch == LLM_ARCH_INKLING2_LOOP && llm_can_read_peer_rows(model.dev_output(), state_src->get_h_nextn_dev());
     if (state_src) {
-        state_backend = backend_from_dev(state_src->h_nextn_dev_dev);
+        state_backend = backend_from_dev(peer_picks ? model.dev_output() : state_src->h_nextn_dev_dev);
         if (state_src->ev_h_nextn_written_recorded) {
             if ((state_src == this || model.arch == LLM_ARCH_INKLING2_LOOP) && state_backend) {
                 ggml_backend_event_wait(state_backend, state_src->ev_h_nextn_written.get());
@@ -2484,6 +2493,9 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     }
     const bool write_h_nextn = cparams.embeddings_nextn_dev && h_nextn_dev != nullptr && !(model.hparams.dflash_variant == LLAMA_DFLASH_VARIANT_DSPARK_INKLING2 && batch_inp.tokens.front().id != LLAMA_TOKEN_NULL);
     const bool write_draft = has_state_row && state_src == this && cparams.embeddings_nextn_dev;
+    if (write_draft && ev_peer_picks_read) {
+        ggml_backend_event_wait(h_nextn_backend, ev_peer_picks_read.get());
+    }
     if ((write_h_nextn || write_draft) && ev_h_nextn_read_recorded) {
         ggml_backend_event_wait(h_nextn_backend, ev_h_nextn_read.get());
     }
@@ -2692,7 +2704,12 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         ev_h_nextn_written_recorded = true;
     }
     if (state_src) {
-        if (state_backend) {
+        if (peer_picks && state_backend) {
+            auto & done = state_src->ev_peer_picks_read;
+            if (!done) { done.reset(ggml_backend_event_new(model.dev_output())); }
+            if (done) { ggml_backend_event_record(done.get(), state_backend); }
+            else { synchronize(); }
+        } else if (state_backend) {
             ggml_backend_event_record(state_src->ev_h_nextn_read.get(), state_backend);
             state_src->ev_h_nextn_read_recorded = true;
         } else {
@@ -2700,7 +2717,12 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         }
     }
     if (inject_src) {
-        if (inject_backend) {
+        if (peer_features && inject_backend) {
+            auto & done = inject_src->ev_peer_layer_read;
+            if (!done) { done.reset(ggml_backend_event_new(model.dev_output())); }
+            if (done) { ggml_backend_event_record(done.get(), inject_backend); }
+            else { synchronize(); }
+        } else if (inject_backend) {
             ggml_backend_event_record(inject_src->ev_layer_inp_read.get(), inject_backend);
             inject_src->ev_layer_inp_read_recorded = true;
         } else {

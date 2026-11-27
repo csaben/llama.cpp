@@ -2859,7 +2859,7 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
         GGML_ASSERT(h_nextn_src);
         inp->device_draft = true;
         auto * row = ggml_view_2d(ctx0, h_nextn_src, 1, h_nextn_src->ne[0], sizeof(float), (h_nextn_src->ne[1] - 1)*h_nextn_src->nb[1]);
-        token_ids = ggml_cast(ctx0, ggml_reshape_1d(ctx0, ggml_get_rows(ctx0, row, inp->tokens), n_tokens), GGML_TYPE_I32);
+        token_ids = ggml_cast(ctx0, ggml_reshape_1d(ctx0, build_peer_rows(row, inp->tokens), n_tokens), GGML_TYPE_I32);
         res->t_inp_tokens = token_ids;
     }
 
@@ -4716,6 +4716,40 @@ void llm_graph_context::build_logits() const {
     if (res->t_logits != nullptr) {
         ggml_build_forward_expand(gf, res->t_logits);
     }
+}
+
+bool llm_can_read_peer_rows(ggml_backend_dev_t consumer, const ggml_tensor * src) {
+    static const bool enabled = getenv("IK_PEER_ROWS") && atoi(getenv("IK_PEER_ROWS"));
+    if (!enabled || !consumer || !src || !src->data) { return false; }
+    auto * base = src->view_src ? src->view_src : src;
+    if (!base->buffer) { return false; }
+    auto * source = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(base->buffer));
+    if (!source || source == consumer || ggml_backend_dev_type(source) != GGML_BACKEND_DEVICE_TYPE_GPU ||
+            ggml_backend_dev_backend_reg(source) != ggml_backend_dev_backend_reg(consumer)) {
+        return false;
+    }
+    using can_read_fn = bool (*)(ggml_backend_dev_t, ggml_backend_dev_t);
+    auto can_read = reinterpret_cast<can_read_fn>(ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(consumer), "ggml_cuda_can_read_peer"));
+    return can_read && can_read(consumer, source);
+}
+
+ggml_tensor * llm_graph_context::build_peer_rows(ggml_tensor * src, ggml_tensor * ids) const {
+    auto * dev = model.dev_output();
+    if (llm_can_read_peer_rows(dev, src)) {
+        for (int i = 0; i < ggml_backend_sched_get_n_backends(sched); ++i) {
+            auto * backend = ggml_backend_sched_get_backend(sched, i);
+            if (ggml_backend_get_device(backend) != dev) { continue; }
+            // A rank-local operand keeps the scheduler from copying the entire producer buffer.
+            auto * anchor = ggml_new_tensor_2d(ctx0, src->type, src->ne[0], 1);
+            auto * out = ggml_get_rows(ctx0, anchor, ids);
+            out->op_params[15] = GGML_IK_PEER_ROWS;
+            out->extra = src;
+            ggml_backend_sched_set_tensor_backend(sched, anchor, backend);
+            ggml_backend_sched_set_tensor_backend(sched, out, backend);
+            return out;
+        }
+    }
+    return ggml_get_rows(ctx0, src, ids);
 }
 
 void llm_graph_context::build_layer_inp_dev() const {
