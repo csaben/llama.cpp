@@ -18,6 +18,6 @@ for depth in 200 4096 16384 32768 65536; do
         fi
         test "$(stat -c %s "$dir/$leg.f32")" -eq "$((8 * 200058 * 4))"
     done
-    sha256sum "$dir/p9.f32" "$dir/new.f32" >"$out/$depth.sha256"
     cmp "$dir/p9.f32" "$dir/new.f32"
+    sha256sum "$dir/p9.f32" "$dir/new.f32" >"$out/$depth.sha256"
 done
