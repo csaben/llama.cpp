@@ -1,0 +1,1 @@
+1/4 vision-server processes audited on GPU0 port 18550, snapshot independent-narrow. Completed plain-before. 0 drafted replies, 0 generated IDs. Complete messages and IDs matched frozen p9 and each available plain control. All nine runtime hashes matched.

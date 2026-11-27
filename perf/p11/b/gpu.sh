@@ -23,7 +23,10 @@ if ((B_MIN_FREE_MIB >= 11000)); then
         case ${3:-} in
             build/p11/matrix-narrow/*)
                 suite=${3%/*}
-                queue=(flock "build/p11/stream-b-narrow-${suite##*/}-${3##*/}.lock") ;;
+                queue=(flock "build/p11/stream-b-narrow-${suite##*/}-${3##*/}.lock")
+                if [[ ${B_MATRIX_ROW:-} =~ ^n[2346]-adapt$ && ${suite##*/} == main ]]; then
+                    queue=(flock "build/p11/stream-b-narrow-main-${B_MATRIX_ROW}-${3##*/}.lock")
+                fi ;;
             build/p11/matrix-p9/*)
                 suite=${3%/*}
                 queue=(flock "build/p11/stream-b-p9-${suite##*/}.lock") ;;
@@ -31,6 +34,9 @@ if ((B_MIN_FREE_MIB >= 11000)); then
     fi
     if [[ ${2:-} == bench && ${B_BENCH_GRID_LANE:-} =~ ^(timed|output)$ ]]; then
         queue=(flock "build/p11/stream-b-bench-${B_BENCH_GRID_LANE}.lock")
+    fi
+    if [[ ${1##*/} == long.sh && ${5:-} == narrow-128k-* ]]; then
+        queue=(flock "build/p11/stream-b-128k-${4}.lock")
     fi
 elif [[ ${B_OPERATOR_SWEEP:-0} == 1 ]]; then
     queue=(flock "build/p11/stream-b-operator-$((PPID % 4)).lock")

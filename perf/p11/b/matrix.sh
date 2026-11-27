@@ -16,6 +16,7 @@ for budget in ${B_MATRIX_BUDGETS:-384 3000}; do
         esac
         if [[ $budget == 3000 ]]; then reps=1; fi
         for row in "${rows[@]}"; do
+            if [[ -n ${B_MATRIX_ROW:-} && $row != "$B_MATRIX_ROW" ]]; then continue; fi
             width=${row:1:1}
             export B_ADAPT=0
             if [[ $row == plain ]]; then width=0; fi
