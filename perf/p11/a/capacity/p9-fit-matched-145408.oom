@@ -1,0 +1,5 @@
+0.02.884.805 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 3930.97 MiB on device 0: cudaMalloc failed: out of memory
+0.02.884.812 E ggml_gallocr_reserve_n_impl: failed to allocate CUDA0 buffer of size 4121924224
+0.02.884.815 E graph_reserve: failed to allocate compute buffers
+0.02.884.941 E srv  update_slots: decode() failed: failed to allocate compute pp buffers
+0.02.884.948 E srv    send_error: task id = 0, error: decode() failed: failed to allocate compute pp buffers

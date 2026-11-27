@@ -20,6 +20,9 @@ export LD_LIBRARY_PATH="$(dirname "$SPEC_SERVER_BIN"):$PWD/build/bin"
 export SPEC_SERVER_LOG="${P11_LOG:-$PWD/build/p11a/$label.server}"
 export SPEC_OUT="${P11_OUT:-$PWD/perf/p11/a/screen}"
 mkdir -p "$SPEC_OUT" build/p11a
+if [[ -n ${P11_LOG:-} ]]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$mode" "$placement" "$SPEC_CTX" "${P11_UB:-512}" "${P11_DRAFT_UB:-512}" "${IK_PEER_NATIVE:-0}" "${IK_PEER_DIRECT:-0}" "$SPEC_SERVER_BIN" >"$P11_LOG.config"
+fi
 ulimit -c 0
 args=() draft_args=()
 if [[ $placement != one ]]; then

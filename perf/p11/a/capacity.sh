@@ -19,9 +19,10 @@ if [[ $placement != one ]]; then
     if [[ $placement == separate-both ]]; then
         args=(--device CUDA0,CUDA1 -ts 1/0)
         draft_args=(--spec-draft-device CUDA1 --spec-draft-override-tensor mask_embd.weight=CUDA1)
-    elif [[ $placement == head || $placement == layer || $placement == table ]]; then
+    elif [[ $placement == head || $placement == layer || $placement == table || $placement == balanced ]]; then
         args=(-ts 1/0)
         if [[ $placement == layer ]]; then args=(--device CUDA1,CUDA0 -ts 1/48); fi
+        if [[ $placement == balanced ]]; then args=(--device CUDA1,CUDA0 -ts "${P11_LAYER_SPLIT:-1/3}"); fi
         if [[ $placement == table ]]; then export LLAMA_ARG_OVERRIDE_TENSOR='token_embd.weight=CUDA1'; fi
         draft_args=(--spec-draft-device CUDA0)
         export IK_PEER_HEAD=CUDA1

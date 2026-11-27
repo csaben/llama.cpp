@@ -1,0 +1,7 @@
+Fri Nov 27 03:31:58 EST 2026
+index, uuid, memory.used [MiB], memory.free [MiB]
+0, GPU-a5900811-5e3c-f130-cec4-7b2867cd8203, 1229 MiB, 22940 MiB
+1, GPU-afe18a20-ce24-20de-9935-7b37fbd27581, 15 MiB, 24163 MiB
+gpu_uuid, pid, process_name, used_gpu_memory [MiB]
+GPU-a5900811-5e3c-f130-cec4-7b2867cd8203, 2136, /home/arelius/Code/redact/.venv/bin/python3, 310 MiB
+GPU-a5900811-5e3c-f130-cec4-7b2867cd8203, 2126, /home/arelius/Code/behemoth-omniparser/v2/behemoth/services/omniparser-manifest/.venv/bin/python, 728 MiB
