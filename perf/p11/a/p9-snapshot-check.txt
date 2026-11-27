@@ -1,0 +1,9 @@
+libggml-base.so.1: OK
+libggml-cpu.so.1: OK
+libggml-cuda.so.1: OK
+libggml.so.1: OK
+libllama-common.so.1: OK
+libllama-server-impl.so: OK
+libllama.so.1: OK
+libmtmd.so.1: OK
+llama-server: OK

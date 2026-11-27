@@ -31,7 +31,7 @@ case $kind in
         build/p11a/mr_check "$model" "${P11_CORPUS:-perf/ppl.txt}" "$@" >"$log" 2>&1
         rg '0 rows differ from single-token decode, max \|logit diff\| 0$' "$log" >"$out/$label.txt";;
     logits)
-        build/p11a/logits "$model" perf/ppl.txt "$@" >"$log.bin" 2>"$log"
+        "${P11_LOGITS_BIN:-build/p11a/logits}" "$model" perf/ppl.txt "$@" >"$log.bin" 2>"$log"
         test -s "$log.bin"
         sha256sum "$log.bin" >"$out/$label.txt";;
     ops)

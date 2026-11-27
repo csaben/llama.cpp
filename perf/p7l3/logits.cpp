@@ -34,7 +34,7 @@ int main(int argc, char ** argv) {
     }
     const int prefix = argc > 3 ? atoi(argv[3]) : 200;
     const int steps = argc > 4 ? atoi(argv[4]) : 64;
-    if (prefix <= 0 || steps <= 0 || prefix > 65536 - steps) {
+    if (prefix <= 0 || steps <= 0 || prefix > 131072 - steps) {
         return 1;
     }
     std::ifstream file(argv[2]);

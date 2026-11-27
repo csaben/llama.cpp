@@ -24,8 +24,10 @@ for mode in (0, 1):
     equal_logits(f"default-mixed-{mode}", 64)
     for prefix in (1, 4096, 16384, 32768, 65528):
         equal_logits(f"logits-{mode}-{prefix}", 8)
+    for prefix in (65536, 128064):
+        equal_logits(f"deep-{mode}-{prefix}", 8)
 print("Default one-card flags: 128 interleaved full-vocabulary rows matched p9 bit for bit.")
-print("Two-card output: 80 full-vocabulary rows matched p9 bit for bit over five depths and both flag settings.")
+print("Two-card output: 112 full-vocabulary rows matched p9 bit for bit over seven depths through 128,064 and both flag settings.")
 for variant in ("uncensored", "calibrated"):
     for mode in ("pp", "tg", "tg-mr"):
         def ppl(version):
