@@ -38,6 +38,12 @@ if ((B_MIN_FREE_MIB >= 11000)); then
     if [[ ${1##*/} == long.sh && ${5:-} == narrow-128k-* ]]; then
         queue=(flock "build/p11/stream-b-128k-${4}.lock")
     fi
+    if [[ ${B_GRID_TAIL:-} =~ ^(pp|tg)-(new2|old2)$ ]]; then
+        queue=(flock "build/p11/stream-b-bench-${B_GRID_TAIL}.lock")
+    fi
+    if [[ ${B_PPL_TICKET:-} =~ ^(old|new)[12]$ ]]; then
+        queue=(flock "build/p11/stream-b-ppl-${B_PPL_TICKET}.lock")
+    fi
 elif [[ ${B_OPERATOR_SWEEP:-0} == 1 ]]; then
     queue=(flock "build/p11/stream-b-operator-$((PPID % 4)).lock")
     for arg in "$@"; do

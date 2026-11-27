@@ -1,0 +1,4 @@
+[100%] Built target llama-server
+[100%] Built target llama-bench
+[100%] Built target llama-perplexity
+[100%] Built target test-backend-ops

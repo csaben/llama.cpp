@@ -1,0 +1,8 @@
+343 public CMake cache entries have identical values and types after path normalization.
+Generator Unix Makefiles
+CMAKE_C_COMPILER /usr/bin/cc
+CMAKE_CXX_COMPILER /usr/bin/c++
+CMAKE_CUDA_COMPILER /home/arelius/opt/cuda-12.8/bin/nvcc
+CMAKE_CUDA_ARCHITECTURES 86
+CMAKE_BUILD_TYPE Release
+Normalized cache SHA-256 1c6784da689acbff348a215fc0fb70074709ad41fa171b716e594d0462d8b33d

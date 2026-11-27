@@ -18,6 +18,10 @@ assert kind in ('tg', 'pp')
 legs = ('old1', 'new1', 'new2', 'old2')
 runtimes = ('old', 'new')
 timed = [work / f'{kind}-timed-{leg}.json' for leg in legs]
+if '--tail' in sys.argv:
+    timed[2:] = [work / 'tail' / f'{kind}-timed-{leg}.json' for leg in legs[2:]]
+    for predecessor, current in zip(timed[1:], timed[2:]):
+        assert predecessor.with_suffix('.done').stat().st_mtime_ns <= current.with_suffix('.start').stat().st_mtime_ns
 captures = [work / f'{kind}-output-{leg}.bin' for leg in runtimes]
 for file in timed + captures:
     assert file.with_suffix('.done').is_file(), file
@@ -54,7 +58,10 @@ with captures[0].open('rb') as old, captures[1].open('rb') as new:
     assert old.read(1) == new.read(1) == b''
 table = dest / f'{kind}.tsv'
 table.write_text(output.getvalue())
-paths = [table, *work.glob(f'{kind}-*.json'), *work.glob(f'{kind}-*.done')]
+paths = [table, *timed, *(p.with_suffix('.done') for p in timed)]
+for label in runtimes:
+    paths.extend(work / f'{kind}-output-{label}.{ext}' for ext in ('json', 'done'))
+paths.extend(p.with_suffix('.start') for p in timed if p.with_suffix('.start').is_file())
 archive = dest / f'{kind}-measurements.tar.gz'
 with tarfile.open(archive, 'w:gz') as t:
     for p in paths:

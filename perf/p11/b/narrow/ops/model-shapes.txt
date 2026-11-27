@@ -1,0 +1,2 @@
+  18/18 tests passed
+  Backend CUDA0: OK
