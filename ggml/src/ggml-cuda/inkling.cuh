@@ -27,3 +27,6 @@ bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml
 
 bool ggml_cuda_ik_peer_gates_start(ggml_backend_cuda_context & ctx, const ggml_tensor * weights, const ggml_tensor * x, float * gates);
 void ggml_cuda_ik_peer_gates_finish(ggml_backend_cuda_context & ctx);
+
+void ggml_cuda_ik_return_q2_prefix(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x,
+        const ggml_tensor * ids, const float * route, float * dst);

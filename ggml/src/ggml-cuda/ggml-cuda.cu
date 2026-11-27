@@ -4909,7 +4909,7 @@ static ggml_tensor ik_expert_slots(const ggml_tensor & t, void * data, int slots
 }
 
 static void ik_run_peer_experts(ggml_backend_cuda_context & ctx, const ggml_tensor * gu_w, const ggml_tensor * down_w,
-        const ggml_tensor * input, ggml_tensor ids, const ggml_tensor & gu_orig, const ggml_tensor & h_orig, ggml_tensor dest, bool mma) {
+        const ggml_tensor * input, ggml_tensor ids, const ggml_tensor & gu_orig, const ggml_tensor & h_orig, ggml_tensor dest, bool mma, const float * prefix_route = nullptr) {
     auto & pool = ctx.pool();
     const int slots = dest.ne[1];
     ggml_cuda_pool_alloc<float> gu_data(pool, ggml_nelements(&gu_orig)/8*slots);
@@ -4928,7 +4928,9 @@ static void ik_run_peer_experts(ggml_backend_cuda_context & ctx, const ggml_tens
         ggml_cuda_mul_mat_vec_q(ctx, gu_w, input, &ids, &gu);
     }
     ggml_cuda_op_situ(ctx, &h);
-    if (mma && down_w->type == GGML_TYPE_Q2_0) {
+    if (prefix_route) {
+        ggml_cuda_ik_return_q2_prefix(ctx, down_w, &h, &ids, prefix_route, (float *) dest.data);
+    } else if (mma && down_w->type == GGML_TYPE_Q2_0) {
         ggml_cuda_ik_moe_four(ctx, down_w, &h, &ids, &dest);
     } else if (gu.ne[2] > 1) {
         GGML_ASSERT(ggml_cuda_ik_mmvq_mr(ctx, down_w, &h, &ids, &dest));
@@ -5034,14 +5036,20 @@ static int ik_peer_experts(ggml_backend_cuda_context & ctx, ggml_cgraph * graph,
     ggml_cuda_set_device(other);
     if (flags) { ik_peer_wait<<<1, 1, 0, peer_stream>>>(state.ik_request); }
     else { CUDA_CHECK(cudaStreamWaitEvent(peer_stream, state.ik_start)); }
+    static const bool fuse_down = ggml_cuda_env_flag("IK_PEER_FUSED_DOWN");
+    const bool prefix_down = epilogue && fuse_down && mode == 0 && cols == 1 && q2;
     auto peer_dest = ik_expert_slots(*down, peer_out.get(), slots);
     if (direct && !epilogue) {
         peer_dest.data = (float *) down->data + offset;
         peer_dest.nb[2] = down->nb[2];
         peer_dest.nb[3] = down->nb[3];
     }
-    ik_run_peer_experts(*peer, peer_w, peer_v, &remote_x, remote_ids, *gu, *h, peer_dest, mode == 3);
-    if (epilogue) {
+    if (prefix_down) { peer_dest.data = down->data; }
+    ik_run_peer_experts(*peer, peer_w, peer_v, &remote_x, remote_ids, *gu, *h, peer_dest, mode == 3, prefix_down ? peer_weights.get() : nullptr);
+    if (prefix_down) {
+        if (flags) { ik_peer_signal<<<1, 1, 0, peer_stream>>>(state.ik_reply); }
+        else { CUDA_CHECK(cudaEventRecord(state.ik_done, peer_stream)); }
+    } else if (epilogue) {
         ik_return_prefix<<<1, 256, 0, peer_stream>>>(peer_out.get(), peer_weights.get(), (float *) down->data, down->ne[0], cols, flags ? state.ik_reply : nullptr);
         if (!flags) { CUDA_CHECK(cudaEventRecord(state.ik_done, peer_stream)); }
     } else if (direct) {

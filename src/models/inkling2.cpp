@@ -366,6 +366,9 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         auto * buft = ggml_backend_dev_buffer_type(dev);
         peer_experts.resize(n_layer_phys());
         for (int i = 0; i < n_layer_phys(); ++i) {
+            if (const char * only = getenv("IK_PEER_LAYER")) {
+                if (i != atoi(only)) { continue; }
+            }
             ggml_tensor * weights[] = {layers[i].ffn_gate_up_exps, layers[i].ffn_down_exps};
             if (!weights[0] || !weights[1]) { continue; }
             const int heavy = getenv("IK_PEER_HEAVY") ? atoi(getenv("IK_PEER_HEAVY")) : 0;
