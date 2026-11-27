@@ -21,6 +21,7 @@ for pass in controls drafted; do
             if [[ $budget == 3000 ]]; then export SPEC_REPS=1; fi
             if [[ $pass == controls ]]; then settings=(plain); fi
             for setting in "${settings[@]}"; do
+                if [[ -n ${P11_MATRIX_SETTING:-} && $setting != "$P11_MATRIX_SETTING" ]]; then continue; fi
                 [[ ! -e perf/STOP ]] || exit 75
                 mode=draft
                 export P11_WIDTH=${setting:1:1} P11_ADAPT=0
@@ -43,6 +44,6 @@ for pass in controls drafted; do
         done
     done
 done
-if [[ -z ${P11_MATRIX_BUDGET:-} && -z ${P11_MATRIX_SUITE:-} ]]; then
+if [[ -z ${P11_MATRIX_BUDGET:-} && -z ${P11_MATRIX_SUITE:-} && -z ${P11_MATRIX_SETTING:-} ]]; then
     python3 perf/p8bc/summarize.py "$root" >"$root/cells.tsv"
 fi
