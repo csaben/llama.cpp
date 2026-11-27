@@ -1,4 +1,8 @@
 slot	request	plain_control	prompt_tokens	emitted_ids	full_reply_and_ids
 139264	after-p9-repeat-139264	after-p9-ref-139264	136256	3000	equal
+139264	after-direct-load-139264	after-p9-ref-139264	136256	3000	equal
 141312	after-p9-repeat-141312	after-p9-ref-141312	138304	3000	equal
 141312	after-release-fit-141312	after-p9-ref-141312	138304	3000	equal
+143360	after-p9-repeat-143360	after-p9-ref-143360	140352	3000	equal
+145408	after-p9-repeat-145408	after-p9-ref-145408	142400	3000	equal
+147456	after-p9-repeat-147456	after-p9-ref-147456	144448	3000	equal

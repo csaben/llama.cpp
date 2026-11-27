@@ -2,11 +2,11 @@ family	suite	budget	setting	prompt_cells	state
 p9	main	384	n6-adapt	6	matched
 p964	main	384	plain	6	matched
 p964	prose	384	plain	5	matched
-p964	fixed	384	plain	0	pending
-p964	main	3000	plain	0	pending
+p964	fixed	384	plain	6	matched
+p964	main	3000	plain	6	matched
 p964	prose	3000	plain	0	pending
-direct	main	384	plain	0	pending
-direct	prose	384	plain	0	pending
+direct	main	384	plain	6	matched
+direct	prose	384	plain	5	matched
 direct	fixed	384	plain	0	pending
 direct	main	3000	plain	0	pending
 direct64	main	384	plain	0	pending
