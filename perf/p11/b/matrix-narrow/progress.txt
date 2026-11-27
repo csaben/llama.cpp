@@ -1,1 +1,1 @@
-183/194 cells compared with both plain controls. 149 drafted cells, 337 drafted replies, 325,608 IDs. Every archived message and ID matched.
+194/194 cells compared with both plain controls. 160 drafted cells, 360 drafted replies, 347,520 IDs. Every archived message and ID matched.
