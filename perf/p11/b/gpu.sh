@@ -17,11 +17,14 @@ if [[ -z ${B_MIN_FREE_MIB+x} ]]; then
 fi
 export B_MIN_FREE_MIB
 queue=(flock build/p11/stream-b.lock)
+if ((B_MIN_FREE_MIB >= 11000)); then
+    queue=(flock "build/p11/stream-b-resident-$((PPID % 8)).lock")
+fi
 if [[ ${B_LOCAL_GROUP_FD:-} =~ ^[0-9]+$ && /proc/self/fd/$B_LOCAL_GROUP_FD -ef build/p11/stream-b.lock ]]; then
     flock -n "$B_LOCAL_GROUP_FD"
     queue=()
 fi
-# Queue one Stream B request at the shared lock. Release both locks before waiting for an unrelated GPU user.
+# Recheck free memory under the shared lock. Release both locks before waiting for an unrelated GPU user.
 while true; do
     if [[ -r build/p11/gpu-free.cache ]] && read -r observed available <build/p11/gpu-free.cache; then
         age=$(( $(date +%s) - observed ))

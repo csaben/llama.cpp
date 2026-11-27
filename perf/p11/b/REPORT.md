@@ -34,6 +34,8 @@ On the uncensored GGUF, frozen p9 matched single-token FP32 logits on all 2,714 
 
 GPU0 is an RTX 3090 at PCI 01:00.0 with driver 615.71.09 and a 370 W power limit. At 02:02 EST a separate server began using 21,354 MiB of GPU0. A locked check found 1,669 MiB free, below the 9,131 MiB target allocation. The orchestrator stopped the separate service and the locked GPU0 check recorded 23,030 MiB free at 03:30:22 EST. Ordinary full-model qualification resumed, along with fresh repetitions of the operator measurements made during the overlap. GPU0 measurements acquired the shared lock individually with PCI bus device ordering and visibility 0. GPU1 remained available to Stream A. [Hardware](baseline/gpu.csv), [occupancy and allocation failure](baseline/external-occupancy.txt).
 
+On ordinary GPU allocations after the service stopped, the candidate matched single-token decode on all 1,699 rows of the recorded rollback trace, with maximum absolute logit difference zero. The stored trace supplies historical tokens. On the uncensored weights, 48 recorded next tokens differed from the greedy argmax on both frozen p9 and the candidate. Fresh served comparisons use the uncensored model's own plain answers. The candidate's uncensored default decode PPL was 4.1915. [Candidate trace](narrow/checks/trace.log), [p9 trace](baseline/checks/trace.log), [candidate decode PPL](narrow/decode-default.txt).
+
 The historical GGUF reproduces the brief's PPL references of 3.0530 prefill, 4.1979 default decode and 4.2038 MR decode. The uncensored baseline above used the same corpus and chunk settings. [Historical controls](baseline/historical-model/), [uncensored prefill](baseline/prefill-default.txt), [uncensored decode](baseline/decode-default.txt).
 
 ## Profiles and tuning
