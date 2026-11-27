@@ -1827,7 +1827,7 @@ The immutable snapshot at `~/inkling-live-bin-p9-72fd097` contains the server an
 
 ## Phase 11, Stream A
 
-The staged direct output head uses both cards. 34/34 configurations, 194/194 cells, 360 drafted replies, 347,520 IDs plus complete messages equal. Both 512/512 vision servers completed 250,944 prompt tokens plus 3,000 generated tokens in a 253,952-token slot. [Report and exact coverage](p11/a/REPORT.md), [paired throughput](p11/a/performance.tsv), [per-card memory](p11/a/capacity-paired.tsv).
+The staged direct output head uses both cards. All 194 cells passed. The 360 drafted replies matched plain on 347,520 IDs and the complete messages. Both 512/512 vision servers completed 250,944 prompt tokens plus 3,000 generated tokens in a 253,952-token slot. [Report and exact coverage](p11/a/REPORT.md), [paired throughput](p11/a/performance.tsv), [per-card memory](p11/a/capacity-paired.tsv).
 
 | Uncensored Q2, tok/s | One-card p9 | Split output head | Change |
 |---|---:|---:|---:|
@@ -1842,4 +1842,4 @@ The staged direct output head uses both cards. 34/34 configurations, 194/194 cel
 | Prefill at 16,384 | 3,218.00 | 3,258.62 | +1.26% |
 | Prefill at 65,536 | 2,441.15 | 2,445.14 | +0.16% |
 | Near-full prefill, 128,064 tokens | 1,708.43 | 1,693.26 | -0.89% |
-| Near-full DSpark, 3,000 generated | 206.37 | 208.71 | +1.13% |
+| Near-full DSpark, 3,000 generated | 206.37 | 208.70 | +1.13% |

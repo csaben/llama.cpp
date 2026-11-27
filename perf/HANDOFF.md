@@ -1,6 +1,6 @@
 # Phase 11, Stream A
 
-The staged direct output head uses both cards. The nine-file package is `~/inkling-live-bin-p11a-a16c61e5`, for a 131,072-token vision slot and alias `inkling-mini` on port 8031. The direct-head candidate measured 239.93 to 245.84 tok/s plain, 348.40 to 355.20 tok/s short edit, 295.60 to 301.10 tok/s long edit. 34/34 configurations, 194/194 cells, 360 drafted replies, 347,520 IDs plus complete messages equal. [Report](p11/a/REPORT.md), [manual deploy with p9 fallback](live/deploy-p11a.sh), [manifest](p11/a/snapshot.sha256).
+The split output head uses physical GPU1 for the target and GPU0 for half of the output rows. The nine-file package is `~/inkling-live-bin-p11a-a16c61e5`, for a 131,072-token vision slot and alias `inkling-mini` on port 8031. The paired comparisons measured 239.93 to 245.84 tok/s plain, 348.40 to 355.20 tok/s short edit, 295.60 to 301.10 tok/s long edit. All 194 cells passed. The 360 drafted replies matched plain on 347,520 ordered IDs and the complete messages. [Report](p11/a/REPORT.md), [manual deploy with p9 fallback](live/deploy-p11a.sh), [manifest](p11/a/snapshot.sha256).
 
 # Phase 9
 
