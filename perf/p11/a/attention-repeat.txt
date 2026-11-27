@@ -1,0 +1,11 @@
+depth=16384 leg=0 split=0 us=192.393 rows=24 repeats=128
+depth=16384 leg=1 split=1 us=147.335 rows=24 repeats=128
+depth=16384 leg=2 split=1 us=147.097 rows=24 repeats=128
+depth=16384 leg=3 split=0 us=192.333 rows=24 repeats=128
+All 3072 output floats matched on every leg; CPU softmax samples passed.
+
+depth=65536 leg=0 split=0 us=817.284 rows=24 repeats=32
+depth=65536 leg=1 split=1 us=507.110 rows=24 repeats=32
+depth=65536 leg=2 split=1 us=523.756 rows=24 repeats=32
+depth=65536 leg=3 split=0 us=817.203 rows=24 repeats=32
+All 3072 output floats matched on every leg; CPU softmax samples passed.

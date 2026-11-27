@@ -16,6 +16,7 @@ if [[ ${P11_OUT:-} == "$PWD"/perf/p11/a/paired/* && $label == "${P11_OUT##*/}"-*
     leg_test=${label#"${P11_OUT##*/}"-}
     if [[ -e "$P11_OUT/$leg_test.done" ]]; then exit 0; fi
 fi
+if [[ ${P11_OUT:-} == "$PWD/perf/p11/a/iq4-release" && $label == iq4-edit-* && -s "$P11_OUT/${label#iq4-edit-}.equal" ]]; then exit 0; fi
 source perf/p8bc/env.sh
 export MODEL="${P11_MODEL:-$HOME/models/inkling-2-mini/Inkling-2-Mini-AtomicChat-Uncensored-Q2K-Q2_0-fit.gguf}"
 export SPEC_PORT=18501 SPEC_CTX=${P11_CTX:-131072}

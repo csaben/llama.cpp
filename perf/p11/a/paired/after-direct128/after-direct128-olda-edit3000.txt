@@ -1,0 +1,1 @@
+after-direct128-olda-edit3000 edit      prompt   1025  3000 tok   296.2 tok/s    9410 chars  accepted/proposed 1967/2126  runs 296/296/297

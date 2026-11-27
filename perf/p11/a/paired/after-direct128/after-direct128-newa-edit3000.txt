@@ -1,0 +1,1 @@
+after-direct128-newa-edit3000 edit      prompt   1025  3000 tok   296.8 tok/s    9410 chars  accepted/proposed 1966/2115  runs 296/297/297
