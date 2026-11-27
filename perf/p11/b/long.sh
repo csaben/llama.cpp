@@ -35,5 +35,5 @@ for ((i=0; i<300; i++)); do
 done
 curl -fsS http://127.0.0.1:18551/health >/dev/null
 nvidia-smi -i 0 --query-compute-apps=pid,used_memory --format=csv,noheader | awk -v p="$pid" '$1+0 == p {print; found=1} END {exit !found}' >"$out-$mode-ready.txt"
-python3 "$W/client.py" "$label" "$mode" edit "$depth" >"$out-$mode.txt"
+python3 "$W/client.py" "$label" "$mode" edit "$depth" | sed 's/[[:blank:]]*$//' >"$out-$mode.txt"
 awk -F', ' '{if ($2+0>peak) peak=$2; if (NR==1 || $3+0<low) low=$3} END {print "samples",NR,"peak used MiB",peak,"min free MiB",low}' "$W/$label-$mode.vram" >>"$out-$mode.txt"

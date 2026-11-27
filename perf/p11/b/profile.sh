@@ -7,7 +7,7 @@ kind=${1:?prefill or verify}
 tag=${2:-p9}
 base="$dir/$tag-$kind"
 case $kind in
-    prefill) args=(bench -p 4096 -n 0 -r 1 --no-warmup) ;;
+    prefill) args=(bench -p "${B_PROFILE_PP:-4096}" -n 0 -r 1 --no-warmup) ;;
     verify) args=(probe "$dir" "$tag-verify" 6 edit 1 160) ;;
     *) exit 2 ;;
 esac

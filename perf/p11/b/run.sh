@@ -2,12 +2,14 @@
 # Invoke through gpu.sh. Set B_LIBS to the runtime under test.
 set -euo pipefail
 [[ ${CUDA_DEVICE_ORDER:?} == PCI_BUS_ID && ${CUDA_VISIBLE_DEVICES:?} == 0 && ${P8_GPU:?} == 0 ]]
+window_cols=${B_WINDOW_COLS:-${IK_WINDOW_COLS:-1}}
 source perf/p8bc/env.sh
 export GPU=0 CUDA_VISIBLE_DEVICES=0 SPEC_PORT=18550 SPEC_CTX=${B_CTX:-131072}
 export MODEL=${B_MODEL:-$HOME/models/inkling-2-mini/Inkling-2-Mini-AtomicChat-Uncensored-Q2K-Q2_0-fit.gguf}
 export LD_LIBRARY_PATH="${B_LIBS:-$HOME/inkling-live-bin-p9-72fd097}:$PWD/build/p11/p9-tools"
 export SPEC_SERVER_BIN="${LD_LIBRARY_PATH%%:*}/llama-server"
 export LLAMA_DSPARK_ADAPTIVE=${B_ADAPT:-1} LLAMA_DSPARK_POLICY=${B_POLICY:-1}
+export IK_WINDOW_COLS=$window_cols IK_MMA=${B_MMA:-3} IK_MR=${B_MR:-1}
 args=(-m "$MODEL" -ngl 99 -ctk q8_0 -ctv q8_0)
 bench=(build/p11/p9-tools/llama-bench "${args[@]}" -fa 1 -ot token_embd.weight=CUDA0 -b 2048 -ub 512 -o json)
 mode=$1

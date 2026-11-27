@@ -1,0 +1,4 @@
+n0             code      prompt     47  3000 tok   213.2 tok/s    9697 chars
+n0             edit      prompt   1025  3000 tok   210.9 tok/s    9410 chars
+n0             prose     prompt     36  3000 tok   209.7 tok/s   11541 chars
+n0             agent     prompt   2025  3000 tok   195.2 tok/s    6383 chars

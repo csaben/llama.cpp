@@ -1,0 +1,4 @@
+n6           code      identical (10104 bytes)
+n6           edit      identical (9804 bytes)
+n6           prose     identical (11987 bytes)
+n6           agent     identical (6731 bytes)
