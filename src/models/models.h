@@ -2525,6 +2525,7 @@ struct llama_model_inkling2 : public llama_model_base {
         // the pieces to load into w, in row order: file tensor name and row count
         std::vector<std::pair<std::string, int64_t>> pieces;
     };
+    ggml_tensor * output_half[2] = {};
     std::vector<attn_fused> fused_attn; // indexed by physical layer; w == nullptr: not fused
     // the q, k, v input norms of a full-attention layer stacked as [n_embd, 3] (nullptr for SWA layers)
     std::vector<ggml_tensor *> attn_inp_norm_qkv;

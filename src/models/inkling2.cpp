@@ -313,6 +313,31 @@ void llama_model_inkling2::load_fused(llama_model_loader & ml) {
 void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
     const int64_t n_embd = hparams.n_embd;
 
+    const char * peer_name = getenv("IK_PEER_HEAD");
+    if (peer_name && output && output->ne[1] % 2 == 0) {
+        auto * peer = ggml_backend_dev_by_name(peer_name);
+        if (!peer || ggml_backend_dev_type(peer) != GGML_BACKEND_DEVICE_TYPE_GPU ||
+                peer == ggml_backend_buft_get_device(ggml_backend_buffer_get_type(output->buffer))) {
+            throw std::runtime_error("IK_PEER_HEAD requires a second GPU");
+        }
+        const int64_t rows = output->ne[1]/2;
+        auto * ctx = fused_context();
+        output_half[0] = ggml_view_2d(ctx, output, n_embd, rows, output->nb[1], 0);
+        auto * upper = ggml_view_2d(ctx, output, n_embd, rows, output->nb[1], rows*output->nb[1]);
+        output_half[1] = ggml_dup_tensor(ctx, upper);
+        ggml_set_name(output_half[1], "output.peer");
+        auto * buft = ggml_backend_dev_buffer_type(peer);
+        ggml_backend_buffer_ptr buf { ggml_backend_buft_alloc_buffer(buft, ggml_backend_buft_get_alloc_size(buft, output_half[1])) };
+        if (!buf || ggml_backend_view_init(output_half[0]) != GGML_STATUS_SUCCESS || ggml_backend_view_init(upper) != GGML_STATUS_SUCCESS ||
+                ggml_backend_tensor_alloc(buf.get(), output_half[1], ggml_backend_buffer_get_base(buf.get())) != GGML_STATUS_SUCCESS) {
+            throw std::runtime_error("inkling2: failed to allocate peer output rows");
+        }
+        ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        ggml_backend_tensor_copy(upper, output_half[1]);
+        fused_bufs.emplace_back(std::move(buf));
+        LLAMA_LOG_INFO("%s: %lld output rows on %s\n", __func__, (long long) rows, peer_name);
+    }
+
     // the fused projection matrices
     for (int i = 0; i < n_layer_phys(); ++i) {
         auto & fa = fused_attn[i];
@@ -1372,11 +1397,23 @@ void llama_model_inkling2::graph::build_output(ggml_tensor * cur, const std::vec
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur);
-    if (cur->ne[1] >= 2 && cur->ne[1] <= 8) {
-        mr_mark(cur);
+    const auto & m = static_cast<const llama_model_inkling2 &>(model);
+    auto project = [&](ggml_tensor * w) {
+        auto * logits = build_lora_mm(w, cur);
+        if (logits->ne[1] >= 2 && logits->ne[1] <= 8) {
+            mr_mark(logits);
+        }
+        ggml_prec_set_acc(logits, GGML_PREC_F32);
+        return logits;
+    };
+    if (m.output_half[1] && fused && cur->ne[1] <= 8) {
+        auto * upper = project(m.output_half[1]);
+        ggml_build_forward_expand(gf, upper);
+        auto * lower = project(m.output_half[0]);
+        cur = ggml_concat(ctx0, lower, upper, 0);
+    } else {
+        cur = project(model.output);
     }
-    ggml_prec_set_acc(cur, GGML_PREC_F32);
 
     if (hparams.f_final_logit_softcapping != 0.0f) {
         const float cap = hparams.f_final_logit_softcapping;

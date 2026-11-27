@@ -1,0 +1,4 @@
+peer=0 us/token=95.88 us/roundtrip=2.00 checked=2304 words
+peer=1 us/token=639.07 us/roundtrip=13.31 checked=2304 words
+peer=1 us/token=628.81 us/roundtrip=13.10 checked=2304 words
+peer=0 us/token=95.89 us/roundtrip=2.00 checked=2304 words
