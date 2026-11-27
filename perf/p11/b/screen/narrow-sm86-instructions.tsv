@@ -1,0 +1,5 @@
+kernel	observed registers/thread	observed static shared bytes	observed dynamic shared bytes	static matrix/dot-product instructions
+ik_q2k_moe<5>	-	-	-	IDP.4A.S8.S8:200
+ik_q2k_moe<6>	-	-	-	IDP.4A.S8.S8:240
+ik_q2k_moe<7>	-	-	-	IDP.4A.S8.S8:280
+ik_q2k_moe<8>	-	-	-	IDP.4A.S8.S8:320

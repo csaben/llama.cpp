@@ -1,0 +1,7 @@
+kernel	observed registers/thread	observed static shared bytes	observed dynamic shared bytes	static matrix/dot-product instructions
+void ik_q2k_moe<(int)8>	56	11520	0	IDP.4A.S8.S8:320
+void ik_mma_moe<(ggml_type)42, (int)8>	40	4608	0	IMMA.16832.S8.S8:4
+void mul_mat_q<(ggml_type)42, (int)32, (bool)0, (ggml_prec)30, (bool)0, (bool)1>	114	0	44160	IMMA.16832.S8.S8:32
+void mul_mat_q<(ggml_type)10, (int)32, (bool)0, (ggml_prec)30, (bool)0, (bool)1>	128	0	23680	IMMA.16816.S8.S8:80
+void inkling_attn_window_cols<(int)0>	184	34896	0	HMMA.16816.F32:32
+void flash_attn_ext_f16<(int)128, (int)128, (int)64, (int)1, (bool)0, (bool)0, (bool)0, block_q8_0>	186	0	25600	HMMA.16816.F16:384 HMMA.16816.F32:384

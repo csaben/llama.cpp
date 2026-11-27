@@ -1,0 +1,5 @@
+device	dtype	before_TFLOPS	after_TFLOPS
+GPU0	bfloat16	73.9	119.5
+GPU0	float16	72.4	115.5
+GPU1	bfloat16	77.7	131.2
+GPU1	float16	76.2	127.4
