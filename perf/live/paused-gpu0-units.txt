@@ -1,1 +1,2 @@
-clark-voice qwen-asr baldree-voice
+clark-voice baldree-voice qwen-asr uvr-service toki-clean-audio inkling-3090-experiment
+# paused 2026-11-27T01:05:07-05:00 for phase 11; inkling-3090-experiment restore via deploy-p9v-uncensored-128k.sh or the p11 deploy
