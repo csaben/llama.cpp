@@ -4920,14 +4920,18 @@ static void ik_run_peer_experts(ggml_backend_cuda_context & ctx, const ggml_tens
     auto h = ik_expert_slots(h_orig, h_data.get(), slots);
     h.src[0] = &gate;
     h.src[1] = &up;
-    if (mma) {
+    if (mma && gu_w->type == GGML_TYPE_Q2_K) {
         ggml_cuda_ik_moe_four(ctx, gu_w, input, &ids, &gu);
+    } else if (gu.ne[2] > 1) {
+        GGML_ASSERT(ggml_cuda_ik_mmvq_mr(ctx, gu_w, input, &ids, &gu));
     } else {
         ggml_cuda_mul_mat_vec_q(ctx, gu_w, input, &ids, &gu);
     }
     ggml_cuda_op_situ(ctx, &h);
-    if (mma) {
+    if (mma && down_w->type == GGML_TYPE_Q2_0) {
         ggml_cuda_ik_moe_four(ctx, down_w, &h, &ids, &dest);
+    } else if (gu.ne[2] > 1) {
+        GGML_ASSERT(ggml_cuda_ik_mmvq_mr(ctx, down_w, &h, &ids, &dest));
     } else {
         dest.src[0] = const_cast<ggml_tensor *>(down_w);
         dest.src[1] = &h;
@@ -4955,9 +4959,11 @@ static int ik_peer_experts(ggml_backend_cuda_context & ctx, ggml_cgraph * graph,
     const int cols = gu->ne[2];
     const int other = 1 - ctx.device;
     const int output = i+4;
+    const bool q2 = w->type == GGML_TYPE_Q2_K && v->type == GGML_TYPE_Q2_0;
+    const bool wide = w->type == v->type && (w->type == GGML_TYPE_IQ4_NL || w->type == GGML_TYPE_Q8_0);
     if (!down->extra || h->src[0]->view_src != gu || h->src[1]->view_src != gu || h->src[0]->view_offs != 0 ||
             h->src[1]->view_offs != 1152*sizeof(float) || ggml_get_glu_op(h) != GGML_GLU_OP_SITU || down->src[1] != h || down->src[2] != ids ||
-            w->type != GGML_TYPE_Q2_K || v->type != GGML_TYPE_Q2_0 || w->ne[0] != 2304 || w->ne[1] != 2304 || w->ne[2] != 128 ||
+            (!q2 && !wide) || w->ne[0] != 2304 || w->ne[1] != 2304 || w->ne[2] != 128 ||
             v->ne[0] != 1152 || v->ne[1] != 2304 || v->ne[2] != 128 || x->type != GGML_TYPE_Q8_1 || x->ne[1] != 1 ||
             h->type != GGML_TYPE_Q8_1 || ids->ne[0] != 8 || gu->ne[1] != 8 || cols > 7 || (cols > 1 && mode != 3) ||
             !ggml_is_contiguous(x) || !ggml_is_contiguous(down) || !ggml_cuda_check_fusion_memory_ranges(graph, i, 5, &output, 1) ||

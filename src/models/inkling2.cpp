@@ -347,9 +347,11 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         peer_experts.resize(n_layer_phys());
         for (int i = 0; i < n_layer_phys(); ++i) {
             ggml_tensor * weights[] = {layers[i].ffn_gate_up_exps, layers[i].ffn_down_exps};
-            if (!weights[0] || !weights[1] || weights[0]->type != GGML_TYPE_Q2_K || weights[1]->type != GGML_TYPE_Q2_0) {
-                continue;
-            }
+            if (!weights[0] || !weights[1]) { continue; }
+            const int heavy = getenv("IK_PEER_HEAVY") ? atoi(getenv("IK_PEER_HEAVY")) : 0;
+            const bool q2 = weights[0]->type == GGML_TYPE_Q2_K && weights[1]->type == GGML_TYPE_Q2_0;
+            const bool wide = weights[0]->type == weights[1]->type && (weights[0]->type == GGML_TYPE_IQ4_NL || weights[0]->type == GGML_TYPE_Q8_0);
+            if (!(q2 && heavy != 2) && !(wide && heavy)) { continue; }
             for (int j = 0; j < 2; ++j) {
                 auto * src = weights[j];
                 if (ggml_backend_buffer_get_type(src->buffer) == buft) {
