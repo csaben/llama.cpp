@@ -1,17 +1,17 @@
 earlier_probe	repeat_label	state	evidence
 fused-one-layer	after-fused-one-layer	completed	replay/screens/after-fused-one-layer.json
-fused-one-raw	after-fused-one-raw	pending	
-controller-plain	after-controller-plain	pending	
-controller-logits-0-1	after-controller-raw	pending	
-controller-edit	after-controller-edit	pending	
-gates-edit	after-gates-edit	pending	
-gates-mr	after-gates-mr	pending	
-prefix-edit	after-prefix-edit	pending	
-anchor-edit	after-anchor-edit	pending	
-rows-8k	after-rows-8k	pending	
-balance-2-1	after-balance-2-direct	pending	
-heavy-only	after-heavy-only	pending	
-native-newa-tg0	after-native-tg0	pending	
-native-newa-tg4096	after-native-tg4096	pending	
-native-newa-tg16384	after-native-tg16384	pending	
-native-newa-tg32768	after-native-tg32768	pending	
+fused-one-raw	after-fused-one-raw	pending	pending
+controller-plain	after-controller-plain	pending	pending
+controller-logits-0-1	after-controller-raw	pending	pending
+controller-edit	after-controller-edit	pending	pending
+gates-edit	after-gates-edit	pending	pending
+gates-mr	after-gates-mr	pending	pending
+prefix-edit	after-prefix-edit	pending	pending
+anchor-edit	after-anchor-edit	pending	pending
+rows-8k	after-rows-8k	pending	pending
+balance-2-1	after-balance-2-direct	pending	pending
+heavy-only	after-heavy-only	pending	pending
+native-newa-tg0	after-native-tg0	pending	pending
+native-newa-tg4096	after-native-tg4096	pending	pending
+native-newa-tg16384	after-native-tg16384	pending	pending
+native-newa-tg32768	after-native-tg32768	pending	pending
