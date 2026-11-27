@@ -1,0 +1,1 @@
+placement-newa edit      prompt   1025   384 tok   285.7 tok/s    1135 chars  accepted/proposed 315/357  runs 286/286/290

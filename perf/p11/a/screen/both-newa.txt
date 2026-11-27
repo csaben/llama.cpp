@@ -1,0 +1,1 @@
+both-newa      edit      prompt   1025   384 tok   307.9 tok/s    1135 chars  accepted/proposed 308/311  runs 306/308/308

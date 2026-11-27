@@ -1,0 +1,1 @@
+both-newb      edit      prompt   1025   384 tok   302.1 tok/s    1135 chars  accepted/proposed 308/311  runs 300/302/303

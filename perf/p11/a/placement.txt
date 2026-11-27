@@ -1,0 +1,12 @@
+placement-olda edit      prompt   1025   384 tok   339.1 tok/s    1135 chars  accepted/proposed 277/282  runs 336/339/340
+placement-newa edit      prompt   1025   384 tok   285.7 tok/s    1135 chars  accepted/proposed 315/357  runs 286/286/290
+placement-newb edit      prompt   1025   384 tok   285.0 tok/s    1135 chars  accepted/proposed 314/354  runs 284/285/286
+placement-oldb edit      prompt   1025   384 tok   343.0 tok/s    1135 chars  accepted/proposed 289/294  runs 336/343/345
+All four legs match the one-card same-flags plain control on the full assistant message and each of 384 IDs per repeat.
+both-olda      edit      prompt   1025   384 tok   351.4 tok/s    1135 chars  accepted/proposed 291/299  runs 348/351/356
+both-newa      edit      prompt   1025   384 tok   307.9 tok/s    1135 chars  accepted/proposed 308/311  runs 306/308/308
+both-newb      edit      prompt   1025   384 tok   302.1 tok/s    1135 chars  accepted/proposed 308/311  runs 300/302/303
+both-oldb      edit      prompt   1025   384 tok   337.0 tok/s    1135 chars  accepted/proposed 278/283  runs 335/337/350
+All four legs match the one-card same-flags plain control on the full assistant message and each of 384 IDs per repeat.
+plain ids f5695916254a706dd9d437110ebd2e616b1657feee4d5dc110753c85372ac46b
+plain json 894afdd2d9e17c1f82fd1d0f17c5cbeb0d1a8b410157d65b98963fd428a83d2d

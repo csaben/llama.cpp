@@ -1,0 +1,1 @@
+both-oldb      edit      prompt   1025   384 tok   337.0 tok/s    1135 chars  accepted/proposed 278/283  runs 335/337/350

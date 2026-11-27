@@ -1,0 +1,10 @@
+cuda_device	kernel	grid_x	grid_y	block_x	block_y	calls	mean_us
+0	ik_peer_send_experts	3	1	256	1	1452	2.53
+0	ik_peer_copy	9	1	256	1	33	5.428
+1	ik_peer_copy	36	1	256	1	1452	6.801
+1	ik_q2_down_rows	288	4	32	4	1452	6.392
+1	mul_mat_vec_q	576	4	32	4	1452	12.82
+1	situ_q8_1_kernel	18	1	256	1	1452	1.636
+1	ik_peer_copy	393	1	256	1	33	36.716
+1	mul_mat_vec_q	50256	1	32	4	33	151.329
+1	quantize_q8_1	10	1	256	1	33	1.974

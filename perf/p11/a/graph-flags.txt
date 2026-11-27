@@ -1,0 +1,4 @@
+flags=0 us/token=773.95 us/roundtrip=16.12 words_checked=4608
+flags=1 us/token=341.67 us/roundtrip=7.12 words_checked=4608
+flags=1 us/token=341.28 us/roundtrip=7.11 words_checked=4608
+flags=0 us/token=761.09 us/roundtrip=15.86 words_checked=4608

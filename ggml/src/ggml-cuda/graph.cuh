@@ -216,8 +216,13 @@ struct ggml_cuda_stream_context {
     std::unique_ptr<ggml_backend_cuda_context> ik_peer;
     cudaEvent_t ik_start = nullptr;
     cudaEvent_t ik_done = nullptr;
+    unsigned * ik_request = nullptr;
+    unsigned * ik_reply = nullptr;
+    bool ik_open = false;
 
     ~ggml_cuda_stream_context() {
+        if (ik_request) { CUDA_CHECK(cudaFree(ik_request)); }
+        if (ik_reply) { CUDA_CHECK(cudaFree(ik_reply)); }
         if (ik_start) {
             CUDA_CHECK(cudaEventDestroy(ik_start));
         }
