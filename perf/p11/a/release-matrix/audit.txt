@@ -1,0 +1,2 @@
+194 cells, 360 drafted replies, 347,520 IDs and complete messages match same-flags plain and p9. Every short repeat agreed.
+Control directories: perf/p11/a/p9-matrix perf/p11/a/replay/release

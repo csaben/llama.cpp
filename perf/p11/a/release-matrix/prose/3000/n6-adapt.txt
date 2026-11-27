@@ -1,0 +1,5 @@
+n6-adapt       letter    prompt     40  3000 tok   358.9 tok/s    2233 chars  accepted/proposed 2284/2373
+n6-adapt       science   prompt     38  3000 tok   326.2 tok/s    3608 chars  accepted/proposed 2121/2300
+n6-adapt       scene     prompt     44  3000 tok   347.2 tok/s   12078 chars  accepted/proposed 2241/2367
+n6-adapt       review    prompt     39  3000 tok   349.0 tok/s    2159 chars  accepted/proposed 2238/2358
+n6-adapt       dialogue  prompt     43  3000 tok   330.3 tok/s   11983 chars  accepted/proposed 2160/2317

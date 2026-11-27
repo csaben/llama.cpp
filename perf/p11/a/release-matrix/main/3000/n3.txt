@@ -1,0 +1,6 @@
+n3             code      prompt     47  3000 tok   275.2 tok/s    9697 chars  accepted/proposed 1756/1989
+n3             edit      prompt   1025  3000 tok   290.1 tok/s    9410 chars  accepted/proposed 1855/1989
+n3             prose     prompt     36  3000 tok   313.8 tok/s   11541 chars  accepted/proposed 1910/2078
+n3             edit@16K  prompt  16044  3000 tok   263.4 tok/s    9768 chars  accepted/proposed 1848/2122
+n3             edit@32K  prompt  32045  3000 tok   237.8 tok/s   10783 chars  accepted/proposed 1763/2030
+n3             agent     prompt   2025  3000 tok   330.9 tok/s    6383 chars  accepted/proposed 2153/2236
