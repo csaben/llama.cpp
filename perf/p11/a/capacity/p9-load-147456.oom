@@ -1,0 +1,4 @@
+0.02.220.464 E ggml_backend_cuda_buffer_type_alloc_buffer: allocating 72.00 MiB on device 0: cudaMalloc failed: out of memory
+0.02.220.468 E ggml_backend_buft_alloc_buffer_n_default: failed to allocate CUDA0 buffer of size 75497472
+0.02.220.470 W layer_inp_dev_alloc: failed to allocate the layer input device buffer, using host copies
+0.02.226.447 E CUDA error: out of memory

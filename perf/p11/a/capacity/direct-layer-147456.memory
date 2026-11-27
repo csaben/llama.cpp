@@ -1,0 +1,30 @@
+0.00.797.706 I load_tensors:        CUDA0 model buffer size =  8821.70 MiB
+0.00.797.707 I load_tensors:        CUDA1 model buffer size =   308.89 MiB
+0.01.791.318 I llama_kv_cache:      CUDA0 KV buffer size =  2448.00 MiB
+0.01.791.569 I llama_kv_cache:      CUDA0 KV buffer size =   124.31 MiB
+0.01.791.650 I llama_kv_cache:      CUDA1 KV buffer size =     3.19 MiB
+0.01.877.314 I sched_reserve:      CUDA1 compute buffer size =    78.38 MiB
+0.01.877.318 I sched_reserve:      CUDA0 compute buffer size =  4329.09 MiB
+0.01.877.319 I sched_reserve:  CUDA_Host compute buffer size =   441.02 MiB
+0.02.138.834 I load_tensors:        CUDA0 model buffer size =   474.82 MiB
+0.02.188.957 I llama_kv_cache:      CUDA0 KV buffer size =   576.00 MiB
+0.02.189.044 I llama_kv_cache:      CUDA0 KV buffer size =    10.00 MiB
+0.02.196.750 I sched_reserve:      CUDA0 compute buffer size =   233.29 MiB
+0.02.196.752 I sched_reserve:      CUDA1 compute buffer size =     0.01 MiB
+0.02.196.753 I sched_reserve:  CUDA_Host compute buffer size =    36.32 MiB
+0.02.267.545 I mtmd_context:      CUDA1 compute buffer size =    98.80 MiB
+0.02.267.546 I mtmd_context:        CPU compute buffer size =    18.78 MiB
+0.02.267.580 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 147456, kv_unified = 'false'
+0.02.269.174 I sched_reserve:      CUDA0 compute buffer size =   233.29 MiB
+0.02.269.175 I sched_reserve:      CUDA1 compute buffer size =     0.01 MiB
+0.02.269.176 I sched_reserve:  CUDA_Host compute buffer size =    36.32 MiB
+0.02.711.394 I slot   operator(): id  0 | task 0 | new prompt, n_ctx_slot = 147456, n_keep = 0, task.n_tokens = 144448
+0.02.901.370 I sched_reserve:      CUDA1 compute buffer size =    78.38 MiB
+0.02.901.375 I sched_reserve:      CUDA0 compute buffer size =  4329.10 MiB
+0.02.901.375 I sched_reserve:  CUDA_Host compute buffer size =   441.02 MiB
+GPU-a5900811-5e3c-f130-cec4-7b2867cd8203, 1595889, 1284 MiB
+GPU-afe18a20-ce24-20de-9935-7b37fbd27581, 1595889, 17938 MiB
+physical 1 peak used MiB 24075 min free MiB 103
+physical 0 peak used MiB 23790 min free MiB 380
+process peak MiB GPU-afe18a20-ce24-20de-9935-7b37fbd27581 17938
+process peak MiB GPU-a5900811-5e3c-f130-cec4-7b2867cd8203 1284
