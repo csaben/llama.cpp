@@ -1,0 +1,5 @@
+compiled Q2_K columns	registers per thread	static shared bytes per block	local bytes	static DP4A instructions
+5	63	7200	0	200
+6	64	8640	0	240
+7	56	10080	0	280
+8	56	11520	0	320

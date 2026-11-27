@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -z ${B_LOCAL_GROUP_FD:-} ]]; then exec perf/p11/b/screen/local-group.sh "$0" "$@"; fi
 label=${1:?label}
 raw=perf/p11/b/screen/scan
 work=build/p11/micro

@@ -16,6 +16,11 @@ if [[ -z ${B_MIN_FREE_MIB+x} ]]; then
     B_MIN_FREE_MIB=$((B_MIN_FREE_MIB > 22500 ? 22500 : B_MIN_FREE_MIB))
 fi
 export B_MIN_FREE_MIB
+queue=(flock build/p11/stream-b.lock)
+if [[ ${B_LOCAL_GROUP_FD:-} =~ ^[0-9]+$ && /proc/self/fd/$B_LOCAL_GROUP_FD -ef build/p11/stream-b.lock ]]; then
+    flock -n "$B_LOCAL_GROUP_FD"
+    queue=()
+fi
 # Queue one Stream B request at the shared lock. Release both locks before waiting for an unrelated GPU user.
 while true; do
     if [[ -r build/p11/gpu-free.cache ]] && read -r observed available <build/p11/gpu-free.cache; then
@@ -26,7 +31,7 @@ while true; do
         fi
     fi
     status=0
-    flock build/p11/stream-b.lock flock "$lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0 P8_GPU=0 bash -c '
+    "${queue[@]}" flock "$lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 GPU=0 P8_GPU=0 bash -c '
         set -eu
         if [[ -e perf/STOP || -e /home/arelius/llama.cpp-fast/perf/STOP ]]; then exit 75; fi
         if [[ $(TZ=America/New_York date +%F) == 2026-11-27 ]]; then

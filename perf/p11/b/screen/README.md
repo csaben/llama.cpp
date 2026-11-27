@@ -1,0 +1,12 @@
+# Stream B operator measurements
+
+The serving decision and whole-model measurements are in the [Stream B report](../REPORT.md). Kernel durations here are microseconds unless a column specifies another unit. Each paired table uses old, new, new, old order. Each leg summarizes nine timed groups. Output digests cover the complete returned buffer.
+
+Run these experiments from the repository root with the configured SM86 build. Every GPU invocation goes through `perf/p11/b/gpu.sh`. Short operator sweeps may reserve the private B queue. Each individual measurement acquires and releases the shared GPU0 lock separately.
+
+- `expert.cpp` reads the gate/up or down tensor directly from the uncensored GGUF. Its inputs can be seeded synthetic values, captured FP32 activations, or the Q8_1 activations emitted by a real verification graph. `capture.cpp` records the router IDs, activation bytes and FP32 operator results. The FP32 prompt captures use a single GPU layer and CPU for the rest. The marked verifier captures use all 49 offloaded layers on GPU0 and widths 2 through 7 after a 1,025-token recorded prefix.
+- `attention.cpp` exercises the fused decode/verify scan with the model's 24 query heads, eight KV heads and a causal Q8 cache. The digest includes the output, written cache rows and recurrent state. `prompt_attention.cpp` materializes the per-head relative bias once, then times the direct Q8 prefill Flash Attention kernel. Its digest covers the full FP32 attention result.
+- `window_ops.cpp` generates `window.ops` for the standard `test-backend-ops --test-file` runner. It covers eight verifier widths on both expert projections and both model-shaped prefill projections.
+- `instructions.py` uses read-only disassembly of the frozen and candidate SM86 libraries. The static instruction counts and shared memory sizes come from the installed CUDA toolkit. The portable kernel traces can be decompressed with `xz -dk` and read with SQLite. [Instructions](p9-sm86-instructions.tsv), [compiled verifier resources](verify-resources.tsv), [trace records](../profiles/).
+
+The prototype patch sets and build recipes are stored in [expert and scheduling trials](prototypes.tar.gz), [additional CUDA trials](additional-recipes.tar.gz), and [attention trials](scan-recipes.tar.gz). The original scripts use paths under `build/p11`. Use the source commit and candidate runtime directory identified in the report when reproducing paired measurements.

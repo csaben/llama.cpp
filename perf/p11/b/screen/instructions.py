@@ -25,6 +25,17 @@ for version,lib in [('p9',base),('narrow',Path('build/p11/narrow-bin'))]:
         m=re.search(r'/\*[0-9a-f]+\*/\s+(?:@\S+\s+)?([A-Z][A-Z0-9_.]+)',line)
         if m and current in kernels:opcodes[current][m[1]]+=1
     assert all(opcodes[n] for n in kernels),[(n,opcodes[n]) for n in kernels]
+    if version == 'narrow':
+        usage=subprocess.run([str(Path.home()/'opt/cuda-12.8/bin/cuobjdump'),'--dump-resource-usage','--function',
+                              ','.join(kernels),str(lib/'libggml-cuda.so.1')],check=True,capture_output=True,text=True).stdout
+        with (out/'verify-resources.tsv').open('w') as report:
+            writer=csv.writer(report,delimiter='\t',lineterminator='\n')
+            writer.writerow(['compiled Q2_K columns','registers per thread','static shared bytes per block','local bytes','static DP4A instructions'])
+            for name in kernels:
+                m=re.search(r'Function '+re.escape(name)+r':\s+REG:(\d+) STACK:\d+ SHARED:(\d+) LOCAL:(\d+)',usage)
+                assert m,name
+                nc=int(re.search(r'ILi(\d+)EE',name)[1])
+                writer.writerow([nc,*m.groups(),opcodes[name]['IDP.4A.S8.S8']])
     with (out/f'{version}-sm86-instructions.tsv').open('w') as f:
         w=csv.writer(f,delimiter='\t',lineterminator='\n')
         w.writerow(['kernel','observed registers/thread','observed static shared bytes','observed dynamic shared bytes','static matrix/dot-product instructions'])

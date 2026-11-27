@@ -104,11 +104,22 @@ int main(int argc, char ** argv) {
     capture.close();
     GGML_ASSERT(capture);
     for (int i = 0; i < 8; ++i) { run(); }
+    int repeats = 64;
+    if (std::getenv("P11_STEADY")) {
+        const int64_t start = ggml_time_us();
+        int count = 0;
+        do {
+            run();
+            ++count;
+        } while (ggml_time_us()-start < 1000000);
+        repeats = std::max(1, count/10);
+    }
+    fprintf(stderr, "%d repetitions per timed group\n", repeats);
     printf("%d\t%d", length, rows);
     for (int group = 0; group < 9; ++group) {
         const int64_t start = ggml_time_us();
-        for (int rep = 0; rep < 64; ++rep) { run(); }
-        printf("\t%.3f", double(ggml_time_us()-start)/64);
+        for (int rep = 0; rep < repeats; ++rep) { run(); }
+        printf("\t%.3f", double(ggml_time_us()-start)/repeats);
     }
     printf("\n");
 }

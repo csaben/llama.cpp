@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One archived prototype, p9 or near-neighbor control per leg, run on one actual expert tensor.
 set -euo pipefail
+if [[ -z ${B_LOCAL_GROUP_FD:-} ]]; then exec perf/p11/b/screen/local-group.sh "$0" "$@"; fi
 runtime=${1:?runtime} suite=${2:?tile/verify} label=${3:?leg}
 model="$HOME/models/inkling-2-mini/Inkling-2-Mini-AtomicChat-Uncensored-Q2K-Q2_0-fit.gguf"
 raw=perf/p11/b/screen/micro
