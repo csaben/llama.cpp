@@ -1,0 +1,31 @@
+libggml-base.so.1: OK
+libggml-cpu.so.1: OK
+libggml-cuda.so.1: OK
+libggml.so.1: OK
+libllama-common.so.1: OK
+libllama-server-impl.so: OK
+libllama.so.1: OK
+libmtmd.so.1: OK
+llama-server: OK
+	linux-vdso.so.1 (0x000074e139a83000)
+	libllama-server-impl.so => /home/arelius/inkling-live-bin-p11b-72fd097/libllama-server-impl.so (0x000074e139400000)
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x000074e139000000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x000074e1393bf000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x000074e138c00000)
+	libllama-common.so.1 => /home/arelius/inkling-live-bin-p11b-72fd097/libllama-common.so.1 (0x000074e138600000)
+	libmtmd.so.1 => /home/arelius/inkling-live-bin-p11b-72fd097/libmtmd.so.1 (0x000074e138200000)
+	libllama.so.1 => /home/arelius/inkling-live-bin-p11b-72fd097/libllama.so.1 (0x000074e137c00000)
+	libggml.so.1 => /home/arelius/inkling-live-bin-p11b-72fd097/libggml.so.1 (0x000074e139a64000)
+	libggml-base.so.1 => /home/arelius/inkling-live-bin-p11b-72fd097/libggml-base.so.1 (0x000074e1392db000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x000074e138f17000)
+	/lib64/ld-linux-x86-64.so.2 (0x000074e139a85000)
+	libggml-cpu.so.1 => /home/arelius/inkling-live-bin-p11b-72fd097/libggml-cpu.so.1 (0x000074e137800000)
+	libggml-cuda.so.1 => /home/arelius/inkling-live-bin-p11b-72fd097/libggml-cuda.so.1 (0x000074e126200000)
+	libgomp.so.1 => /lib/x86_64-linux-gnu/libgomp.so.1 (0x000074e139283000)
+	libcudart.so.12 => /lib/x86_64-linux-gnu/libcudart.so.12 (0x000074e125e00000)
+	libcublas.so.12 => /lib/x86_64-linux-gnu/libcublas.so.12 (0x000074e11f400000)
+	libcublasLt.so.12 => /lib/x86_64-linux-gnu/libcublasLt.so.12 (0x000074e0fe400000)
+	libcuda.so.1 => /lib/x86_64-linux-gnu/libcuda.so.1 (0x000074e0f7800000)
+	libdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x000074e138f12000)
+	libpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x000074e138f0d000)
+	librt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x000074e138f08000)
