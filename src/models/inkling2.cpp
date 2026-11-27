@@ -313,26 +313,6 @@ void llama_model_inkling2::load_fused(llama_model_loader & ml) {
 void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
     const int64_t n_embd = hparams.n_embd;
 
-    if (const char * name = getenv("IK_PEER_ANCHOR")) {
-        auto * dev = ggml_backend_dev_by_name(name);
-        if (!dev || strncmp(ggml_backend_dev_name(dev), "CUDA", 4) != 0) {
-            throw std::runtime_error("IK_PEER_ANCHOR requires a CUDA peer");
-        }
-        auto * buft = ggml_backend_dev_buffer_type(dev);
-        ggml_tensor * src[] = {tok_embd, tok_norm};
-        for (int i = 0; i < 2; ++i) {
-            auto * t = ggml_dup_tensor(fused_context(), src[i]);
-            ggml_backend_buffer_ptr buf { ggml_backend_buft_alloc_buffer(buft, ggml_backend_buft_get_alloc_size(buft, t)) };
-            if (!buf || ggml_backend_tensor_alloc(buf.get(), t, ggml_backend_buffer_get_base(buf.get())) != GGML_STATUS_SUCCESS) {
-                throw std::runtime_error("inkling2: failed to allocate peer draft embeddings");
-            }
-            ggml_format_name(t, "draft.%s", src[i]->name);
-            ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-            ggml_backend_tensor_copy(src[i], t);
-            peer_tokens[i] = t;
-            fused_bufs.emplace_back(std::move(buf));
-        }
-    }
     const char * peer_name = getenv("IK_PEER_HEAD");
     if (peer_name && output && output->ne[1] % 2 == 0) {
         auto * peer = ggml_backend_dev_by_name(peer_name);
@@ -366,15 +346,10 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         auto * buft = ggml_backend_dev_buffer_type(dev);
         peer_experts.resize(n_layer_phys());
         for (int i = 0; i < n_layer_phys(); ++i) {
-            if (const char * only = getenv("IK_PEER_LAYER")) {
-                if (i != atoi(only)) { continue; }
-            }
             ggml_tensor * weights[] = {layers[i].ffn_gate_up_exps, layers[i].ffn_down_exps};
-            if (!weights[0] || !weights[1]) { continue; }
-            const int heavy = getenv("IK_PEER_HEAVY") ? atoi(getenv("IK_PEER_HEAVY")) : 0;
-            const bool q2 = weights[0]->type == GGML_TYPE_Q2_K && weights[1]->type == GGML_TYPE_Q2_0;
-            const bool wide = weights[0]->type == weights[1]->type && (weights[0]->type == GGML_TYPE_IQ4_NL || weights[0]->type == GGML_TYPE_Q8_0);
-            if (!(q2 && heavy != 2) && !(wide && heavy)) { continue; }
+            if (!weights[0] || !weights[1] || weights[0]->type != GGML_TYPE_Q2_K || weights[1]->type != GGML_TYPE_Q2_0) {
+                continue;
+            }
             for (int j = 0; j < 2; ++j) {
                 auto * src = weights[j];
                 if (ggml_backend_buffer_get_type(src->buffer) == buft) {
@@ -472,28 +447,6 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
             row += n_piece;
         }
         GGML_ASSERT(row == fa.w->ne[1] && fa.n_q + fa.n_k + fa.n_v == row);
-
-        if (const char * name = getenv("IK_PEER_GATES")) {
-            auto * dev = ggml_backend_dev_by_name(name);
-            if (!dev || strncmp(ggml_backend_dev_name(dev), "CUDA", 4) != 0) {
-                throw std::runtime_error("IK_PEER_GATES requires a CUDA peer");
-            }
-            auto * gate = layer.wqkv_gate;
-            if (gate && gate->type == GGML_TYPE_IQ4_NL && gate->ne[0] == 2304 && gate->ne[1] == 3072) {
-                auto * buft = ggml_backend_dev_buffer_type(dev);
-                auto * peer = ggml_dup_tensor(fused_context(), gate);
-                ggml_format_name(peer, "blk.%d.attn_gate.peer", i);
-                ggml_backend_buffer_ptr buf { ggml_backend_buft_alloc_buffer(buft, ggml_backend_buft_get_alloc_size(buft, peer)) };
-                if (!buf || ggml_backend_view_init(gate) != GGML_STATUS_SUCCESS ||
-                        ggml_backend_tensor_alloc(buf.get(), peer, ggml_backend_buffer_get_base(buf.get())) != GGML_STATUS_SUCCESS) {
-                    throw std::runtime_error("inkling2: failed to allocate peer attention gates");
-                }
-                ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-                ggml_backend_tensor_copy(gate, peer);
-                fa.peer_gate = peer;
-                fused_bufs.emplace_back(std::move(buf));
-            }
-        }
 
         fa.q = ggml_view_2d(fused_context(), fa.w, n_embd, fa.n_q, row_size, 0);
         fa.k = ggml_view_2d(fused_context(), fa.w, n_embd, fa.n_k, row_size, fa.n_q*row_size);
@@ -1132,7 +1085,6 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                         ik_set_param(cur, 14, mr_planes);
                         ik_set_param(cur, 15, mr_plane_cells);
                     }
-                    cur->extra = fa.peer_gate;
                     cb(cur, "attn_gated", il);
                     // the V cell indices are set with the K ones: keep their input allocated
                     ggml_build_forward_expand(gf, is_swa ? attn->get_v_idxs_swa() : attn->get_v_idxs());
@@ -1271,11 +1223,11 @@ attn_done:
     if (moe_op == 3 && (n_tokens == 1 || mr) && a_type == GGML_TYPE_Q8_1 && gate_up && down &&
             (gate_up->type == GGML_TYPE_Q2_K || gate_up->type == GGML_TYPE_Q3_K) &&
             (down->type == GGML_TYPE_Q2_0 || down->type == GGML_TYPE_Q4_0 || down->type == GGML_TYPE_IQ4_NL)) {
-        if (gate_up->buffer && down->buffer) {
-            const auto buft = ggml_backend_buffer_get_type(gate_up->buffer);
-            const auto dev = ggml_backend_buft_get_device(buft);
-            mixed_cuda_experts = dev && strncmp(ggml_backend_dev_name(dev), "CUDA", 4) == 0 &&
-                                 buft == ggml_backend_dev_buffer_type(dev) && ggml_backend_buffer_get_type(down->buffer) == buft;
+        const auto dev = model.dev_layer(il);
+        if (dev && strncmp(ggml_backend_dev_name(dev), "CUDA", 4) == 0 && gate_up->buffer && down->buffer) {
+            const auto buft = ggml_backend_dev_buffer_type(dev);
+            mixed_cuda_experts = ggml_backend_buffer_get_type(gate_up->buffer) == buft &&
+                                 ggml_backend_buffer_get_type(down->buffer) == buft;
         }
     }
     const bool moe_fused = moe_op && (n_tokens == 1 || mr) && ubatch.n_seqs == 1 && rs_ids != nullptr &&

@@ -1057,17 +1057,8 @@ llama_model_dflash::graph_inkling2::graph_inkling2(const llm_graph_params & para
     const int64_t nb = ubatch.n_seqs_unq;
     const int64_t block = n_tokens/nb;
     auto * ids = nb == 1 ? ggml_view_1d(ctx0, tokens, 1, 0) : ggml_cont_1d(ctx0, ggml_view_2d(ctx0, tokens, 1, nb, block*tokens->nb[0], 0), nb);
-    auto * tokens_weight = target->tok_embd;
-    auto * tokens_norm = target->tok_norm;
-    if (target->arch == LLM_ARCH_INKLING2_LOOP) {
-        const auto & peer = static_cast<const llama_model_inkling2 &>(*target).peer_tokens;
-        if (peer[0] && ggml_backend_buft_get_device(ggml_backend_buffer_get_type(peer[0]->buffer)) == model.dev_output()) {
-            tokens_weight = peer[0];
-            tokens_norm = peer[1];
-        }
-    }
-    auto * anchors = ggml_get_rows(ctx0, tokens_weight, ids);
-    anchors = ggml_mul(ctx0, ggml_rms_norm(ctx0, anchors, target->hparams.f_norm_rms_eps), tokens_norm);
+    auto * anchors = ggml_get_rows(ctx0, target->tok_embd, ids);
+    anchors = ggml_mul(ctx0, ggml_rms_norm(ctx0, anchors, target->hparams.f_norm_rms_eps), target->tok_norm);
     auto * cur = ggml_reshape_3d(ctx0, anchors, n_embd, 1, nb);
     if (block > 1) {
         auto * masks = ggml_repeat_4d(ctx0, ggml_cast(ctx0, model.dspark_mask_embd, GGML_TYPE_F32), n_embd, block - 1, nb, 1);

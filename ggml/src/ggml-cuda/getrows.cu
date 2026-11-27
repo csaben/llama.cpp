@@ -442,7 +442,7 @@ void get_rows_cuda(
 }
 
 void ggml_cuda_op_get_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const ggml_tensor * src0 = ggml_get_op_params_i32(dst, 15) == GGML_IK_PEER_ROWS ? static_cast<const ggml_tensor *>(dst->extra) : dst->src[0];
+    const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
     cudaStream_t stream = ctx.stream();

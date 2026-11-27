@@ -2516,7 +2516,6 @@ struct llama_model_inkling2 : public llama_model_base {
     // q/k/v are the views of the Q-, K- and V-input groups (one matmul each; the whole matrix when the inputs agree)
     struct attn_fused {
         ggml_tensor * w = nullptr;
-        ggml_tensor * peer_gate = nullptr;
         ggml_tensor * q = nullptr; // rows [0, n_q)
         ggml_tensor * k = nullptr; // rows [n_q, n_q + n_k)
         ggml_tensor * v = nullptr; // rows [n_q + n_k, n_q + n_k + n_v)
@@ -2527,7 +2526,6 @@ struct llama_model_inkling2 : public llama_model_base {
         std::vector<std::pair<std::string, int64_t>> pieces;
     };
     ggml_tensor * output_half[2] = {};
-    ggml_tensor * peer_tokens[2] = {};
     std::vector<std::array<ggml_tensor *, 2>> peer_experts;
     std::vector<attn_fused> fused_attn; // indexed by physical layer; w == nullptr: not fused
     // the q, k, v input norms of a full-attention layer stacked as [n_embd, 3] (nullptr for SWA layers)
@@ -2663,7 +2661,6 @@ struct llama_model_inkling2_loop : public llama_model_inkling2 {
     // indexed by physical layer - core_start
     std::vector<loop_layer> loop_layers;
     ggml_tensor * core_msg_queries = nullptr;
-    ggml_tensor * peer_msg_down = nullptr;
 
     struct graph : public llama_model_inkling2::graph {
         graph(const llm_graph_params & params);

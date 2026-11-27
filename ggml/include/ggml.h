@@ -2478,7 +2478,6 @@ extern "C" {
     // MUL_MAT: op_params[14] > 0: the rows are the Q | K | V groups of an attention projection, [14] rows in the Q group,
     // the activation is [n_embd, n_tok, 3] and each row needs its group's columns only; op_params[13]: n_tok.
     #define GGML_IK_MR_MAGIC 0x494b4d52
-    #define GGML_IK_PEER_ROWS 0x49505253
 
     GGML_API struct ggml_tensor * ggml_inkling_attn(
             struct ggml_context * ctx,

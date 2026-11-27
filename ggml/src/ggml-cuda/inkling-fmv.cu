@@ -919,11 +919,10 @@ void ggml_cuda_op_inkling_proj(ggml_backend_cuda_context & ctx, ggml_tensor * ds
 }
 
 // GA10x small-K MMVQ gives 36 Q8_1 blocks to four warps. Only the first 36 lanes contribute.
-template<bool sum_peer = false>
-static __global__ void ik_q2_down_rows(const block_q2_0 * weights, const block_q8_1 * x, const int32_t * ids, float * out, const float * route = nullptr) {
-    const int slot = sum_peer ? threadIdx.y/4 : blockIdx.y;
+static __global__ void ik_q2_down_rows(const block_q2_0 * weights, const block_q8_1 * x, const int32_t * ids, float * out) {
+    const int slot = blockIdx.y;
     const int lane = threadIdx.x;
-    const int row = 2*(blockIdx.x*4 + threadIdx.y%4);
+    const int row = 2*(blockIdx.x*blockDim.y + threadIdx.y);
     constexpr int blocks = 1152/QK2_0;
     const int base = (ids[slot]*2304 + row)*blocks;
     x += slot*(1152/QK8_1);
@@ -939,35 +938,13 @@ static __global__ void ik_q2_down_rows(const block_q2_0 * weights, const block_q
             }
         }
     }
-    __shared__ float tile[sum_peer ? 4 : 1][sum_peer ? 8 : 1];
 #pragma unroll
     for (int r = 0; r < 2; ++r) {
         const float v = warp_reduce_sum(sums[r]);
         if (lane == (row + r)%4) {
-            if constexpr (sum_peer) {
-                tile[slot][row%8 + r] = v;
-            } else {
-                out[slot*2304 + row + r] = v;
-            }
+            out[slot*2304 + row + r] = v;
         }
     }
-    if constexpr (sum_peer) {
-        __syncthreads();
-        if (!threadIdx.y && lane < 8) {
-            float sum = 0.0f;
-#pragma unroll
-            for (int e = 0; e < 4; ++e) {
-                sum = __fmaf_rn(tile[e][lane], route[e], sum);
-            }
-            out[blockIdx.x*8 + lane] = sum;
-        }
-    }
-}
-
-void ggml_cuda_ik_return_q2_prefix(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x,
-        const ggml_tensor * ids, const float * route, float * dst) {
-    ik_q2_down_rows<true><<<2304/8, dim3(WARP_SIZE, 16), 0, ctx.stream()>>>((const block_q2_0 *) w->data,
-            (const block_q8_1 *) x->data, (const int32_t *) ids->data, dst, route);
 }
 
 bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int slots) {
@@ -982,7 +959,7 @@ bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * ds
             !w->buffer || ggml_backend_buffer_get_type(w->buffer) != ggml_backend_cuda_buffer_type(ctx.device)) {
         return false;
     }
-    ik_q2_down_rows<><<<dim3(2304/8, slots), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
+    ik_q2_down_rows<<<dim3(2304/8, slots), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>(
             (const block_q2_0 *) w->data, (const block_q8_1 *) x->data, (const int32_t *) ids->data, (float *) dst->data);
     return true;
 }

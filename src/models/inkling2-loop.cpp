@@ -161,37 +161,6 @@ void llama_model_inkling2_loop::load_arch_tensors_post(llama_model_loader & ml) 
         }
     }
     load_fused(ml); // the controller stacks registered in load_arch_tensors (if not yet loaded)
-    if (const char * name = getenv("IK_PEER_CTRL")) {
-        auto * dev = ggml_backend_dev_by_name(name);
-        if (!dev || strncmp(ggml_backend_dev_name(dev), "CUDA", 4) != 0) {
-            throw std::runtime_error("IK_PEER_CTRL requires a CUDA peer");
-        }
-        if (!core_msg_queries || gate_rank != 64 || hparams.n_embd != 2304 || loop_layers.size() != 12) { return; }
-        for (auto & l : loop_layers) {
-            if (!l.ctrl_down_qkv || !l.ctrl_down[LOOP_CTRL_FFN] || l.ctrl_down_qkv->type != GGML_TYPE_F16 ||
-                    l.ctrl_down[LOOP_CTRL_FFN]->type != GGML_TYPE_F16) { return; }
-        }
-        auto * buft = ggml_backend_dev_buffer_type(dev);
-        peer_msg_down = ggml_new_tensor_3d(fused_context(), GGML_TYPE_F16, 2304, 64, 48);
-        ggml_set_name(peer_msg_down, "loop.peer.down.weight");
-        ggml_backend_buffer_ptr buf { ggml_backend_buft_alloc_buffer(buft, ggml_backend_buft_get_alloc_size(buft, peer_msg_down)) };
-        if (!buf || ggml_backend_tensor_alloc(buf.get(), peer_msg_down, ggml_backend_buffer_get_base(buf.get())) != GGML_STATUS_SUCCESS) {
-            throw std::runtime_error("inkling2: failed to allocate peer controller weights");
-        }
-        std::vector<uint16_t> full(4608*64), half(2304*64);
-        for (int i = 0; i < 12; ++i) {
-            for (int c = 0; c < 4; ++c) {
-                auto * w = c == LOOP_CTRL_FFN ? loop_layers[i].ctrl_down[c] : loop_layers[i].ctrl_down_qkv;
-                ggml_backend_tensor_get(w, full.data(), c == LOOP_CTRL_FFN ? 0 : c*w->nb[2], full.size()*sizeof(uint16_t));
-                for (int k = 0; k < 64; ++k) {
-                    std::copy_n(full.data() + 4608*k + 2304, 2304, half.data() + 2304*k);
-                }
-                ggml_backend_tensor_set(peer_msg_down, half.data(), (4*i+c)*peer_msg_down->nb[2], half.size()*sizeof(uint16_t));
-            }
-        }
-        ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-        fused_bufs.emplace_back(std::move(buf));
-    }
 }
 
 std::unique_ptr<llm_graph_context> llama_model_inkling2_loop::build_arch_graph(const llm_graph_params & params) const {
@@ -227,10 +196,6 @@ llama_model_inkling2_loop::graph::graph(const llm_graph_params & params) : llama
             if (fused && (n_tokens == 1 || mr) && m.core_msg_queries) {
                 flush_pending();
                 pass_messages = mix(bank, bank_out, m.core_msg_queries);
-                if (m.peer_msg_down && n_tokens == 1) {
-                    ggml_set_name(pass_messages, "loop.peer.messages");
-                    pass_messages->extra = m.peer_msg_down;
-                }
             }
         }
         for (int ip = start; ip < end; ++ip) {

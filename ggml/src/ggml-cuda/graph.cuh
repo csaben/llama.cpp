@@ -219,16 +219,8 @@ struct ggml_cuda_stream_context {
     unsigned * ik_request = nullptr;
     unsigned * ik_reply = nullptr;
     bool ik_open = false;
-    float * ik_msg_copy = nullptr;
-    float2 * ik_msg_parts = nullptr;
-    const ggml_tensor * ik_msg_base = nullptr;
-    cudaEvent_t ik_msg_done = nullptr;
-    bool ik_msg_pending = false;
 
     ~ggml_cuda_stream_context() {
-        if (ik_msg_done) { CUDA_CHECK(cudaEventDestroy(ik_msg_done)); }
-        if (ik_msg_copy) { CUDA_CHECK(cudaFree(ik_msg_copy)); }
-        if (ik_msg_parts) { CUDA_CHECK(cudaFree(ik_msg_parts)); }
         if (ik_request) { CUDA_CHECK(cudaFree(ik_request)); }
         if (ik_reply) { CUDA_CHECK(cudaFree(ik_reply)); }
         if (ik_start) {
