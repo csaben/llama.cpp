@@ -1,0 +1,2 @@
+name, index, pci.bus_id, uuid, driver_version, memory.total [MiB], power.limit [W]
+NVIDIA GeForce RTX 3090, 0, 00000000:01:00.0, GPU-a5900811-5e3c-f130-cec4-7b2867cd8203, 615.71.09, 24576 MiB, 370.00 W
