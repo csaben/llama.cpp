@@ -3,3 +3,4 @@ First mismatch at output token 43 (one-based): p9 2918, mixed layer placement 33
 335 of 384 ordered positions differ. The complete replies also differ.
 p9 IDs SHA256 f5695916254a706dd9d437110ebd2e616b1657feee4d5dc110753c85372ac46b
 trial IDs SHA256 e413604acaa919c010768bee3ce0243815efdaa6e28dae5751a73257a975f4e4
+An independent p9 plain run at the same 8192-token slot also matched the 131072-slot p9 control on all 384 IDs and the complete reply.
