@@ -1,0 +1,7 @@
+series	completed_edit_legs	expected_edit_legs	completed_synthetic_legs	expected_synthetic_legs
+after-direct128	4	8	0	0
+after-release128	0	8	0	0
+after-release64	0	8	0	0
+quiet	5	8	6	8
+iq4-development	0	4	0	4
+iq4-release	2	4	3	4

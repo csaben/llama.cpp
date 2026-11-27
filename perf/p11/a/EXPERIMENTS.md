@@ -15,3 +15,9 @@ Physical GPU1 is CUDA0 in the two-card processes. GPU0 is CUDA1. The target has 
 | Layer placement | Moving a table or whole layers can extend a slot by moving memory. Reusing logical layers with another device exposed a mixed-expert graph assertion at 327,680 tokens after prompt evaluation. `p11a-capacity-placement` looks up the physical expert buffers. A slot is credited only after a full request matches the reference. [Earlier memory runs](background.md) |
 
 The calibrated and uncensored models differ in 217 of 704 weight tensors. Their output heads have the same SHA-256. The calibrated PPL figures in the brief and the fresh uncensored results use separate controls. [Model comparison](model-comparison.txt).
+
+## Raw experiment records
+
+The screening directories preserve individual probes and incomplete comparison series. The frozen native-head pilot and separate-drafter comparisons above each completed all four legs. Other one-off measurements describe kernel behavior or guide placement choices. [Screening runs](screen/), [matched screening replies](screen-outputs.tsv), [failed model loads](failed-screening.txt).
+
+The early server runs used the native return-copy head, the direct-store development build, or reduced context while memory was occupied. The two direct 128K directories include tests with different draft microbatches. The release comparison uses the clean rebuild, with a new set of same-flags plain controls. [Native matrix](native-matrix/), [direct development matrix](direct-matrix/), [direct 128K trials](direct-release/), [direct 64K trials](direct-64k/), [p9 64K controls](p9-64k/), [post-residency replay ledger](replay/README.md).

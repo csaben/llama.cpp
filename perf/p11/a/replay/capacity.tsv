@@ -1,0 +1,4 @@
+slot	request	plain_control	prompt_tokens	emitted_ids	full_reply_and_ids
+139264	after-p9-repeat-139264	after-p9-ref-139264	136256	3000	equal
+141312	after-p9-repeat-141312	after-p9-ref-141312	138304	3000	equal
+141312	after-release-fit-141312	after-p9-ref-141312	138304	3000	equal
