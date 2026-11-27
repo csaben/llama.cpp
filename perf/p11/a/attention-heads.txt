@@ -1,0 +1,23 @@
+depth=1024 leg=0 split=0 us=15.114 rows=24 repeats=128
+depth=1024 leg=1 split=1 us=26.888 rows=24 repeats=128
+depth=1024 leg=2 split=1 us=27.064 rows=24 repeats=128
+depth=1024 leg=3 split=0 us=15.103 rows=24 repeats=128
+All 3072 output floats matched on every leg; CPU softmax samples passed.
+
+depth=4096 leg=0 split=0 us=54.233 rows=24 repeats=128
+depth=4096 leg=1 split=1 us=46.625 rows=24 repeats=128
+depth=4096 leg=2 split=1 us=46.853 rows=24 repeats=128
+depth=4096 leg=3 split=0 us=54.286 rows=24 repeats=128
+All 3072 output floats matched on every leg; CPU softmax samples passed.
+
+depth=16384 leg=0 split=0 us=193.891 rows=24 repeats=128
+depth=16384 leg=1 split=1 us=147.939 rows=24 repeats=128
+depth=16384 leg=2 split=1 us=147.978 rows=24 repeats=128
+depth=16384 leg=3 split=0 us=194.242 rows=24 repeats=128
+All 3072 output floats matched on every leg; CPU softmax samples passed.
+
+depth=65536 leg=0 split=0 us=816.541 rows=24 repeats=32
+depth=65536 leg=1 split=1 us=506.583 rows=24 repeats=32
+depth=65536 leg=2 split=1 us=506.271 rows=24 repeats=32
+depth=65536 leg=3 split=0 us=816.796 rows=24 repeats=32
+All 3072 output floats matched on every leg; CPU softmax samples passed.
