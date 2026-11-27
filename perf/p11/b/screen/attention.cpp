@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <numeric>
 #include <random>
@@ -120,6 +121,14 @@ static int measure(int length, int rows, const char * output_path) {
 }
 
 int main(int argc, char ** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--cases") == 0) {
+        if (argc < 5 || (argc - 2) % 3) { return 2; }
+        for (int i = 2; i < argc; i += 3) {
+            const int status = measure(std::atoi(argv[i]), std::atoi(argv[i + 1]), argv[i + 2]);
+            if (status != 0) { return status; }
+        }
+        return 0;
+    }
     if (argc < 4 || (argc - 2) % 2) {
         fprintf(stderr, "usage: attention KV_LENGTH ROWS CAPTURE [ROWS CAPTURE ...]\n");
         return 2;

@@ -1,0 +1,3 @@
+slot	prompt	case	mode	prompt_tok_s	decode_tok_s	proposed	accepted	ready_proc_mib	peak_card_mib	min_free_mib	samples	ids_sha256
+131072	127872	release-128k-new1	dspark	1426.739	180.585	2544	2342	18054	19523	4647	545	6ed50e3be44520108c269eba8c63e93433f4ca25df12658646d0e41a8bc834de
+131072	127872	release-128k-old1	dspark	1588.206	161.67	2266	2114	18054	19521	4649	510	6ed50e3be44520108c269eba8c63e93433f4ca25df12658646d0e41a8bc834de

@@ -1,0 +1,3 @@
+tg0: 385 matching full-vocabulary rows, 385 matching input IDs, 200058 finite FP32 values per row
+Input and batch-size SHA-256 240e8a260c876e94a42e586c2b94f8130f8c974de215b14a2cd332c6d90e197f
+Full logit SHA-256 a2a5440989970baf278f4eb4d9a1e14027af8f32265b43928022226ce604fc66

@@ -15,12 +15,11 @@
 #include <string>
 #include <vector>
 
-static int measure(const char * model, const char * projection, int cols, const char * output_path) {
+static int measure(const char * model, const char * projection, int cols, const char * output_path, int layer, const char * directory) {
     const bool gate = std::strcmp(projection, "gate") == 0;
     if ((!gate && std::strcmp(projection, "down")) || cols < 1 || cols > 512) {
         return 2;
     }
-    const int layer = std::getenv("P11_LAYER") ? std::atoi(std::getenv("P11_LAYER")) : 0;
     const std::string name = "blk." + std::to_string(layer) + (gate ? ".ffn_gate_up_exps.weight" : ".ffn_down_exps.weight");
     gguf_context_ptr meta(gguf_init_from_file(model, {true, nullptr}));
     GGML_ASSERT(meta);
@@ -69,7 +68,6 @@ static int measure(const char * model, const char * projection, int cols, const 
         std::copy_n(experts.begin(), 8, routes.begin() + col*8);
     }
     std::vector<char> quantized;
-    const char * directory = std::getenv("P11_EXPERT_INPUT_DIR");
     const char * windows = std::getenv("P11_EXPERT_WINDOW_DIR");
     std::string window_directory;
     if (windows) {
@@ -128,12 +126,22 @@ static int measure(const char * model, const char * projection, int cols, const 
 }
 
 int main(int argc, char ** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--cases") == 0) {
+        if (argc < 8 || (argc - 3) % 5) { return 2; }
+        for (int i = 3; i < argc; i += 5) {
+            const char * input = std::strcmp(argv[i + 3], "-") == 0 ? nullptr : argv[i + 3];
+            const int status = measure(argv[2], argv[i], std::atoi(argv[i + 1]), argv[i + 4], std::atoi(argv[i + 2]), input);
+            if (status != 0) { return status; }
+        }
+        return 0;
+    }
     if (argc < 5 || (argc - 3) % 2) {
         fprintf(stderr, "usage: expert MODEL gate|down COLUMNS OUTPUT [COLUMNS OUTPUT ...]\n");
         return 2;
     }
+    const int layer = std::getenv("P11_LAYER") ? std::atoi(std::getenv("P11_LAYER")) : 0;
     for (int i = 3; i < argc; i += 2) {
-        const int status = measure(argv[1], argv[2], std::atoi(argv[i]), argv[i + 1]);
+        const int status = measure(argv[1], argv[2], std::atoi(argv[i]), argv[i + 1], layer, std::getenv("P11_EXPERT_INPUT_DIR"));
         if (status != 0) { return status; }
     }
     return 0;
