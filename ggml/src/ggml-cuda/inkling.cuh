@@ -24,3 +24,6 @@ bool ggml_cuda_inkling_segmented_projection_rows(ggml_backend_cuda_context & ctx
 bool ggml_cuda_inkling_q2_down(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int slots = 8);
 bool ggml_cuda_inkling_projection_conv(ggml_backend_cuda_context & ctx, const ggml_tensor * mm, ggml_tensor * dst);
 bool ggml_cuda_mix_down(ggml_backend_cuda_context & ctx, ggml_tensor * mix, ggml_tensor * down);
+
+bool ggml_cuda_ik_peer_gates_start(ggml_backend_cuda_context & ctx, const ggml_tensor * weights, const ggml_tensor * x, float * gates);
+void ggml_cuda_ik_peer_gates_finish(ggml_backend_cuda_context & ctx);

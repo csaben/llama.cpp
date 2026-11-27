@@ -3937,9 +3937,9 @@ static bool ik_dispatch_attention(ggml_backend_cuda_context & ctx, ggml_tensor *
             return false;
         }
         if (a.has_taps) {
-            return ik_launch_gate_projection<1>(ctx, a, proj, short_scan);
+            return ik_launch_gate_projection<1>(ctx, a, proj, short_scan, static_cast<const ggml_tensor *>(dst->extra));
         }
-        return ik_launch_gate_projection<0>(ctx, a, proj, short_scan);
+        return ik_launch_gate_projection<0>(ctx, a, proj, short_scan, static_cast<const ggml_tensor *>(dst->extra));
     }
 
     const bool q8 = dst->type == GGML_TYPE_Q8_1;

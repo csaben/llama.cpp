@@ -2010,6 +2010,10 @@ static __global__ void ik_iq4_nl_window(const void * weights, const block_q8_1 *
     }
 }
 
+void ggml_cuda_ik_peer_gate_matrix(cudaStream_t stream, const ggml_tensor * w, const block_q8_1 * x, float * gates) {
+    ik_iq4_nl_window<1, 2304, true><<<3072/32, dim3(32, 16), 0, stream>>>(w->data, x, gates, 3072, 2304/QK4_NL, 0, 0);
+}
+
 bool ggml_cuda_ik_peer_project(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, ggml_tensor * dst) {
     const int cols = x->ne[1], rows = w->ne[1];
     if (w->ne[0] != 2304 || rows%32 != 0 || cols < 1 || cols > 7) {

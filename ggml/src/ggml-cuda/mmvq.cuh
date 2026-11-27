@@ -25,3 +25,5 @@ bool ggml_cuda_ik_mma_moe_ok(const ggml_tensor * src0, const ggml_tensor * dst);
 void ggml_cuda_ik_moe_four(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, const ggml_tensor * ids, ggml_tensor * out);
 
 bool ggml_cuda_ik_peer_project(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, ggml_tensor * dst);
+
+void ggml_cuda_ik_peer_gate_matrix(cudaStream_t stream, const ggml_tensor * w, const block_q8_1 * x, float * gates);

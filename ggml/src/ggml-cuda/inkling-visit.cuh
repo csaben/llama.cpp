@@ -128,13 +128,39 @@ static __global__ void __launch_bounds__(384) ik_dense_warp_roles(ik_attn_args a
     }
 }
 
+template<int taps, bool short_scan>
+static __global__ void __launch_bounds__(256) ik_ungated_scan(ik_attn_args a) {
+    ik_attn2<block_q8_0, false, 3, true, false, taps, short_scan, false, false, false, true, false, true>(a, nullptr, 0, nullptr);
+}
+
+static __global__ void ik_apply_peer_gates(const float * values, const float * gate, block_q8_1 * dst) {
+    const int i = blockIdx.x*blockDim.x + threadIdx.x;
+    const float v = values[i]*(1.0f/(1.0f + expf(-gate[i])));
+    ik_warp_store_q8_1(v, dst+i/32, threadIdx.x%32, true);
+}
+
 template<int taps>
-static bool ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan) {
+static bool ik_launch_gate_projection(ggml_backend_cuda_context & ctx, ik_attn_args a, const ggml_tensor * proj, bool short_scan, const ggml_tensor * peer_gate) {
     const auto * w = (const block_iq4_nl *) proj->src[0]->data;
     const auto * x = (const block_q8_1 *) proj->src[1]->data;
     const bool fast = ggml_cuda_inkling_fast_glue(ctx) && a.n_rel == 16 && a.n_extent == 1024 && (uintptr_t) (a.consts + a.c_table) % 16 == 0;
     const bool split_scan = ik_mr_enabled() && a.n_split < 8;
     if (split_scan && !fast) { return false; }
+    if (fast && peer_gate && ggml_cuda_ik_peer_gates_start(ctx, peer_gate, proj->src[1], (float *) a.proj + a.off_gate)) {
+        ggml_cuda_pool_alloc<float> values(ctx.pool(), 3072);
+        ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
+        auto * dst = (block_q8_1 *) a.dst;
+        a.proj_ncols = 1;
+        a.dst = values.get();
+        if (short_scan) {
+            ik_ungated_scan<taps, true><<<dim3(8, a.n_split), 256, 0, ctx.stream()>>>(a);
+        } else {
+            ik_ungated_scan<taps, false><<<dim3(8, a.n_split), 256, 0, ctx.stream()>>>(a);
+        }
+        ggml_cuda_ik_peer_gates_finish(ctx);
+        ik_apply_peer_gates<<<12, 256, 0, ctx.stream()>>>(values.get(), a.proj + a.off_gate, dst);
+        return true;
+    }
     int * counters = ik_counters(ctx, 192, 8);
     ik_dense_scan_inputs<taps><<<(proj->ne[0] - 3072)/4, 128, 0, ctx.stream()>>>(a, w, x);
     if (short_scan || split_scan) {

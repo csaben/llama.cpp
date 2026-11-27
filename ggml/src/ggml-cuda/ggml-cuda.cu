@@ -2632,6 +2632,52 @@ static bool ik_peer_capture(ggml_backend_cuda_context & ctx, cudaStream_t main_s
     return true;
 }
 
+static __global__ void ik_send_gate_input(const int * x, int * dst, unsigned * ready) {
+    for (int i = threadIdx.x; i < 72*sizeof(block_q8_1)/sizeof(int); i += blockDim.x) {
+        dst[i] = x[i];
+    }
+    __syncthreads();
+    if (ready && !threadIdx.x) { ik_publish(ready); }
+}
+
+bool ggml_cuda_ik_peer_gates_start(ggml_backend_cuda_context & ctx, const ggml_tensor * weights, const ggml_tensor * x, float * gates) {
+    if (!weights || ctx.curr_stream_no != 0 || !ctx.stream_context().concurrent_events.empty() ||
+            !ggml_cuda_p2p_enabled() || ggml_cuda_info().device_count != 2 ||
+            x->type != GGML_TYPE_Q8_1 || x->ne[0] != 2304 || x->nb[0] != sizeof(block_q8_1)) {
+        return false;
+    }
+    const int other = 1 - ctx.device;
+    if (ggml_backend_buffer_get_type(weights->buffer) != ggml_backend_cuda_buffer_type(other) ||
+            ggml_cuda_info().devices[other].cc != GGML_CUDA_CC_AMPERE_GA10X) {
+        return false;
+    }
+    auto * peer = ik_get_peer(ctx, other);
+    if (!peer) { return false; }
+    auto & state = ctx.stream_context();
+    auto main_stream = ctx.stream();
+    ggml_cuda_set_device(other);
+    auto peer_stream = peer->stream();
+    ggml_cuda_pool_alloc<block_q8_1> peer_x(peer->pool(), 72);
+    ggml_cuda_set_device(ctx.device);
+    const bool flags = ik_peer_capture(ctx, main_stream, peer_stream);
+    ik_send_gate_input<<<1, 256, 0, main_stream>>>((const int *) x->data, (int *) peer_x.get(), flags ? state.ik_request : nullptr);
+    if (!flags) { CUDA_CHECK(cudaEventRecord(state.ik_start, main_stream)); }
+    ggml_cuda_set_device(other);
+    if (flags) { ik_peer_wait<<<1, 1, 0, peer_stream>>>(state.ik_request); }
+    else { CUDA_CHECK(cudaStreamWaitEvent(peer_stream, state.ik_start)); }
+    ggml_cuda_ik_peer_gate_matrix(peer_stream, weights, peer_x.get(), gates);
+    if (flags) { ik_peer_signal<<<1, 1, 0, peer_stream>>>(state.ik_reply); }
+    else { CUDA_CHECK(cudaEventRecord(state.ik_done, peer_stream)); }
+    ggml_cuda_set_device(ctx.device);
+    return true;
+}
+
+void ggml_cuda_ik_peer_gates_finish(ggml_backend_cuda_context & ctx) {
+    auto & state = ctx.stream_context();
+    if (state.ik_open) { ik_peer_wait<<<1, 1, 0, ctx.stream()>>>(state.ik_reply); }
+    else { CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(), state.ik_done)); }
+}
+
 static bool ik_peer_head(ggml_backend_cuda_context & ctx, const ggml_tensor * w, const ggml_tensor * x, ggml_tensor * dst) {
     static const bool enabled = ggml_cuda_env_flag("IK_PEER_NATIVE");
     if (!enabled || !dst->extra || !ggml_cuda_p2p_enabled() || ggml_cuda_info().device_count != 2 ||

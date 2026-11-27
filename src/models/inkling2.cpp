@@ -448,6 +448,28 @@ void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
         }
         GGML_ASSERT(row == fa.w->ne[1] && fa.n_q + fa.n_k + fa.n_v == row);
 
+        if (const char * name = getenv("IK_PEER_GATES")) {
+            auto * dev = ggml_backend_dev_by_name(name);
+            if (!dev || strncmp(ggml_backend_dev_name(dev), "CUDA", 4) != 0) {
+                throw std::runtime_error("IK_PEER_GATES requires a CUDA peer");
+            }
+            auto * gate = layer.wqkv_gate;
+            if (gate && gate->type == GGML_TYPE_IQ4_NL && gate->ne[0] == 2304 && gate->ne[1] == 3072) {
+                auto * buft = ggml_backend_dev_buffer_type(dev);
+                auto * peer = ggml_dup_tensor(fused_context(), gate);
+                ggml_format_name(peer, "blk.%d.attn_gate.peer", i);
+                ggml_backend_buffer_ptr buf { ggml_backend_buft_alloc_buffer(buft, ggml_backend_buft_get_alloc_size(buft, peer)) };
+                if (!buf || ggml_backend_view_init(gate) != GGML_STATUS_SUCCESS ||
+                        ggml_backend_tensor_alloc(buf.get(), peer, ggml_backend_buffer_get_base(buf.get())) != GGML_STATUS_SUCCESS) {
+                    throw std::runtime_error("inkling2: failed to allocate peer attention gates");
+                }
+                ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+                ggml_backend_tensor_copy(gate, peer);
+                fa.peer_gate = peer;
+                fused_bufs.emplace_back(std::move(buf));
+            }
+        }
+
         fa.q = ggml_view_2d(fused_context(), fa.w, n_embd, fa.n_q, row_size, 0);
         fa.k = ggml_view_2d(fused_context(), fa.w, n_embd, fa.n_k, row_size, fa.n_q*row_size);
         fa.v = ggml_view_2d(fused_context(), fa.w, n_embd, fa.n_v, row_size, (fa.n_q + fa.n_k)*row_size);
@@ -1085,6 +1107,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
                         ik_set_param(cur, 14, mr_planes);
                         ik_set_param(cur, 15, mr_plane_cells);
                     }
+                    cur->extra = fa.peer_gate;
                     cb(cur, "attn_gated", il);
                     // the V cell indices are set with the K ones: keep their input allocated
                     ggml_build_forward_expand(gf, is_swa ? attn->get_v_idxs_swa() : attn->get_v_idxs());
