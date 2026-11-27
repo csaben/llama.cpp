@@ -254,11 +254,6 @@ void ggml_cuda_mul_mat_q(
 
             // Each expert only sees ne12*n_expert_used/ne02 tokens on average.
             ncols_opt = (ne12*n_expert_used + ne02 - 1) / ne02;
-            static const int inkling_mma = getenv("IK_MMA") ? atoi(getenv("IK_MMA")) : 0;
-            if ((inkling_mma & 4) && cc == GGML_CUDA_CC_AMPERE_GA10X && src0->type == GGML_TYPE_Q2_0 &&
-                    ne00 == 1152 && ne01 == 2304 && ne02 == 128 && n_expert_used == 8 && ne12 == 512) {
-                ncols_opt = 40;
-            }
         }
 
         J_best = ggml_cuda_mmq_get_J_best(src0->type, ncols_opt, fallback, cc, smpbo, prec_src1, &nthreads_best);
