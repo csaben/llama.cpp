@@ -2527,6 +2527,7 @@ struct llama_model_inkling2 : public llama_model_base {
         std::vector<std::pair<std::string, int64_t>> pieces;
     };
     ggml_tensor * output_half[2] = {};
+    ggml_tensor * peer_tokens[2] = {};
     std::vector<std::array<ggml_tensor *, 2>> peer_experts;
     std::vector<attn_fused> fused_attn; // indexed by physical layer; w == nullptr: not fused
     // the q, k, v input norms of a full-attention layer stacked as [n_embd, 3] (nullptr for SWA layers)

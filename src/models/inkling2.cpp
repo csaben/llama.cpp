@@ -313,6 +313,26 @@ void llama_model_inkling2::load_fused(llama_model_loader & ml) {
 void llama_model_inkling2::load_arch_tensors_post(llama_model_loader & ml) {
     const int64_t n_embd = hparams.n_embd;
 
+    if (const char * name = getenv("IK_PEER_ANCHOR")) {
+        auto * dev = ggml_backend_dev_by_name(name);
+        if (!dev || strncmp(ggml_backend_dev_name(dev), "CUDA", 4) != 0) {
+            throw std::runtime_error("IK_PEER_ANCHOR requires a CUDA peer");
+        }
+        auto * buft = ggml_backend_dev_buffer_type(dev);
+        ggml_tensor * src[] = {tok_embd, tok_norm};
+        for (int i = 0; i < 2; ++i) {
+            auto * t = ggml_dup_tensor(fused_context(), src[i]);
+            ggml_backend_buffer_ptr buf { ggml_backend_buft_alloc_buffer(buft, ggml_backend_buft_get_alloc_size(buft, t)) };
+            if (!buf || ggml_backend_tensor_alloc(buf.get(), t, ggml_backend_buffer_get_base(buf.get())) != GGML_STATUS_SUCCESS) {
+                throw std::runtime_error("inkling2: failed to allocate peer draft embeddings");
+            }
+            ggml_format_name(t, "draft.%s", src[i]->name);
+            ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            ggml_backend_tensor_copy(src[i], t);
+            peer_tokens[i] = t;
+            fused_bufs.emplace_back(std::move(buf));
+        }
+    }
     const char * peer_name = getenv("IK_PEER_HEAD");
     if (peer_name && output && output->ne[1] % 2 == 0) {
         auto * peer = ggml_backend_dev_by_name(peer_name);
