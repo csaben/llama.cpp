@@ -33,15 +33,24 @@ if [[ $placement != one ]]; then
         *) exit 2;;
     esac
 fi
+if [[ ${P11_TELEMETRY:-0} == 1 ]]; then
+    cards=1
+    if [[ $placement != one ]]; then cards=1,0; fi
+    mkdir -p build/p11a/telemetry
+    nvidia-smi -i "$cards" --query-compute-apps=gpu_uuid,pid,used_gpu_memory --format=csv >"build/p11a/telemetry/$label.residents"
+    nvidia-smi -i "$cards" --query-gpu=timestamp,index,memory.used,temperature.gpu,clocks.current.sm,clocks.current.memory,utilization.gpu --format=csv,noheader,nounits -lms 500 >"build/p11a/telemetry/$label.csv" &
+    stats=$!
+    trap 'kill "$stats" 2>/dev/null || :; wait "$stats" || :' EXIT
+fi
 if [[ $mode == bench ]]; then
     unset IK_MR IK_MMA
-    build/bin/llama-bench -m "$MODEL" -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -ot token_embd.weight=CUDA0 -b 2048 -ub 512 -o json "${args[@]}" "$@" >"$SPEC_OUT/$label.json" 2>"$SPEC_SERVER_LOG"
+    build/bin/llama-bench -m "$MODEL" -ngl 99 -fa 1 -ctk q8_0 -ctv q8_0 -ot token_embd.weight=CUDA0 -b 2048 -ub "${P11_UB:-512}" -o json "${args[@]}" "$@" >"$SPEC_OUT/$label.json" 2>"$SPEC_SERVER_LOG"
 else
     export LLAMA_DSPARK_POLICY=${P11_POLICY:-1}
     if [[ ${P11_ADAPT:-1} == 1 ]]; then export LLAMA_DSPARK_ADAPTIVE=1; else unset LLAMA_DSPARK_ADAPTIVE; fi
-    args+=(--backend-sampling -b 2048 -ub 512 --alias inkling-mini)
+    args+=(--backend-sampling -b 2048 -ub "${P11_UB:-512}" --alias inkling-mini)
     if [[ $mode == draft ]]; then
-        args+=(--spec-type draft-dspark --spec-draft-model "$P8_DRAFT" --spec-draft-n-max "${P11_WIDTH:-6}" --spec-draft-n-ubatch 512 --spec-draft-p-min 0 "${draft_args[@]}")
+        args+=(--spec-type draft-dspark --spec-draft-model "$P8_DRAFT" --spec-draft-n-max "${P11_WIDTH:-6}" --spec-draft-n-ubatch "${P11_DRAFT_UB:-512}" --spec-draft-p-min 0 "${draft_args[@]}")
     else
         [[ $mode == plain ]]
     fi

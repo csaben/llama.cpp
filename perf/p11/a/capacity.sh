@@ -28,12 +28,12 @@ if [[ $placement != one ]]; then
         draft_args=(--spec-draft-device CUDA0)
     fi
 fi
-if [[ $mode == draft ]]; then args+=(--spec-type draft-dspark --spec-draft-model "$P8_DRAFT" --spec-draft-n-max 6 --spec-draft-n-ubatch 512 --spec-draft-p-min 0 "${draft_args[@]}"); fi
+if [[ $mode == draft ]]; then args+=(--spec-type draft-dspark --spec-draft-model "$P8_DRAFT" --spec-draft-n-max 6 --spec-draft-n-ubatch "${P11_DRAFT_UB:-512}" --spec-draft-p-min 0 "${draft_args[@]}"); fi
 out=perf/p11/a/capacity/$label
 mkdir -p perf/p11/a/capacity build/p11a/capacity
 log=build/p11a/capacity/$label.server
 ulimit -c 0
-"$snap/llama-server" -m "$model" --mmproj "$HOME/models/inkling-2-mini/mmproj-Inkling-2-Mini-Q8_0.gguf" -c "$ctx" -np 1 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --backend-sampling --host 127.0.0.1 --port 18502 --alias inkling-mini -lv 4 "${args[@]}" >"$log" 2>&1 &
+"$snap/llama-server" -m "$model" --mmproj "$HOME/models/inkling-2-mini/mmproj-Inkling-2-Mini-Q8_0.gguf" -c "$ctx" -np 1 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub "${P11_UB:-512}" --backend-sampling --host 127.0.0.1 --port 18502 --alias inkling-mini -lv 4 "${args[@]}" >"$log" 2>&1 &
 pid=$!
 nvidia-smi -i "$cards" --query-gpu=timestamp,index,memory.used,memory.free --format=csv,noheader,nounits -lms 250 >"build/p11a/capacity/$label.vram" &
 monitor=$!

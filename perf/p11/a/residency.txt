@@ -1,0 +1,4 @@
+Fri Nov 27 02:07:27 EST 2026
+0, 00000000:01:00.0, 24576 MiB, 22501 MiB, 1669 MiB
+1358328, /home/arelius/llama.cpp/build/bin/llama-server, 21354 MiB
+physical GPU1: same process, 6106 MiB at 02:07:55 EST
