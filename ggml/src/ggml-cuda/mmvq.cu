@@ -2550,7 +2550,14 @@ bool ggml_cuda_ik_mmvq_mr(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             if (src0->type == GGML_TYPE_Q2_K && (ik_mma_mode() & 2)) {
 #define IK_Q2K_MOE(NCV) ik_q2k_moe<NCV><<<grid, block, 0, stream>>>((const uint8_t *) src0->data, y, ids_d, mma_dst, src0->nb[1], src0->nb[2], \
         n_tok, ids_stride, y_tok, y_slot, d_tok, d_slot)
-                if (n_tok == 1) { IK_Q2K_MOE(1); } else if (n_tok == 2) { IK_Q2K_MOE(2); } else if (n_tok <= 4) { IK_Q2K_MOE(4); } else { IK_Q2K_MOE(8); }
+                const bool exact_width = (ik_mma_mode() & 4) && cc == GGML_CUDA_CC_AMPERE_GA10X;
+                if      (n_tok == 1)                { IK_Q2K_MOE(1); }
+                else if (n_tok == 2)                { IK_Q2K_MOE(2); }
+                else if (n_tok <= 4)                { IK_Q2K_MOE(4); }
+                else if (exact_width && n_tok == 5) { IK_Q2K_MOE(5); }
+                else if (exact_width && n_tok == 6) { IK_Q2K_MOE(6); }
+                else if (exact_width && n_tok == 7) { IK_Q2K_MOE(7); }
+                else                                { IK_Q2K_MOE(8); }
 #undef IK_Q2K_MOE
             } else if (src0->type == GGML_TYPE_Q2_K) {
                 if (n_tok == 1) { IK_MMA_MOE(GGML_TYPE_Q2_K, 1); } else { IK_MMA_MOE(GGML_TYPE_Q2_K, 8); }
