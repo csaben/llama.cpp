@@ -1,0 +1,8 @@
+short code 3000 IDs, identical complete message, ID SHA256 1cef83cdf49e797ed93e83967e96822012389c47cc680e4b7ae2ebeee59f09c1
+short edit 3000 IDs, identical complete message, ID SHA256 8ed78cc13acad28e59eaefefd29f1ad21077b7539cce7733d008dd3eac17b65f
+short prose 3000 IDs, identical complete message, ID SHA256 461ff78e1d6bea0def16da8c97ee37379f5bc477526d76810f899b4cf0504411
+short agent 3000 IDs, identical complete message, ID SHA256 076e151d47556cb6685c04d9262c74bc2b70e85af893bd1b8c8b9b2bcce56747
+p9-128k-dspark-edit-127872.json identical complete message and 3000 IDs, 92.09/206.79 tok/s plain/DSpark
+p9-slot-196608-dspark-edit-193408.json identical complete message and 3000 IDs, 78.51/174.42 tok/s plain/DSpark
+p9-slot-229376-dspark-edit-226176.json identical complete message and 3000 IDs, 67.42/147.26 tok/s plain/DSpark
+initial 384-token matrix: 36 drafted cells, 108 replies, 41472 IDs. All hashes, repeat counts, messages and IDs matched their controls.

@@ -1,3 +1,9 @@
+# Phase 11
+
+Stream B staged the byte-identical p9 runtime at `~/inkling-live-bin-p11b-72fd097` for the uncensored 2-bit model on GPU0. Its manual deployment selects 128K, port 8031, alias `inkling-mini` and the Q8 vision projector. The snapshot passed all nine hashes and eight library-resolution checks. The deploy script was syntax-checked and left unexecuted. [Stream B report](p11/b/REPORT.md), [manifest](p11/b/snapshot.sha256), [deployment](live/deploy-p11b.sh).
+
+The experimental source at `p11b-wide-verify` retains an opt-in exact-width Q2_K kernel for five to seven rows and an opt-in lower DSpark verify-cost prior. A 40-column prefill tile was removed after replaying model routing. Separate native release qualification was interrupted when another server occupied 21,354 MiB of GPU0. The report records which numerical and performance checks completed. [Tuning evidence](p11/b/REPORT.md#profiles-and-tuning), [release checks](p11/b/REPORT.md#verification-and-gpu-availability).
+
 # Phase 9
 
 Local runtime `72fd097e` (`p9-runtime`) includes the three safe upstream fixes and direct Q8_0 tiles for SM86 Inkling prefill. At 16K the final profile had zero whole-cache conversions against 3,072 frozen. At 64K the compute buffer fell from 2,078 to 1,816 MiB and process memory fell from 13,034 to 12,772 MiB. Prefill PPL remained 3.0530. The 16K tool turn measured 5.673 s plain and 5.796 s at cap 6.
