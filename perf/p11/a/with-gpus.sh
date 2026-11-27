@@ -11,14 +11,14 @@ if [[ $placement == one ]]; then
     exec flock "$local_lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 bash -c "$guard" guard "$repo" "$@"
 fi
 # Release GPU0 immediately if a Stream A one-card check is using GPU1.
-while [[ ! -e "$repo/perf/STOP" ]]; do
+while [[ ! -e "$repo/perf/STOP" && $(date +%s) -lt $(date -d "2026-11-27 07:30 EST" +%s) ]]; do
     if flock "$shared_lock" flock -n -E 73 "$local_lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1,0 bash -c "$guard" guard "$repo" "$@"; then
         exit 0
     else
         rc=$?
         [[ $rc == 73 ]] || exit "$rc"
     fi
-    # Reserve the next GPU1 turn before rejoining the shared queue.
-    exec flock "$local_lock" flock "$shared_lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1,0 bash -c "$guard" guard "$repo" "$@"
+    # Wait for the active GPU1 check, then join the shared queue without reserving GPU1.
+    flock "$local_lock" true
 done
 exit 75

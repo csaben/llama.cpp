@@ -11,7 +11,8 @@ for ctx in "$@"; do
     label="$name-$ctx"
     if perf/p11/a/capacity.sh "$place" draft "$label" "$ctx" "$depth" 3000; then
         ref="p9-ref-$ctx"
-        if [[ $ctx == 131072 ]]; then ref=p9-128-plain; fi
+        if [[ ${P11_UB:-512} != 512 ]]; then ref="p9-ref-ub$P11_UB-$ctx";
+        elif [[ $ctx == 131072 ]]; then ref=p9-128-plain; fi
         if [[ ! -s perf/p11/a/capacity/$ref.timings ]]; then
             env -u IK_PEER_NATIVE -u IK_PEER_DIRECT -u IK_PEER_HEAD P11_BIN="$HOME/inkling-live-bin-p9-72fd097" perf/p11/a/capacity.sh one plain "$ref" "$ctx" "$depth" 3000
         fi
