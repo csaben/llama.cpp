@@ -30,7 +30,7 @@ case $mode in
         exec bash perf/p8bc/probe.sh "$out" "$label" "$width" -b 2048 -ub "$ubatch" --alias inkling-mini "${extra[@]}" "${@:7}" ;;
     logits) exec build/p11/p9-tools/logits "$MODEL" perf/ppl.txt "$@" ;;
     ops) exec build/bin/test-backend-ops test -b CUDA0 "$@" ;;
-    ppl) exec build/p11/p9-tools/llama-perplexity "${args[@]}" -fa on -f perf/ppl.txt "$@" ;;
-    mr) exec build/p11/p9-tools/mr_check "$MODEL" "$@" ;;
+    ppl) exec "${B_PPL_TOOL:-build/p11/p9-tools/llama-perplexity}" "${args[@]}" -fa on -f perf/ppl.txt "$@" ;;
+    mr) exec "${B_MR_TOOL:-build/p11/p9-tools/mr_check}" "$MODEL" "$@" ;;
     *) exit 2 ;;
 esac
