@@ -10,5 +10,12 @@ guard='[[ ! -e "$1/perf/STOP" && $(date +%s) -lt $(date -d "${P11_UNTIL:-2026-11
 if [[ $placement == one ]]; then
     exec flock "$local_lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 bash -c "$guard" guard "$repo" "$@"
 fi
-# Queue one A check at a time. Only request GPU0 once GPU1 belongs to this check.
+# Leave GPU1 available while Stream B works. Release GPU0 at once if a one-card check is running.
+if flock "$shared_lock" flock -n -E 73 "$local_lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1,0 bash -c "$guard" guard "$repo" "$@"; then
+    exit 0
+else
+    rc=$?
+    [[ $rc == 73 ]] || exit "$rc"
+fi
+# After a collision, reserve the next GPU1 turn before rejoining the shared queue.
 exec flock "$local_lock" flock "$shared_lock" env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1,0 bash -c "$guard" guard "$repo" "$@"
