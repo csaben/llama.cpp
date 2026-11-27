@@ -25,7 +25,7 @@ case $suite in
         for prefix in 2000 2046 2558 3069 4094 4500; do
             MR_RAND=37 MR_SIZES=2,3,4,5 MR_PLAIN_PCT=15 MR_PLAIN_RUN=8 "$check" peer mr "$name-rand-$prefix" "$prefix" 64
         done
-        MR_RS=6 MR_RAND=37 MR_SIZES=2,3,4,5,6,7 MR_PLAIN_PCT=15 MR_PLAIN_RUN=8 "$check" peer mr "$name-widths" 16384 96;;
+        MR_CTX=18432 MR_RS=6 MR_RAND=37 MR_SIZES=2,3,4,5,6,7 MR_PLAIN_PCT=15 MR_PLAIN_RUN=8 "$check" peer mr "$name-widths" 16384 96;;
     logits)
         for mode in 0 1; do
             for depth in 1 4096 16384 32768 65528; do
